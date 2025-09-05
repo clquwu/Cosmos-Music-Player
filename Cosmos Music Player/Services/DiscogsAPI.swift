@@ -135,7 +135,7 @@ class CachedArtistInfo: NSObject, Codable {
 
 // MARK: - Discogs API Service
 
-class DiscogsAPIService: ObservableObject {
+class DiscogsAPIService: ObservableObject, @unchecked Sendable {
     @MainActor static let shared = DiscogsAPIService()
     
     private let consumerKey = EnvironmentLoader.shared.discogsConsumerKey

@@ -122,6 +122,20 @@
 "find_cosmos_player_folder" = "Find Cosmos Player Folder";
 "add_your_music_instruction" = "Add Your Music";
 
+/* Tutorial Status Messages */
+"signed_in_to_apple_id" = "Signed in to Apple ID";
+"not_signed_in_to_apple_id" = "Not signed in to Apple ID";
+"cannot_detect_apple_id_status" = "Cannot detect Apple ID status";
+"icloud_drive_enabled" = "iCloud Drive is enabled";
+"icloud_drive_not_enabled" = "iCloud Drive is not enabled";
+"cannot_detect_icloud_status" = "Cannot detect iCloud Drive status";
+
+/* Tutorial Instructions */
+"find_open_files_app" = "Find and open the Files app on your device";
+"tap_icloud_drive_sidebar" = "Tap on 'iCloud Drive' in the sidebar";
+"look_for_cosmos_folder" = "Look for the 'Cosmos Player' folder and open it";
+"copy_music_files" = "Copy your FLAC or MP3 files into this folder";
+
 /* Library Processing */
 "found_tracks" = "Found %d tracks";
 "processing_colon" = "🎵 Processing:";

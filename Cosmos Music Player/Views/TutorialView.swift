@@ -80,11 +80,11 @@ struct AppleIDStepView: View {
     
     private var statusMessage: String {
         if viewModel.isSignedIntoAppleID {
-            return "Signed in to Apple ID"
+            return Localized.signedInToAppleId
         } else if viewModel.appleIDDetectionFailed {
-            return "Cannot detect Apple ID status"
+            return Localized.cannotDetectAppleIdStatus
         } else {
-            return "Not signed in to Apple ID"
+            return Localized.notSignedInToAppleId
         }
     }
     
@@ -202,11 +202,11 @@ struct iCloudDriveStepView: View {
     
     private var statusMessage: String {
         if viewModel.isiCloudDriveEnabled {
-            return "iCloud Drive is enabled"
+            return Localized.icloudDriveEnabled
         } else if viewModel.iCloudDetectionFailed {
-            return "Cannot detect iCloud Drive status"
+            return Localized.cannotDetectIcloudStatus
         } else {
-            return "iCloud Drive is not enabled"
+            return Localized.icloudDriveNotEnabled
         }
     }
     
@@ -335,25 +335,25 @@ struct MusicFilesStepView: View {
                     InstructionRow(
                         step: "1",
                         title: Localized.openFilesApp,
-                        description: "Find and open the Files app on your device"
+                        description: Localized.findOpenFilesApp
                     )
                     
                     InstructionRow(
                         step: "2",
                         title: Localized.navigateToIcloudDrive,
-                        description: "Tap on 'iCloud Drive' in the sidebar"
+                        description: Localized.tapIcloudDriveSidebar
                     )
                     
                     InstructionRow(
                         step: "3",
                         title: Localized.findCosmosPlayerFolder,
-                        description: "Look for the 'Cosmos Player' folder and open it"
+                        description: Localized.lookForCosmosFolder
                     )
                     
                     InstructionRow(
                         step: "4",
                         title: Localized.addYourMusicInstruction,
-                        description: "Copy your FLAC or MP3 files into this folder"
+                        description: Localized.copyMusicFiles
                     )
                 }
                 .padding(.horizontal, 20)

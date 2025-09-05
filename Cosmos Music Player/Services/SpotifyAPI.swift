@@ -147,7 +147,7 @@ class SpotifyAccessToken {
 
 // MARK: - Spotify API Service
 
-class SpotifyAPIService: ObservableObject {
+class SpotifyAPIService: ObservableObject, @unchecked Sendable {
     @MainActor static let shared = SpotifyAPIService()
     
     private let clientId = EnvironmentLoader.shared.spotifyClientId

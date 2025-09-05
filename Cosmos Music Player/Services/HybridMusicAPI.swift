@@ -123,7 +123,7 @@ extension MusicAPISource: Codable {}
 
 // MARK: - Hybrid Music API Service
 
-class HybridMusicAPIService: ObservableObject {
+class HybridMusicAPIService: ObservableObject, @unchecked Sendable {
     @MainActor static let shared = HybridMusicAPIService()
     
     private let discogsAPI: DiscogsAPIService

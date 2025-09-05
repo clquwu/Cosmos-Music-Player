@@ -137,6 +137,20 @@ struct Localized {
     static let findCosmosPlayerFolder = "find_cosmos_player_folder".localized
     static let addYourMusicInstruction = "add_your_music_instruction".localized
     
+    // MARK: - Tutorial Status Messages
+    static let signedInToAppleId = "signed_in_to_apple_id".localized
+    static let notSignedInToAppleId = "not_signed_in_to_apple_id".localized
+    static let cannotDetectAppleIdStatus = "cannot_detect_apple_id_status".localized
+    static let icloudDriveEnabled = "icloud_drive_enabled".localized
+    static let icloudDriveNotEnabled = "icloud_drive_not_enabled".localized
+    static let cannotDetectIcloudStatus = "cannot_detect_icloud_status".localized
+    
+    // MARK: - Tutorial Instructions
+    static let findOpenFilesApp = "find_open_files_app".localized
+    static let tapIcloudDriveSidebar = "tap_icloud_drive_sidebar".localized
+    static let lookForCosmosFolder = "look_for_cosmos_folder".localized
+    static let copyMusicFiles = "copy_music_files".localized
+    
     // MARK: - Library Processing
     static let processingColon = "processing_colon".localized
     static let waitingColon = "waiting_colon".localized
