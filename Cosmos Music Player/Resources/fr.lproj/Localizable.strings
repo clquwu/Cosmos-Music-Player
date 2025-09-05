@@ -87,6 +87,7 @@
 "version" = "Version";
 "app_name" = "Nom de l'app";
 "cosmos_music_player" = "Cosmos Music Player";
+"github_repository" = "Dépôt GitHub";
 "use_simple_icons" = "Utilisez des icônes simples sans arrière-plans colorés dans les sections de la bibliothèque.";
 "override_system_appearance" = "Remplacer l'apparence du système et forcer l'application à utiliser le mode sombre.";
 "background_color" = "Couleur d'arrière-plan";

@@ -102,6 +102,7 @@ struct Localized {
     static let version = "version".localized
     static let appName = "app_name".localized
     static let cosmosMusicPlayer = "cosmos_music_player".localized
+    static let githubRepository = "github_repository".localized
     static let useSimpleIcons = "use_simple_icons".localized
     static let overrideSystemAppearance = "override_system_appearance".localized
     static let backgroundColor = "background_color".localized

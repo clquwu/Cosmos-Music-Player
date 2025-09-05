@@ -83,6 +83,21 @@ struct SettingsView: View {
                         Text(Localized.cosmosMusicPlayer)
                             .foregroundColor(.secondary)
                     }
+                    
+                    Button(action: {
+                        if let url = URL(string: "https://github.com/clquwu/Cosmos-Music-Player") {
+                            UIApplication.shared.open(url)
+                        }
+                    }) {
+                        HStack {
+                            Text(Localized.githubRepository)
+                                .foregroundColor(.primary)
+                            Spacer()
+                            Image(systemName: "arrow.up.right.square")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 16))
+                        }
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom) {
