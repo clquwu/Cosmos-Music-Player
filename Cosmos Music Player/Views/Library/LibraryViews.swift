@@ -1,0 +1,1073 @@
+import SwiftUI
+import GRDB
+import UniformTypeIdentifiers
+
+struct LibraryView: View {
+    let tracks: [Track]
+    @Binding var showTutorial: Bool
+    @Binding var showPlaylistManagement: Bool
+    @Binding var showSettings: Bool
+    let onRefresh: () async -> Void
+    let onManualSync: (() async -> Void)?
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @StateObject private var libraryIndexer = LibraryIndexer.shared
+    @State private var artistToNavigate: Artist?
+    @State private var artistAllTracks: [Track] = []
+    @State private var searchArtistToNavigate: Artist?
+    @State private var searchArtistTracks: [Track] = []
+    @State private var searchAlbumToNavigate: Album?
+    @State private var searchAlbumTracks: [Track] = []
+    @State private var searchPlaylistToNavigate: Playlist?
+    @State private var showSearch = false
+    @State private var settings = DeleteSettings.load()
+    
+    var body: some View {
+        NavigationStack {
+                ZStack {
+                    ScreenSpecificBackgroundView(screen: .library)
+                    
+                    VStack(spacing: 0) {
+                
+                // Compact processing status at the top of library
+                if libraryIndexer.isIndexing && !libraryIndexer.currentlyProcessing.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 12, height: 12)
+                        
+                        Text("\(Localized.processing): \(libraryIndexer.currentlyProcessing)")
+                            .font(.caption2)
+                            .foregroundColor(settings.backgroundColorChoice.color)
+                            .lineLimit(1)
+                        
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(settings.backgroundColorChoice.color.opacity(0.05))
+                }
+                
+                // Large section rows
+                ScrollView {
+                    VStack(spacing: 16) {
+                        // Library title with icons that scrolls with content
+                        HStack(alignment: .center) {
+                            Text(Localized.library)
+                                .font(.largeTitle)
+                                .fontWeight(.bold)
+                                .foregroundColor(.primary)
+                            
+                            Spacer()
+                            
+                            HStack(spacing: 20) {
+                                // Sync button (if available)
+                                if let onManualSync = onManualSync {
+                                    Button(action: {
+                                        Task {
+                                            await onManualSync()
+                                        }
+                                    }) {
+                                        Image(systemName: "arrow.clockwise")
+                                            .font(.system(size: 26, weight: .medium))
+                                            .foregroundColor(settings.backgroundColorChoice.color)
+                                            .padding(.bottom, 4)
+                                    }
+                                }
+                                
+                                // Search button (center)
+                                Button(action: {
+                                    showSearch = true
+                                }) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 26, weight: .medium))
+                                        .foregroundColor(settings.backgroundColorChoice.color)
+                                }
+                                
+                                // Settings button
+                                Button(action: {
+                                    showSettings = true
+                                }) {
+                                    Image(systemName: "gearshape")
+                                        .font(.system(size: 26, weight: .medium))
+                                        .foregroundColor(settings.backgroundColorChoice.color)
+                                }
+                            }
+                        }
+                        .padding(.leading, 4)
+                        .padding(.trailing, 4)
+                        NavigationLink {
+                            AllSongsScreen(tracks: tracks)
+                        } label: {
+                            LibrarySectionRowView(
+                                title: Localized.allSongs,
+                                subtitle: Localized.songsCountOnly(tracks.count),
+                                icon: "music.note",
+                                color: settings.backgroundColorChoice.color
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        
+                        NavigationLink {
+                            LikedSongsScreen(allTracks: tracks)
+                        } label: {
+                            LibrarySectionRowView(
+                                title: Localized.likedSongs,
+                                subtitle: Localized.yourFavorites,
+                                icon: "heart.fill",
+                                color: .red
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        
+                        NavigationLink {
+                            PlaylistsScreen()
+                        } label: {
+                            LibrarySectionRowView(
+                                title: Localized.playlists,
+                                subtitle: Localized.yourPlaylists,
+                                icon: "music.note.list",
+                                color: .green
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        
+                        NavigationLink {
+                            ArtistsScreen(allTracks: tracks)
+                        } label: {
+                            LibrarySectionRowView(
+                                title: Localized.artists,
+                                subtitle: Localized.browseByArtist,
+                                icon: "person.2.fill",
+                                color: .purple
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        
+                        NavigationLink {
+                            AlbumsScreen(allTracks: tracks)
+                        } label: {
+                            LibrarySectionRowView(
+                                title: Localized.albums,
+                                subtitle: Localized.browseByAlbum,
+                                icon: "opticaldisc.fill",
+                                color: .orange
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        
+                        Button(action: {
+                            // Try to open iCloud Drive directly first
+                            if let iCloudURL = URL(string: "com-apple-CloudDocs://") {
+                                UIApplication.shared.open(iCloudURL) { success in
+                                    if !success {
+                                        // Fall back to Files app if iCloud Drive doesn't open
+                                        if let filesURL = URL(string: "shareddocuments://") {
+                                            UIApplication.shared.open(filesURL)
+                                        }
+                                    }
+                                }
+                            } else if let filesURL = URL(string: "shareddocuments://") {
+                                UIApplication.shared.open(filesURL)
+                            }
+                        }) {
+                            LibrarySectionRowView(
+                                title: Localized.addSongs,
+                                subtitle: Localized.importMusicFiles,
+                                icon: "plus.circle.fill",
+                                color: .blue
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    .padding(16)
+                    .padding(.bottom, 100) // Add padding for mini player
+                }
+            }
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.large)
+            .refreshable {
+                await onRefresh()
+            }
+            
+            // Hidden NavigationLink for programmatic navigation from player
+            NavigationLink(
+                destination: artistToNavigate.map { artist in
+                    ArtistDetailScreenWrapper(artistName: artist.name, allTracks: artistAllTracks)
+                },
+                isActive: Binding(
+                    get: { artistToNavigate != nil },
+                    set: { if !$0 { artistToNavigate = nil } }
+                )
+            ) {
+                EmptyView()
+            }
+            .hidden()
+            
+            }
+            .navigationDestination(isPresented: Binding(
+                get: { searchArtistToNavigate != nil },
+                set: { if !$0 { searchArtistToNavigate = nil } }
+            )) {
+                if let artist = searchArtistToNavigate {
+                    
+                    ArtistDetailScreen(artist: artist, allTracks: searchArtistTracks)
+                }
+            }
+            .navigationDestination(isPresented: Binding(
+                get: { searchAlbumToNavigate != nil },
+                set: { if !$0 { searchAlbumToNavigate = nil } }
+            )) {
+                if let album = searchAlbumToNavigate {
+                    AlbumDetailScreen(album: album, allTracks: searchAlbumTracks)
+                }
+            }
+            .navigationDestination(isPresented: Binding(
+                get: { searchPlaylistToNavigate != nil },
+                set: { if !$0 { searchPlaylistToNavigate = nil } }
+            )) {
+                if let playlist = searchPlaylistToNavigate {
+                    PlaylistDetailScreen(playlist: playlist)
+                }
+            }
+        }
+        .background(.clear)
+        .toolbarBackground(.clear, for: .navigationBar)
+        .toolbarBackground(.clear, for: .automatic)
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            settings = DeleteSettings.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToArtistFromPlayer"))) { notification in
+            if let userInfo = notification.userInfo,
+               let artist = userInfo["artist"] as? Artist,
+               let allTracks = userInfo["allTracks"] as? [Track] {
+                artistToNavigate = artist
+                artistAllTracks = allTracks
+            }
+        }
+        .sheet(isPresented: $showSearch) {
+            SearchView(
+                allTracks: tracks,
+                onNavigateToArtist: { artist, tracks in
+                    searchArtistToNavigate = artist
+                    searchArtistTracks = tracks
+                },
+                onNavigateToAlbum: { album, tracks in
+                    searchAlbumToNavigate = album
+                    searchAlbumTracks = tracks
+                },
+                onNavigateToPlaylist: { playlist in
+                    searchPlaylistToNavigate = playlist
+                }
+            )
+            .accentColor(settings.backgroundColorChoice.color)
+        }
+    }
+}
+
+struct LibrarySectionRowView: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+    @State private var settings = DeleteSettings.load()
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            // Icon
+            if settings.minimalistIcons {
+                Image(systemName: icon)
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundColor(.primary)
+                    .frame(width: 60, height: 60)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(color.opacity(0.2))
+                        .frame(width: 60, height: 60)
+                    
+                    Image(systemName: icon)
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundColor(color)
+                }
+            }
+            
+            // Text content
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+                
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            // Chevron
+            Image(systemName: "chevron.right")
+                .font(.body)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .background(
+            // Glassy background that reflects gradient
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+                .opacity(0.8)
+        )
+        .cornerRadius(12)
+        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            settings = DeleteSettings.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
+            settings = DeleteSettings.load()
+        }
+    }
+}
+
+struct AllSongsScreen: View {
+    let tracks: [Track]
+    
+    var body: some View {
+        ZStack {
+            ScreenSpecificBackgroundView(screen: .allSongs)
+            
+            TrackListView(tracks: tracks)
+        }
+        .navigationTitle(Localized.allSongs)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct LikedSongsScreen: View {
+    let allTracks: [Track]
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @State private var likedTracks: [Track] = []
+    
+    var body: some View {
+        ZStack {
+            ScreenSpecificBackgroundView(screen: .likedSongs)
+            
+            TrackListView(tracks: likedTracks)
+        }
+        .navigationTitle(Localized.likedSongs)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            loadLikedTracks()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            loadLikedTracks()
+        }
+    }
+    
+    private func loadLikedTracks() {
+        do {
+            let favoriteIds = try appCoordinator.getFavorites()
+            likedTracks = allTracks.filter { favoriteIds.contains($0.stableId) }
+        } catch {
+            print("Failed to load liked tracks: \(error)")
+        }
+    }
+}
+
+struct TrackListView: View {
+    let tracks: [Track]
+    let playlist: Playlist?
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    
+    init(tracks: [Track], playlist: Playlist? = nil) {
+        self.tracks = tracks
+        self.playlist = playlist
+    }
+    
+    var body: some View {
+        if tracks.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "music.note")
+                    .font(.system(size: 40))
+                    .foregroundColor(.secondary)
+                
+                Text(Localized.noSongsFound)
+                    .font(.headline)
+                
+                Text(Localized.yourMusicWillAppearHere)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(tracks, id: \.stableId) { track in
+                TrackRowView(track: track, onTap: {
+                    Task {
+                        // Update playlist access time if track is played from a playlist
+                        if let playlist = playlist, let playlistId = playlist.id {
+                            try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
+                            try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+                        }
+                        await appCoordinator.playTrack(track, queue: tracks)
+                    }
+                })
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.7)
+                )
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
+            .listStyle(PlainListStyle())
+            .scrollContentBackground(.hidden)
+            .safeAreaInset(edge: .bottom) {
+                Color.clear.frame(height: 100) // Space for mini player
+            }
+        }
+    }
+}
+
+// MARK: - Search View
+
+struct SearchView: View {
+    let allTracks: [Track]
+    let onNavigateToArtist: (Artist, [Track]) -> Void
+    let onNavigateToAlbum: (Album, [Track]) -> Void
+    let onNavigateToPlaylist: (Playlist) -> Void
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+    @State private var selectedCategory = SearchCategory.all
+    @State private var settings = DeleteSettings.load()
+    @FocusState private var isSearchFocused: Bool
+    
+    enum SearchCategory: String, CaseIterable {
+        case all = "All"
+        case songs = "Songs"
+        case artists = "Artists"
+        case albums = "Albums"
+        case playlists = "Playlists"
+        
+        var localizedString: String {
+            switch self {
+            case .all: return Localized.all
+            case .songs: return Localized.songs
+            case .artists: return Localized.artists
+            case .albums: return Localized.albums
+            case .playlists: return Localized.playlists
+            }
+        }
+    }
+    
+    private var searchResults: SearchResults {
+        if searchText.isEmpty {
+            return SearchResults()
+        }
+        
+        let lowercasedQuery = searchText.lowercased()
+        
+        // Search songs
+        let songs = allTracks.filter { track in
+            // Search by title
+            if track.title.lowercased().contains(lowercasedQuery) {
+                return true
+            }
+            
+            // Search by artist name
+            if let artistId = track.artistId,
+               let artist = try? DatabaseManager.shared.read({ db in
+                   try Artist.fetchOne(db, key: artistId)
+               }),
+               artist.name.lowercased().contains(lowercasedQuery) {
+                return true
+            }
+            
+            // Search by album name
+            if let albumId = track.albumId,
+               let album = try? DatabaseManager.shared.read({ db in
+                   try Album.fetchOne(db, key: albumId)
+               }),
+               album.title.lowercased().contains(lowercasedQuery) {
+                return true
+            }
+            
+            return false
+        }
+        
+        // Search artists
+        let artists: [Artist] = {
+            do {
+                let allArtists = try appCoordinator.getAllArtists()
+                return allArtists.filter { $0.name.lowercased().contains(lowercasedQuery) }
+            } catch {
+                return []
+            }
+        }()
+        
+        // Search albums
+        let albums: [Album] = {
+            do {
+                let allAlbums = try appCoordinator.getAllAlbums()
+                return allAlbums.filter { album in
+                    // Search by album title
+                    if album.title.lowercased().contains(lowercasedQuery) {
+                        return true
+                    }
+                    
+                    // Search by artist name
+                    if let artistId = album.artistId,
+                       let artist = try? DatabaseManager.shared.read({ db in
+                           try Artist.fetchOne(db, key: artistId)
+                       }),
+                       artist.name.lowercased().contains(lowercasedQuery) {
+                        return true
+                    }
+                    
+                    return false
+                }
+            } catch {
+                return []
+            }
+        }()
+        
+        // Search playlists
+        let playlists: [Playlist] = {
+            do {
+                let allPlaylists = try appCoordinator.databaseManager.getAllPlaylists()
+                return allPlaylists.filter { $0.title.lowercased().contains(lowercasedQuery) }
+            } catch {
+                return []
+            }
+        }()
+        
+        return SearchResults(songs: songs, artists: artists, albums: albums, playlists: playlists)
+    }
+    
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ScreenSpecificBackgroundView(screen: .library)
+                
+                VStack(spacing: 0) {
+                    // Search bar
+                    HStack {
+                        HStack {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundColor(.secondary)
+                            
+                            TextField("Search your library", text: $searchText)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .autocorrectionDisabled()
+                                .focused($isSearchFocused)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    
+                    // Category filters
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(SearchCategory.allCases, id: \.self) { category in
+                                Button(action: {
+                                    selectedCategory = category
+                                }) {
+                                    Text(category.localizedString)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            selectedCategory == category ?
+                                            settings.backgroundColorChoice.color :
+                                                Color(.systemGray6)
+                                        )
+                                        .foregroundColor(
+                                            selectedCategory == category ?
+                                                .white :
+                                                    .primary
+                                        )
+                                        .cornerRadius(20)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                    .padding(.top, 12)
+                    
+                    // Results
+                    if searchText.isEmpty {
+                        VStack(spacing: 16) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 40))
+                                .foregroundColor(.secondary)
+                            
+                            Text(Localized.searchYourMusicLibrary)
+                                .font(.headline)
+                            
+                            Text(Localized.findSongsArtistsAlbumsPlaylists)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        SearchResultsView(
+                            results: searchResults,
+                            selectedCategory: selectedCategory,
+                            allTracks: allTracks,
+                            onDismiss: { dismiss() },
+                            onNavigateToArtist: onNavigateToArtist,
+                            onNavigateToAlbum: onNavigateToAlbum,
+                            onNavigateToPlaylist: onNavigateToPlaylist
+                        )
+                    }
+                }
+                .navigationTitle(Localized.search)
+                .navigationBarTitleDisplayMode(.inline)
+                .navigationBarBackButtonHidden()
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(Localized.done) {
+                            dismiss()
+                        }
+                        .foregroundColor(settings.backgroundColorChoice.color)
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+                settings = DeleteSettings.load()
+            }
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    isSearchFocused = true
+                }
+            }
+        }
+    }
+    
+    struct SearchResults {
+        let songs: [Track]
+        let artists: [Artist]
+        let albums: [Album]
+        let playlists: [Playlist]
+        
+        init(songs: [Track] = [], artists: [Artist] = [], albums: [Album] = [], playlists: [Playlist] = []) {
+            self.songs = songs
+            self.artists = artists
+            self.albums = albums
+            self.playlists = playlists
+        }
+        
+        var isEmpty: Bool {
+            songs.isEmpty && artists.isEmpty && albums.isEmpty && playlists.isEmpty
+        }
+    }
+    
+    
+    struct SearchResultsView: View {
+        let results: SearchResults
+        let selectedCategory: SearchView.SearchCategory
+        let allTracks: [Track]
+        let onDismiss: () -> Void
+        let onNavigateToArtist: (Artist, [Track]) -> Void
+        let onNavigateToAlbum: (Album, [Track]) -> Void
+        let onNavigateToPlaylist: (Playlist) -> Void
+        @EnvironmentObject private var appCoordinator: AppCoordinator
+        @State private var settings = DeleteSettings.load()
+        
+        var body: some View {
+            if results.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "magnifyingglass.circle")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary)
+                    
+                    Text(Localized.noResultsFound)
+                        .font(.headline)
+                    
+                    Text(Localized.tryDifferentKeywords)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        if selectedCategory == .all || selectedCategory == .songs, !results.songs.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(Localized.songs)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                    .padding(.horizontal, 16)
+                                
+                                ForEach(results.songs, id: \.stableId) { track in
+                                    SearchSongRowView(track: track, allTracks: allTracks, onDismiss: onDismiss)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .fill(.ultraThinMaterial)
+                                                .opacity(0.7)
+                                        )
+                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                        .padding(.horizontal, 16)
+                                }
+                            }
+                        }
+                        
+                        if selectedCategory == .all || selectedCategory == .artists, !results.artists.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(Localized.artists)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                    .padding(.horizontal, 16)
+                                
+                                ForEach(results.artists, id: \.id) { artist in
+                                    SearchArtistRowView(
+                                        artist: artist, 
+                                        allTracks: allTracks, 
+                                        onDismiss: onDismiss,
+                                        onNavigate: onNavigateToArtist
+                                    )
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .fill(.ultraThinMaterial)
+                                                .opacity(0.7)
+                                        )
+                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                        .padding(.horizontal, 16)
+                                }
+                            }
+                        }
+                        
+                        if selectedCategory == .all || selectedCategory == .albums, !results.albums.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(Localized.albums)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                    .padding(.horizontal, 16)
+                                
+                                ForEach(results.albums, id: \.id) { album in
+                                    SearchAlbumRowView(
+                                        album: album, 
+                                        allTracks: allTracks, 
+                                        onDismiss: onDismiss,
+                                        onNavigate: onNavigateToAlbum
+                                    )
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .fill(.ultraThinMaterial)
+                                                .opacity(0.7)
+                                        )
+                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                        .padding(.horizontal, 16)
+                                }
+                            }
+                        }
+                        
+                        if selectedCategory == .all || selectedCategory == .playlists, !results.playlists.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(Localized.playlists)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                    .padding(.horizontal, 16)
+                                
+                                ForEach(results.playlists, id: \.id) { playlist in
+                                    SearchPlaylistRowView(
+                                        playlist: playlist, 
+                                        onDismiss: onDismiss,
+                                        onNavigate: onNavigateToPlaylist
+                                    )
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .fill(.ultraThinMaterial)
+                                                .opacity(0.7)
+                                        )
+                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                        .padding(.horizontal, 16)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 16)
+                }
+                .safeAreaInset(edge: .bottom) {
+                    Color.clear.frame(height: 100) // Space for mini player
+                }
+            }
+        }
+    }
+    
+    struct SearchSongRowView: View {
+        let track: Track
+        let allTracks: [Track]
+        let onDismiss: () -> Void
+        @EnvironmentObject private var appCoordinator: AppCoordinator
+        @State private var settings = DeleteSettings.load()
+        @State private var artworkImage: UIImage?
+        
+        var body: some View {
+            Button(action: {
+                onDismiss()
+                Task {
+                    await appCoordinator.playTrack(track, queue: allTracks)
+                }
+            }) {
+                HStack(spacing: 12) {
+                    // Album artwork
+                    Group {
+                        if let artworkImage = artworkImage {
+                            Image(uiImage: artworkImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 16))
+                                .foregroundColor(settings.backgroundColorChoice.color)
+                        }
+                    }
+                    .frame(width: 40, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .background(Color(.systemGray5))
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(track.title)
+                            .font(.body)
+                            .fontWeight(.medium)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .multilineTextAlignment(.leading)
+                        
+                        HStack(spacing: 4) {
+                            if let artistId = track.artistId,
+                               let artist = try? DatabaseManager.shared.read({ db in
+                                   try Artist.fetchOne(db, key: artistId)
+                               }) {
+                                Text(artist.name)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    if let duration = track.durationMs {
+                        Text(formatDuration(duration))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .onAppear {
+                loadArtwork()
+            }
+        }
+        
+        private func loadArtwork() {
+            Task {
+                artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+            }
+        }
+        
+        private func formatDuration(_ milliseconds: Int) -> String {
+            let seconds = milliseconds / 1000
+            let minutes = seconds / 60
+            let remainingSeconds = seconds % 60
+            return String(format: "%d:%02d", minutes, remainingSeconds)
+        }
+    }
+    
+    struct SearchArtistRowView: View {
+        let artist: Artist
+        let allTracks: [Track]
+        let onDismiss: () -> Void
+        let onNavigate: (Artist, [Track]) -> Void
+        @State private var settings = DeleteSettings.load()
+        
+        private var artistTracks: [Track] {
+            allTracks.filter { $0.artistId == artist.id }
+        }
+        
+        var body: some View {
+            Button(action: {
+                onDismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    onNavigate(artist, artistTracks)
+                }
+            }) {
+                HStack(spacing: 12) {
+                    Image(systemName: "person.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.purple)
+                        .frame(width: 24, height: 24)
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(artist.name)
+                            .font(.body)
+                            .fontWeight(.medium)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        
+                        Text(Localized.artist)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+    
+    struct SearchAlbumRowView: View {
+        let album: Album
+        let allTracks: [Track]
+        let onDismiss: () -> Void
+        let onNavigate: (Album, [Track]) -> Void
+        @State private var settings = DeleteSettings.load()
+        @State private var artworkImage: UIImage?
+        
+        private var albumTracks: [Track] {
+            allTracks.filter { $0.albumId == album.id }
+        }
+        
+        var body: some View {
+            Button(action: {
+                onDismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    onNavigate(album, albumTracks)
+                }
+            }) {
+                HStack(spacing: 12) {
+                    // Album artwork
+                    Group {
+                        if let artworkImage = artworkImage {
+                            Image(uiImage: artworkImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            Image(systemName: "opticaldisc.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .frame(width: 40, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .background(Color(.systemGray5))
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(album.title)
+                            .font(.body)
+                            .fontWeight(.medium)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        
+                        HStack(spacing: 4) {
+                            if let artistId = album.artistId,
+                               let artist = try? DatabaseManager.shared.read({ db in
+                                   try Artist.fetchOne(db, key: artistId)
+                               }) {
+                                Text(artist.name)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Text("• \(Localized.album)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Text(Localized.songsCountOnly(albumTracks.count))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .onAppear {
+                loadAlbumArtwork()
+            }
+        }
+        
+        private func loadAlbumArtwork() {
+            guard let firstTrack = albumTracks.first else { return }
+            Task {
+                artworkImage = await ArtworkManager.shared.getArtwork(for: firstTrack)
+            }
+        }
+    }
+    
+    struct SearchPlaylistRowView: View {
+        let playlist: Playlist
+        let onDismiss: () -> Void
+        let onNavigate: (Playlist) -> Void
+        @State private var settings = DeleteSettings.load()
+        
+        var body: some View {
+            Button(action: {
+                onDismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    onNavigate(playlist)
+                }
+            }) {
+                HStack(spacing: 12) {
+                    Image(systemName: "music.note.list")
+                        .font(.title2)
+                        .foregroundColor(.green)
+                        .frame(width: 24, height: 24)
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(playlist.title)
+                            .font(.body)
+                            .fontWeight(.medium)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        
+                        Text(Localized.playlist)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+}
+

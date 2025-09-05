@@ -1,0 +1,188 @@
+import SwiftUI
+
+struct ContentView: View {
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @StateObject private var playerEngine = PlayerEngine.shared
+    @StateObject private var libraryIndexer = LibraryIndexer.shared
+    
+    @State private var tracks: [Track] = []
+    @State private var selectedTab = 0
+    @State private var refreshTimer: Timer?
+    @State private var showTutorial = false
+    @State private var showPlaylistManagement = false
+    @State private var showSettings = false
+    @State private var settings = DeleteSettings.load()
+    
+    var body: some View {
+        mainContent
+            .background(.clear)
+            .preferredColorScheme(settings.forceDarkMode ? .dark : nil)
+            .accentColor(settings.backgroundColorChoice.color)
+            .modifier(LifecycleModifier(
+                appCoordinator: appCoordinator,
+                libraryIndexer: libraryIndexer,
+                refreshTimer: $refreshTimer,
+                showTutorial: $showTutorial,
+                onRefresh: refreshLibrary
+            ))
+            .modifier(OverlayModifier(
+                appCoordinator: appCoordinator
+            ))
+            .modifier(SheetModifier(
+                appCoordinator: appCoordinator,
+                showTutorial: $showTutorial,
+                showPlaylistManagement: $showPlaylistManagement,
+                showSettings: $showSettings
+            ))
+    }
+    
+    private var mainContent: some View {
+        LibraryView(
+            tracks: tracks, 
+            showTutorial: $showTutorial, 
+            showPlaylistManagement: $showPlaylistManagement, 
+            showSettings: $showSettings,
+            onRefresh: refreshLibrary,
+            onManualSync: performManualSync
+        )
+        .safeAreaInset(edge: .bottom) {
+            MiniPlayerView()
+                .background(.clear)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            Task {
+                await refreshLibrary()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            settings = DeleteSettings.load()
+        }
+    }
+    
+    @Sendable private func refreshLibrary() async {
+        do {
+            tracks = try appCoordinator.getAllTracks()
+        } catch {
+            print("Failed to refresh library: \(error)")
+        }
+    }
+    
+    @Sendable private func performManualSync() async {
+        await appCoordinator.manualSync()
+        await refreshLibrary()
+    }
+}
+
+struct LifecycleModifier: ViewModifier {
+    let appCoordinator: AppCoordinator
+    let libraryIndexer: LibraryIndexer
+    @Binding var refreshTimer: Timer?
+    @Binding var showTutorial: Bool
+    let onRefresh: @Sendable () async -> Void
+    
+    func body(content: Content) -> some View {
+        content
+            .task {
+                if appCoordinator.isInitialized {
+                    await onRefresh()
+                    if TutorialViewModel.shouldShowTutorial() {
+                        showTutorial = true
+                    }
+                }
+            }
+            .onChange(of: appCoordinator.isInitialized) { _, isInitialized in
+                if isInitialized {
+                    Task {
+                        await onRefresh()
+                        if TutorialViewModel.shouldShowTutorial() {
+                            showTutorial = true
+                        }
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TrackFound"))) { _ in
+                Task { await onRefresh() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+                Task { await onRefresh() }
+            }
+            .onChange(of: libraryIndexer.isIndexing) { _, isIndexing in
+                if isIndexing {
+                    refreshTimer?.invalidate()
+                    refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                        Task { await onRefresh() }
+                    }
+                } else {
+                    refreshTimer?.invalidate()
+                    refreshTimer = nil
+                    Task { await onRefresh() }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                // Save player state when app goes to background
+                appCoordinator.playerEngine.savePlayerState()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
+                // Save player state when app is terminated
+                appCoordinator.playerEngine.savePlayerState()
+            }
+    }
+}
+
+struct OverlayModifier: ViewModifier {
+    let appCoordinator: AppCoordinator
+    
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .top) {
+                if appCoordinator.isInitialized && appCoordinator.iCloudStatus == .offline {
+                    OfflineStatusView()
+                        .padding(.top)
+                }
+            }
+    }
+}
+
+struct SheetModifier: ViewModifier {
+    let appCoordinator: AppCoordinator
+    @Binding var showTutorial: Bool
+    @Binding var showPlaylistManagement: Bool
+    @Binding var showSettings: Bool
+    @State private var settings = DeleteSettings.load()
+    
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $showTutorial) {
+                TutorialView(onComplete: {
+                    showTutorial = false
+                })
+                .accentColor(settings.backgroundColorChoice.color)
+            }
+            .sheet(isPresented: $showPlaylistManagement) {
+                PlaylistManagementView()
+                    .accentColor(settings.backgroundColorChoice.color)
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
+                    .accentColor(settings.backgroundColorChoice.color)
+            }
+            .alert(Localized.libraryOutOfSync, isPresented: .init(
+                get: { appCoordinator.showSyncAlert },
+                set: { appCoordinator.showSyncAlert = $0 }
+            )) {
+                Button(Localized.ok) {
+                    appCoordinator.showSyncAlert = false
+                }
+            } message: {
+                Text(Localized.librarySyncMessage)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+                settings = DeleteSettings.load()
+            }
+    }
+}
+
+#Preview {
+    ContentView()
+        .environmentObject(AppCoordinator.shared)
+}

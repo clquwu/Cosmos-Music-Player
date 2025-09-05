@@ -1,0 +1,136 @@
+/* Playlist related strings */
+"playlists" = "Playlist";
+"no_playlists_yet" = "Aucune playlist";
+"create_playlists_instruction" = "Créez des playlist en y ajoutant des musiques depuis la bibliothèque";
+"add_to_playlist" = "Ajouter à la playlist";
+"create_new_playlist" = "Créer une nouvelle playlist";
+"create_playlist" = "Créer une playlist";
+"playlist_name_placeholder" = "Nom de la playlist";
+"enter_playlist_name" = "Entrez un nom pour votre nouvelle playlist";
+"delete_playlist" = "Supprimer la playlist";
+"delete_playlist_confirmation" = "Êtes-vous sûr de vouloir supprimer '%@' ? Cette action ne peut pas être annulée.";
+"delete" = "Supprimer";
+"cancel" = "Annuler";
+"create" = "Créer";
+"done" = "Terminé";
+"manage_playlists" = "Gérer les playlist";
+"playlist" = "Playlist";
+"songs_count_singular" = "%d musique";
+"songs_count_plural" = "%d musiques";
+"created_date" = "Créée le %@";
+"no_songs_found" = "Aucune musique trouvée";
+"your_music_will_appear_here" = "Votre musique apparaîtra ici";
+"create_first_playlist" = "Créez votre première playlist pour commencer";
+
+/* General UI strings */
+"all_songs" = "Vos musiques";
+"liked_songs" = "Musiques aimées";
+"add_songs" = "Ouvrir iDrive";
+"import_music_files" = "Importer des musiques";
+"ok" = "OK";
+"settings" = "Réglages";
+"retry" = "Réessayer";
+"open_settings" = "Ouvrir les Réglages";
+"continue" = "Continuer";
+"back" = "Retour";
+"get_started" = "Commencer";
+"im_signed_in" = "Connecter";
+"its_enabled" = "Activer";
+
+/* Library and Navigation */
+"library" = "Cosmos";
+"artists" = "Artistes";
+"albums" = "Albums";
+"search" = "Rechercher";
+"songs" = "Musiques";
+"processing" = "Traitement";
+"waiting" = "En attente";
+"and_more" = "... et %d de plus";
+
+/* Artist/Album/Track Info */
+"no_artists_found" = "Aucun artiste trouvé";
+"artists_will_appear" = "Les artistes apparaîtront ici une fois que vous ajouterez de la musique à votre bibliothèque";
+"no_albums_found" = "Aucun album trouvé";
+"albums_will_appear" = "Les albums apparaîtront ici une fois que vous ajouterez de la musique à votre bibliothèque";
+"artist" = "Artiste";
+"album" = "Album";
+"track_number" = "%d";
+"play" = "Lecture";
+"shuffle" = "Aléatoire";
+"wrong_artist" = "Mauvais artiste ?";
+"data_provided_by" = "Données fournies par %@";
+"open_spotify" = "OUVRIR SPOTIFY";
+"loading_artist" = "Chargement de l'artiste...";
+
+/* Player */
+"playing_queue" = "File de lecture";
+"no_songs_in_queue" = "Aucune musique dans la file";
+"no_track_selected" = "Aucune piste sélectionnée";
+
+/* Search */
+"search_your_music_library" = "Rechercher dans votre bibliothèque musicale";
+"find_songs_artists_albums_playlists" = "Trouvez des musiques, artistes, albums et listes de lecture";
+"no_results_found" = "Aucun résultat trouvé";
+"try_different_keywords" = "Essayez avec des mots-clés différents";
+
+/* Context Menu Actions */
+"show_artist_page" = "Afficher la page de l'artiste";
+"add_to_playlist_ellipsis" = "Ajouter à la liste de lecture...";
+"delete_file" = "Supprimer le fichier";
+"delete_file_confirmation" = "Êtes-vous sûr de vouloir supprimer '%@' ? Cette action ne peut pas être annulée.";
+
+/* Settings */
+"appearance" = "Apparence";
+"information" = "Informations";
+"minimalist_library_icons" = "Icônes minimalistes";
+"force_dark_mode" = "Mode sombre forcé";
+"version" = "Version";
+"app_name" = "Nom de l'app";
+"cosmos_music_player" = "Cosmos Music Player";
+"use_simple_icons" = "Utilisez des icônes simples sans arrière-plans colorés dans les sections de la bibliothèque.";
+"override_system_appearance" = "Remplacer l'apparence du système et forcer l'application à utiliser le mode sombre.";
+"background_color" = "Couleur d'arrière-plan";
+"choose_color_theme" = "Choisissez le thème de couleur pour les effets d'arrière-plan sur tous les écrans.";
+
+/* Liked Songs Actions */
+"add_to_liked_songs" = "Ajouter aux favoris";
+"remove_from_liked_songs" = "Retirer des favoris";
+
+/* Search Categories */
+"all" = "Tout";
+
+/* Sync and Connection */
+"library_out_of_sync" = "Bibliothèque désynchronisée";
+"library_sync_message" = "Votre bibliothèque musicale n'est actuellement pas synchronisée avec iCloud. Certaines fonctionnalités pourraient ne pas fonctionner jusqu'à ce que vous vous reconnectiez.";
+"offline_mode" = "Mode hors ligne";
+"offline_mode_message" = "Synchronisation iCloud désactivée. Fichiers musicaux dans le dossier Documents uniquement.";
+"icloud_connection_required" = "Connexion iCloud requise";
+
+/* Tutorial/Onboarding */
+"welcome_to_cosmos" = "Bienvenue dans Cosmos";
+"sign_in_to_apple_id" = "Se connecter à l'identifiant Apple";
+"sign_in_message" = "Pour synchroniser votre musique et vos favoris sur tous vos appareils, assurez-vous d'être connecté à votre identifiant Apple.";
+"if_signed_in_continue" = "Si vous êtes connecté, vous pouvez continuer";
+"enable_icloud_drive" = "Activer iCloud Drive";
+"icloud_drive_message" = "iCloud Drive vous permet d'accéder à vos fichiers musicaux depuis n'importe quel appareil et garde vos favoris synchronisés.";
+"if_icloud_enabled_continue" = "Si iCloud Drive est activé, vous pouvez continuer";
+"add_your_music" = "Ajoutez votre musique";
+"how_to_add_music" = "Voici comment ajouter vos fichiers musicaux à Cosmos Music Player :";
+"open_files_app" = "Ouvrir l'app Fichiers";
+"navigate_to_icloud_drive" = "Naviguer vers iCloud Drive";
+"find_cosmos_player_folder" = "Trouver le dossier Cosmos Player";
+"add_your_music_instruction" = "Ajoutez votre musique";
+
+/* Library Processing */
+"found_tracks" = "%d pistes trouvées";
+"processing_colon" = "🎵 Traitement :";
+"waiting_colon" = "⏳ En attente :";
+"percent_complete" = "%d%%";
+
+/* Subtitles and descriptions */
+"songs_count" = "%d musiques";
+"your_favorites" = "Vos favoris";
+"your_playlists" = "Vos listes de lecture";
+"browse_by_artist" = "Parcourir par artiste";
+"browse_by_album" = "Parcourir par album";
+"unknown_album" = "Album inconnu";
