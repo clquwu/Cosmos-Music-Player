@@ -19,12 +19,12 @@
 "songs_count_plural" = "%d musiques";
 "created_date" = "Créée le %@";
 "no_songs_found" = "Aucune musique trouvée";
-"your_music_will_appear_here" = "Votre musique apparaîtra ici";
+"your_music_will_appear_here" = "Pour ajouter vos musiques :\n\n1. Ouvrez l'app Fichiers (ou appuyez sur 'Ouvrir iDrive')\n2. Allez dans iCloud Drive\n3. Trouvez le dossier Cosmos Music Player\n4. Glissez vos musiques dedans";
 "create_first_playlist" = "Créez votre première playlist pour commencer";
 
 /* General UI strings */
 "all_songs" = "Vos musiques";
-"liked_songs" = "Musiques aimées";
+"liked_songs" = "Favoris";
 "add_songs" = "Ouvrir iDrive";
 "import_music_files" = "Importer des musiques";
 "ok" = "OK";
@@ -149,3 +149,11 @@
 "browse_by_artist" = "Parcourir par artiste";
 "browse_by_album" = "Parcourir par album";
 "unknown_album" = "Album inconnu";
+
+/* Sync result messages */
+"sync_no_new_tracks" = "Aucune nouvelle musique trouvée";
+"sync_one_new_track" = "1 nouvelle musique trouvée";
+"sync_multiple_new_tracks" = "%d nouvelles musiques trouvées";
+"sync_one_track_deleted" = "1 musique supprimée";
+"sync_multiple_tracks_deleted" = "%d musiques supprimées";
+"sync_no_changes" = "Bibliothèque à jour";
