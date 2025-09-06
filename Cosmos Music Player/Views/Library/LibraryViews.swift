@@ -2,13 +2,30 @@ import SwiftUI
 import GRDB
 import UniformTypeIdentifiers
 
+// MARK: - Responsive Font Helper
+extension View {
+    func responsiveLibraryTitleFont() -> some View {
+        self.font(.largeTitle)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .fontWeight(.bold)
+    }
+    
+    func responsiveSectionTitleFont() -> some View {
+        self.font(.title2)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .fontWeight(.semibold)
+    }
+}
+
 struct LibraryView: View {
     let tracks: [Track]
     @Binding var showTutorial: Bool
     @Binding var showPlaylistManagement: Bool
     @Binding var showSettings: Bool
-    let onRefresh: () async -> Void
-    let onManualSync: (() async -> Void)?
+    let onRefresh: () async -> (before: Int, after: Int)
+    let onManualSync: (() async -> (before: Int, after: Int))?
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var libraryIndexer = LibraryIndexer.shared
     @State private var artistToNavigate: Artist?
@@ -20,6 +37,70 @@ struct LibraryView: View {
     @State private var searchPlaylistToNavigate: Playlist?
     @State private var showSearch = false
     @State private var settings = DeleteSettings.load()
+    @State private var isRefreshing = false
+    @State private var showSyncToast = false
+    @State private var syncToastMessage = ""
+    @State private var syncToastIcon = "checkmark.circle.fill"
+    @State private var syncToastColor = Color.green
+    @State private var newTracksFoundCount = 0
+    @State private var syncCompleted = false
+    
+    // Helper function to show sync feedback
+    private func showSyncFeedback(trackCountBefore: Int, trackCountAfter: Int) {
+        let trackDifference = trackCountAfter - trackCountBefore
+        
+        // Set appropriate message and icon based on changes
+        if trackDifference > 0 {
+            // New tracks added
+            syncToastIcon = "plus.circle.fill"
+            syncToastColor = .green
+            if trackDifference == 1 {
+                syncToastMessage = NSLocalizedString("sync_one_new_track", value: "1 new song found", comment: "")
+            } else {
+                syncToastMessage = String(format: NSLocalizedString("sync_multiple_new_tracks", value: "%d new songs found", comment: ""), trackDifference)
+            }
+        } else if trackDifference < 0 {
+            // Tracks removed
+            let deletedCount = abs(trackDifference)
+            syncToastIcon = "minus.circle.fill"
+            syncToastColor = .orange
+            if deletedCount == 1 {
+                syncToastMessage = NSLocalizedString("sync_one_track_deleted", value: "1 song removed", comment: "")
+            } else {
+                syncToastMessage = String(format: NSLocalizedString("sync_multiple_tracks_deleted", value: "%d songs removed", comment: ""), deletedCount)
+            }
+        } else {
+            // No changes - but check if we tracked any during sync
+            if newTracksFoundCount > 0 {
+                syncToastIcon = "plus.circle.fill"
+                syncToastColor = .green
+                if newTracksFoundCount == 1 {
+                    syncToastMessage = NSLocalizedString("sync_one_new_track", value: "1 new song found", comment: "")
+                } else {
+                    syncToastMessage = String(format: NSLocalizedString("sync_multiple_new_tracks", value: "%d new songs found", comment: ""), newTracksFoundCount)
+                }
+            } else {
+                syncToastIcon = "checkmark.circle.fill"
+                syncToastColor = .blue
+                syncToastMessage = NSLocalizedString("sync_no_changes", value: "Library is up to date", comment: "")
+            }
+        }
+        
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showSyncToast = true
+        }
+        
+        // Auto-hide toast after 3 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                showSyncToast = false
+            }
+        }
+        
+        // Reset tracking variables
+        newTracksFoundCount = 0
+        syncCompleted = false
+    }
     
     var body: some View {
         NavigationStack {
@@ -53,8 +134,7 @@ struct LibraryView: View {
                         // Library title with icons that scrolls with content
                         HStack(alignment: .center) {
                             Text(Localized.library)
-                                .font(.largeTitle)
-                                .fontWeight(.bold)
+                                .responsiveLibraryTitleFont()
                                 .foregroundColor(.primary)
                             
                             Spacer()
@@ -63,15 +143,46 @@ struct LibraryView: View {
                                 // Sync button (if available)
                                 if let onManualSync = onManualSync {
                                     Button(action: {
+                                        guard !isRefreshing else { return }
+                                        
+                                        // Provide immediate haptic feedback
+                                        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                                        impactFeedback.impactOccurred()
+                                        
+                                        withAnimation(.easeInOut(duration: 0.1)) {
+                                            isRefreshing = true
+                                        }
+                                        
                                         Task {
-                                            await onManualSync()
+                                            // Wait for any ongoing indexing to complete first
+                                            while libraryIndexer.isIndexing {
+                                                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                                            }
+                                            
+                                            let result = await onManualSync()
+                                            
+                                            await MainActor.run {
+                                                isRefreshing = false
+                                                showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+                                            }
                                         }
                                     }) {
-                                        Image(systemName: "arrow.clockwise")
-                                            .font(.system(size: 26, weight: .medium))
-                                            .foregroundColor(settings.backgroundColorChoice.color)
-                                            .padding(.bottom, 4)
+                                        ZStack {
+                                            if isRefreshing {
+                                                ProgressView()
+                                                    .scaleEffect(0.8)
+                                                    .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
+                                            } else {
+                                                Image(systemName: "arrow.clockwise")
+                                                    .font(.system(size: 26, weight: .medium))
+                                                    .foregroundColor(settings.backgroundColorChoice.color)
+                                            }
+                                        }
+                                        .padding(.bottom, 4)
+                                        .scaleEffect(isRefreshing ? 0.9 : 1.0)
+                                        .animation(.easeInOut(duration: 0.2), value: isRefreshing)
                                     }
+                                    .disabled(isRefreshing)
                                 }
                                 
                                 // Search button (center)
@@ -186,7 +297,29 @@ struct LibraryView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.large)
             .refreshable {
-                await onRefresh()
+                // Prevent multiple concurrent refreshes
+                guard !isRefreshing else { return }
+                
+                // Provide haptic feedback for pull-to-refresh
+                let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                impactFeedback.impactOccurred()
+                
+                // Wait for any ongoing indexing to complete before starting sync
+                while libraryIndexer.isIndexing {
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                }
+                
+                // For pull-to-refresh, use manual sync if available, otherwise just refresh
+                let result = if let onManualSync = onManualSync {
+                    await onManualSync() // Full sync + refresh
+                } else {
+                    await onRefresh()    // Just refresh
+                }
+                
+                // Show feedback after sync/refresh is complete
+                await MainActor.run {
+                    showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+                }
             }
             
             // Hidden NavigationLink for programmatic navigation from player
@@ -244,6 +377,35 @@ struct LibraryView: View {
                 artistAllTracks = allTracks
             }
         }
+        .overlay(
+            // Sync result toast notification
+            Group {
+                if showSyncToast {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Image(systemName: syncToastIcon)
+                                .foregroundColor(syncToastColor)
+                                .font(.system(size: 16, weight: .medium))
+                            Text(syncToastMessage)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.primary)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(.regularMaterial)
+                                .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 6)
+                        )
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 120) // Space above mini player
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: showSyncToast)
+        )
         .sheet(isPresented: $showSearch) {
             SearchView(
                 allTracks: tracks,
@@ -294,8 +456,7 @@ struct LibrarySectionRowView: View {
             // Text content
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.title2)
-                    .fontWeight(.semibold)
+                    .responsiveSectionTitleFont()
                     .foregroundColor(.primary)
                 
                 Text(subtitle)
@@ -397,6 +558,7 @@ struct TrackListView: View {
                 Text(Localized.yourMusicWillAppearHere)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -842,6 +1004,7 @@ struct SearchView: View {
                             .fontWeight(.medium)
                             .foregroundColor(.primary)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                             .multilineTextAlignment(.leading)
                         
                         HStack(spacing: 4) {
@@ -918,6 +1081,7 @@ struct SearchView: View {
                             .fontWeight(.medium)
                             .foregroundColor(.primary)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                         
                         Text(Localized.artist)
                             .font(.caption)
@@ -980,6 +1144,7 @@ struct SearchView: View {
                             .fontWeight(.medium)
                             .foregroundColor(.primary)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                         
                         HStack(spacing: 4) {
                             if let artistId = album.artistId,
@@ -1050,6 +1215,7 @@ struct SearchView: View {
                             .fontWeight(.medium)
                             .foregroundColor(.primary)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                         
                         Text(Localized.playlist)
                             .font(.caption)

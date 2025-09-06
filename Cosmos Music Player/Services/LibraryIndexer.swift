@@ -174,64 +174,83 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
     
     private func fallbackToDirectScan() async {
-        guard let musicFolderURL = stateManager.getMusicFolderURL() else {
+        print("🔄 Starting fallback direct scan of both iCloud and local folders")
+        
+        var allMusicFiles: [URL] = []
+        
+        // Scan iCloud folder if available
+        if let iCloudMusicFolderURL = stateManager.getMusicFolderURL() {
+            print("📁 Scanning iCloud folder: \(iCloudMusicFolderURL.path)")
+            do {
+                let iCloudFiles = try await findMusicFiles(in: iCloudMusicFolderURL)
+                print("📁 Found \(iCloudFiles.count) files in iCloud folder")
+                allMusicFiles.append(contentsOf: iCloudFiles)
+            } catch {
+                print("⚠️ Failed to scan iCloud folder: \(error)")
+            }
+        }
+        
+        // Scan local Documents folder
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        print("📱 Scanning local Documents folder: \(documentsPath.path)")
+        do {
+            let localFiles = try await findMusicFiles(in: documentsPath)
+            print("📱 Found \(localFiles.count) files in local Documents folder")
+            for file in localFiles {
+                print("  📄 Local file: \(file.lastPathComponent)")
+            }
+            allMusicFiles.append(contentsOf: localFiles)
+        } catch {
+            print("⚠️ Failed to scan local Documents folder: \(error)")
+        }
+        
+        let totalFiles = allMusicFiles.count
+        print("📁 Total music files found (iCloud + local): \(totalFiles)")
+        
+        guard totalFiles > 0 else {
             isIndexing = false
-            print("No music folder available for direct scan")
+            print("❌ No music files found in any location")
             return
         }
         
-        print("🔄 Starting fallback direct scan in: \(musicFolderURL.path)")
-        
-        do {
-            let musicFiles = try await findMusicFiles(in: musicFolderURL)
-            let totalFiles = musicFiles.count
-            
-            print("📁 Found \(totalFiles) music files for processing:")
-            for url in musicFiles {
-                print("  - \(url.lastPathComponent)")
-            }
-            
-            // Set initial queue
-            await MainActor.run {
-                queuedFiles = musicFiles.map { $0.lastPathComponent }
-                currentlyProcessing = ""
-            }
-            
-            for (index, url) in musicFiles.enumerated() {
-                let fileName = url.lastPathComponent
-                print("🎵 Processing \(index + 1)/\(totalFiles): \(fileName)")
-                
-                // Update UI to show current file being processed
-                await MainActor.run {
-                    currentlyProcessing = fileName
-                    queuedFiles = Array(musicFiles.suffix(from: index + 1).map { $0.lastPathComponent })
-                }
-                
-                // Skip processing if we're in offline mode due to auth issues
-                if AppCoordinator.shared.iCloudStatus == .authenticationRequired || !AppCoordinator.shared.isiCloudAvailable {
-                    print("🚫 Skipping file processing - iCloud authentication required: \(fileName)")
-                    continue
-                }
-                
-                await processLocalFile(url)
-                
-                await MainActor.run {
-                    indexingProgress = Double(index + 1) / Double(totalFiles)
-                }
-            }
-            
-            // Clear processing state when done
-            await MainActor.run {
-                currentlyProcessing = ""
-                queuedFiles = []
-            }
-            
-            isIndexing = false
-            print("✅ Direct scan completed. Found \(tracksFound) tracks.")
-        } catch {
-            isIndexing = false
-            print("❌ Direct scan failed: \(error)")
+        // Set initial queue
+        await MainActor.run {
+            queuedFiles = allMusicFiles.map { $0.lastPathComponent }
+            currentlyProcessing = ""
         }
+        
+        for (index, url) in allMusicFiles.enumerated() {
+            let fileName = url.lastPathComponent
+            let isLocalFile = !url.path.contains("Mobile Documents")
+            print("🎵 Processing \(index + 1)/\(totalFiles): \(fileName) \(isLocalFile ? "[LOCAL]" : "[iCLOUD]")")
+            
+            // Update UI to show current file being processed
+            await MainActor.run {
+                currentlyProcessing = fileName
+                queuedFiles = Array(allMusicFiles.suffix(from: index + 1).map { $0.lastPathComponent })
+            }
+            
+            // Skip iCloud processing if we're in offline mode due to auth issues
+            if !isLocalFile && (AppCoordinator.shared.iCloudStatus == .authenticationRequired || !AppCoordinator.shared.isiCloudAvailable) {
+                print("🚫 Skipping iCloud file processing - iCloud authentication required: \(fileName)")
+                continue
+            }
+            
+            await processLocalFile(url)
+            
+            await MainActor.run {
+                indexingProgress = Double(index + 1) / Double(totalFiles)
+            }
+        }
+        
+        // Clear processing state when done
+        await MainActor.run {
+            currentlyProcessing = ""
+            queuedFiles = []
+        }
+        
+        isIndexing = false
+        print("✅ Direct scan completed. Found \(tracksFound) tracks from both iCloud and local folders.")
     }
     
     private func scanLocalDocuments() async {
@@ -307,27 +326,33 @@ class LibraryIndexer: NSObject, ObservableObject {
         do {
             print("🎵 Starting to process file: \(fileURL.lastPathComponent)")
             
-            // Check if file needs downloading from iCloud
-            let cloudDownloadManager = CloudDownloadManager.shared
-            do {
-                try await cloudDownloadManager.ensureLocal(fileURL)
-                print("✅ File ensured local: \(fileURL.lastPathComponent)")
-            } catch {
-                print("⚠️ Failed to ensure file is local: \(fileURL.lastPathComponent) - \(error)")
-                
-                // Check for authentication errors
-                if let cloudError = error as? CloudDownloadError {
-                    switch cloudError {
-                    case .authenticationRequired, .accessDenied:
-                        print("🔐 Authentication error in LibraryIndexer - switching to offline mode")
-                        AppCoordinator.shared.handleiCloudAuthenticationError()
-                        return // Skip this file
-                    default:
-                        break
+            let isLocalFile = !fileURL.path.contains("Mobile Documents")
+            
+            // Only try to download from iCloud if it's actually an iCloud file
+            if !isLocalFile {
+                let cloudDownloadManager = CloudDownloadManager.shared
+                do {
+                    try await cloudDownloadManager.ensureLocal(fileURL)
+                    print("✅ iCloud file ensured local: \(fileURL.lastPathComponent)")
+                } catch {
+                    print("⚠️ Failed to ensure iCloud file is local: \(fileURL.lastPathComponent) - \(error)")
+                    
+                    // Check for authentication errors
+                    if let cloudError = error as? CloudDownloadError {
+                        switch cloudError {
+                        case .authenticationRequired, .accessDenied:
+                            print("🔐 Authentication error in LibraryIndexer - switching to offline mode")
+                            AppCoordinator.shared.handleiCloudAuthenticationError()
+                            return // Skip this file
+                        default:
+                            break
+                        }
                     }
+                    
+                    // Continue processing even if download fails (for other errors)
                 }
-                
-                // Continue processing even if download fails (for other errors)
+            } else {
+                print("📱 Processing local file (no iCloud download needed): \(fileURL.lastPathComponent)")
             }
             
             print("🆔 Generating stable ID for: \(fileURL.lastPathComponent)")

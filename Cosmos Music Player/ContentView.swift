@@ -42,7 +42,7 @@ struct ContentView: View {
             showTutorial: $showTutorial, 
             showPlaylistManagement: $showPlaylistManagement, 
             showSettings: $showSettings,
-            onRefresh: refreshLibrary,
+            onRefresh: performRefresh,
             onManualSync: performManualSync
         )
         .safeAreaInset(edge: .bottom) {
@@ -67,10 +67,33 @@ struct ContentView: View {
         }
     }
     
-    @Sendable private func performManualSync() async {
+    @Sendable private func performManualSync() async -> (before: Int, after: Int) {
+        let trackCountBefore = tracks.count
         await appCoordinator.manualSync()
+        
+        // Wait for indexer to finish processing if it's currently running
+        while libraryIndexer.isIndexing {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+        }
+        
         await refreshLibrary()
+        let trackCountAfter = tracks.count
+        return (before: trackCountBefore, after: trackCountAfter)
     }
+    
+    @Sendable private func performRefresh() async -> (before: Int, after: Int) {
+        let trackCountBefore = tracks.count
+        
+        // Wait for indexer to finish processing if it's currently running
+        while libraryIndexer.isIndexing {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+        }
+        
+        await refreshLibrary()
+        let trackCountAfter = tracks.count
+        return (before: trackCountBefore, after: trackCountAfter)
+    }
+    
 }
 
 struct LifecycleModifier: ViewModifier {

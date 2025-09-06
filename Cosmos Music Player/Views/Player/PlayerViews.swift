@@ -49,27 +49,30 @@ struct PlayerView: View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .player)
             
-            VStack(spacing: 20) {
+            VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 16 : 20) {
                 if let currentTrack = playerEngine.currentTrack {
-                    VStack(spacing: 25) {
+                    VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 20 : 25) {
                         // Album artwork with hidden adjacent images that appear during swipe
                         GeometryReader { geometry in
+                            let maxWidth = min(geometry.size.width - 40, 360) // Cap max width at 360
+                            let artworkSize = min(maxWidth, geometry.size.height) // Keep it square
+                            
                             ZStack {
                                 // Current track image (always visible)
                                 ZStack {
                                     RoundedRectangle(cornerRadius: 12)
                                         .fill(Color.gray.opacity(0.1))
-                                        .frame(width: geometry.size.width - 40, height: 360)
+                                        .frame(width: artworkSize, height: artworkSize)
                                     
                                     if let artwork = currentArtwork {
                                         Image(uiImage: artwork)
                                             .resizable()
                                             .aspectRatio(contentMode: .fill)
-                                            .frame(width: geometry.size.width - 40, height: 360)
+                                            .frame(width: artworkSize, height: artworkSize)
                                             .clipShape(RoundedRectangle(cornerRadius: 12))
                                     } else {
                                         Image(systemName: "music.note")
-                                            .font(.system(size: 80))
+                                            .font(.system(size: min(80, artworkSize * 0.2)))
                                             .foregroundColor(.secondary)
                                     }
                                 }
@@ -81,17 +84,17 @@ struct PlayerView: View {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 12)
                                             .fill(Color.gray.opacity(0.1))
-                                            .frame(width: geometry.size.width - 40, height: 360)
+                                            .frame(width: artworkSize, height: artworkSize)
                                         
                                         if let artwork = previousArtwork {
                                             Image(uiImage: artwork)
                                                 .resizable()
                                                 .aspectRatio(contentMode: .fill)
-                                                .frame(width: geometry.size.width - 40, height: 360)
+                                                .frame(width: artworkSize, height: artworkSize)
                                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                         } else {
                                             Image(systemName: "music.note")
-                                                .font(.system(size: 80))
+                                                .font(.system(size: min(80, artworkSize * 0.2)))
                                                 .foregroundColor(.secondary)
                                         }
                                     }
@@ -104,17 +107,17 @@ struct PlayerView: View {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 12)
                                             .fill(Color.gray.opacity(0.1))
-                                            .frame(width: geometry.size.width - 40, height: 360)
+                                            .frame(width: artworkSize, height: artworkSize)
                                         
                                         if let artwork = nextArtwork {
                                             Image(uiImage: artwork)
                                                 .resizable()
                                                 .aspectRatio(contentMode: .fill)
-                                                .frame(width: geometry.size.width - 40, height: 360)
+                                                .frame(width: artworkSize, height: artworkSize)
                                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                         } else {
                                             Image(systemName: "music.note")
-                                                .font(.system(size: 80))
+                                                .font(.system(size: min(80, artworkSize * 0.2)))
                                                 .foregroundColor(.secondary)
                                         }
                                     }
@@ -122,9 +125,9 @@ struct PlayerView: View {
                                     .animation(.easeOut(duration: 0.3), value: dragOffset)
                                 }
                             }
-                            .frame(width: geometry.size.width, height: 360)
+                            .frame(width: geometry.size.width, height: artworkSize)
                         }
-                        .frame(height: 360)
+                        .frame(height: min(360, UIScreen.main.bounds.width - 80))
                         .clipped()
                         .shadow(radius: 8)
                         .gesture(
@@ -181,7 +184,7 @@ struct PlayerView: View {
                             // Left side: Title and Artist
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(currentTrack.title)
-                                    .font(.title2)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
                                     .fontWeight(.semibold)
                                     .lineLimit(2)
                                     .multilineTextAlignment(.leading)
@@ -196,7 +199,7 @@ struct PlayerView: View {
                                         NotificationCenter.default.post(name: NSNotification.Name("NavigateToArtistFromPlayer"), object: nil, userInfo: userInfo)
                                     }) {
                                         Text(artist.name)
-                                            .font(.subheadline)
+                                            .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .caption : .subheadline)
                                             .foregroundColor(.secondary)
                                             .lineLimit(1)
                                     }
@@ -207,13 +210,13 @@ struct PlayerView: View {
                             Spacer()
                             
                             // Right side: Like and Add to Playlist buttons
-                            HStack(spacing: 20) {
+                            HStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 16 : 20) {
                                 // Like button
                                 Button(action: {
                                     toggleFavorite()
                                 }) {
                                     Image(systemName: isFavorite ? "heart.fill" : "heart")
-                                        .font(.title2)
+                                        .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
                                         .foregroundColor(isFavorite ? .red : .primary)
                                 }
                                 
@@ -222,7 +225,7 @@ struct PlayerView: View {
                                     showPlaylistDialog = true
                                 }) {
                                     Image(systemName: "plus.circle")
-                                        .font(.title2)
+                                        .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
                                         .foregroundColor(.primary)
                                 }
                             }
@@ -231,7 +234,7 @@ struct PlayerView: View {
                     }
                     
                     // Interactive progress bar with matching width
-                    VStack(spacing: 16) {
+                    VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 12 : 16) {
                         InteractiveProgressBar(
                             progress: playerEngine.duration > 0 ? playerEngine.playbackTime / playerEngine.duration : 0,
                             onSeek: { progress in
@@ -258,15 +261,15 @@ struct PlayerView: View {
                     }
                     .padding(.horizontal, 8)
                     
-                    VStack(spacing: 25) {
+                    VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 20 : 25) {
                         // Main playback controls
-                        HStack(spacing: 35) {
+                        HStack(spacing: min(35, UIScreen.main.bounds.width * 0.08)) {
                             // Shuffle button (left of previous)
                             Button(action: {
                                 playerEngine.toggleShuffle()
                             }) {
                                 Image(systemName: playerEngine.isShuffled ? "shuffle.circle.fill" : "shuffle.circle")
-                                    .font(.title)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
                                     .foregroundColor(playerEngine.isShuffled ? .accentColor : .primary)
                             }
                             
@@ -277,7 +280,7 @@ struct PlayerView: View {
                                 }
                             }) {
                                 Image(systemName: "backward.fill")
-                                    .font(.title)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
                             }
                             
                             // Play/Pause button (center, larger)
@@ -289,7 +292,7 @@ struct PlayerView: View {
                                 }
                             }) {
                                 Image(systemName: playerEngine.isPlaying ? "pause.fill" : "play.fill")
-                                    .font(.largeTitle)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title : .largeTitle)
                             }
                             
                             // Next track button
@@ -299,7 +302,7 @@ struct PlayerView: View {
                                 }
                             }) {
                                 Image(systemName: "forward.fill")
-                                    .font(.title)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
                             }
                             
                             // Loop button (right of next) - cycles through Off → Queue Loop → Song Loop → Off
@@ -318,10 +321,10 @@ struct PlayerView: View {
                                             .foregroundColor(.primary)
                                     }
                                 }
-                                .font(.title)
+                                .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
                             }
                         }
-                        .padding(.horizontal, 21)
+                        .padding(.horizontal, min(21, UIScreen.main.bounds.width * 0.055))
                         .padding(.vertical, 21)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 25))
                         .overlay(
@@ -336,7 +339,7 @@ struct PlayerView: View {
                                 showQueueSheet = true
                             }) {
                                 Image(systemName: "list.bullet")
-                                    .font(.title)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
                                     .foregroundColor(.primary)
                                     .frame(maxWidth: .infinity, minHeight: 30)
                                     .padding(.vertical, 16)
@@ -354,7 +357,7 @@ struct PlayerView: View {
                                 showAirPlayPicker()
                             }) {
                                 Image(systemName: "airplayaudio")
-                                    .font(.title)
+                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
                                     .foregroundColor(.primary)
                                     .frame(maxWidth: .infinity, minHeight: 25)
                                     .padding(.vertical, 16)
@@ -380,7 +383,8 @@ struct PlayerView: View {
                     }
                 }
             }
-            .padding()
+            .padding(.horizontal, max(16, min(20, UIScreen.main.bounds.width * 0.05)))
+            .padding(.vertical)
             .onChange(of: playerEngine.currentTrack) { _, newTrack in
                 Task {
                     await loadAllArtworks()

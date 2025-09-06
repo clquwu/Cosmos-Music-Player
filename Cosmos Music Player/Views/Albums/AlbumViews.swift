@@ -207,7 +207,7 @@ struct AlbumDetailScreen: View {
                             .buttonStyle(.plain)
                         }
                         
-                        HStack(spacing: 20) {
+                        HStack(spacing: 12) {
                             Button {
                                 if let first = albumTracks.first {
                                     Task {
@@ -221,9 +221,10 @@ struct AlbumDetailScreen: View {
                                 }
                                 .font(.title3.weight(.semibold))
                                 .foregroundColor(.white)
-                                .frame(maxWidth: .infinity) .frame(height: 50)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
                                 .background(settings.backgroundColorChoice.color)
-                                .cornerRadius(25)
+                                .cornerRadius(28)
                             }
                             
                             Button {
@@ -239,12 +240,13 @@ struct AlbumDetailScreen: View {
                                 }
                                 .font(.title3.weight(.semibold))
                                 .foregroundColor(settings.backgroundColorChoice.color)
-                                .frame(maxWidth: .infinity) .frame(height: 50)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
                                 .background(settings.backgroundColorChoice.color.opacity(0.1))
-                                .cornerRadius(25)
+                                .cornerRadius(28)
                             }
                         }
-                        .padding(.horizontal)
+                        .padding(.horizontal, 8)
                     }
                     .padding(.horizontal)
                     

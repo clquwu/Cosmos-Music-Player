@@ -2,7 +2,7 @@
 //  FileCleanupManager.swift
 //  Cosmos Music Player
 //
-//  Manages cleanup of files that exist locally but not in iCloud Drive
+//  Manages cleanup of iCloud files that were deleted from iCloud Drive
 //
 
 import Foundation
@@ -20,7 +20,7 @@ class FileCleanupManager: ObservableObject {
     private init() {}
     
     func checkForOrphanedFiles() async {
-        print("🧹 Checking for files that exist locally but not in iCloud Drive...")
+        print("🧹 Checking for iCloud files that were deleted from iCloud Drive...")
         
         guard let iCloudFolderURL = stateManager.getMusicFolderURL() else {
             print("🧹 No iCloud folder available, skipping cleanup check")
@@ -58,12 +58,11 @@ class FileCleanupManager: ObservableObject {
                         
                         if !existsInCloud {
                             orphanedFiles.append(trackURL)
-                            print("🧹 ✅ Found orphaned iCloud file (exists locally): \(trackURL.lastPathComponent)")
+                            print("🧹 ✅ Found orphaned iCloud file (deleted from iCloud): \(trackURL.lastPathComponent)")
                         }
                     } else {
-                        // File exists locally but NOT in iCloud Drive folder - this is an orphaned local file
-                        orphanedFiles.append(trackURL)
-                        print("🧹 ✅ Found orphaned local file: \(trackURL.lastPathComponent)")
+                        // File exists locally but NOT in iCloud Drive folder - this is a LOCAL file, keep it!
+                        print("🧹 ✅ Local file found (keeping): \(trackURL.lastPathComponent)")
                     }
                 } else {
                     print("🧹   File doesn't exist anywhere - will auto-clean from database")
@@ -96,7 +95,7 @@ class FileCleanupManager: ObservableObject {
             
             print("🧹 Total orphaned files found: \(orphanedFiles.count)")
             
-            // Auto-remove orphaned files (deleted from iCloud) without asking user
+            // Auto-remove orphaned iCloud files (deleted from iCloud Drive) without asking user
             if !orphanedFiles.isEmpty {
                 print("🧹 Auto-removing \(orphanedFiles.count) files that were deleted from iCloud")
                 
