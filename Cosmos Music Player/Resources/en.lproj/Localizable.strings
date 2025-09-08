@@ -19,13 +19,13 @@
 "songs_count_plural" = "%d songs";
 "created_date" = "Created %@";
 "no_songs_found" = "No songs found";
-"your_music_will_appear_here" = "Your music will appear here";
+"your_music_will_appear_here" = "To add your music:\n\n1. Open the Files app (or tap 'Add Songs')\n2. Choose either:\n   • iCloud Drive → Cosmos Music Player folder\n   • On My iPhone → Cosmos Music Player\n3. Drag your music files into either location";
 "create_first_playlist" = "Create your first playlist to get started";
 
 /* General UI strings */
 "all_songs" = "All Songs";
 "liked_songs" = "Liked Songs";
-"add_songs" = "Add Songs";
+"add_songs" = "Open Files";
 "import_music_files" = "Import music files";
 "ok" = "OK";
 "settings" = "Settings";
@@ -116,7 +116,7 @@
 "icloud_drive_message" = "iCloud Drive lets you access your music files from any device and keeps your favorites synced.";
 "if_icloud_enabled_continue" = "If iCloud Drive is enabled, you can continue";
 "add_your_music" = "Add Your Music";
-"how_to_add_music" = "Here's how to add your music files to Cosmos Music Player:";
+"how_to_add_music" = "You can add music files to either iCloud Drive (syncs across devices) or locally (this device only):";
 "open_files_app" = "Open Files App";
 "navigate_to_icloud_drive" = "Navigate to iCloud Drive";
 "find_cosmos_player_folder" = "Find Cosmos Player Folder";
@@ -132,8 +132,8 @@
 
 /* Tutorial Instructions */
 "find_open_files_app" = "Find and open the Files app on your device";
-"tap_icloud_drive_sidebar" = "Tap on 'iCloud Drive' in the sidebar";
-"look_for_cosmos_folder" = "Look for the 'Cosmos Player' folder and open it";
+"tap_icloud_drive_sidebar" = "Choose 'iCloud Drive' or 'On My iPhone' in the sidebar";
+"look_for_cosmos_folder" = "Find the 'Cosmos Music Player' folder and open it";
 "copy_music_files" = "Copy your FLAC or MP3 files into this folder";
 
 /* Library Processing */
@@ -149,3 +149,11 @@
 "browse_by_artist" = "Browse by artist";
 "browse_by_album" = "Browse by album";
 "unknown_album" = "Unknown Album";
+
+/* Sync result messages */
+"sync_no_new_tracks" = "No new music found";
+"sync_one_new_track" = "1 new song found";
+"sync_multiple_new_tracks" = "%d new songs found";
+"sync_one_track_deleted" = "1 song removed";
+"sync_multiple_tracks_deleted" = "%d songs removed";
+"sync_no_changes" = "Library is up to date";

@@ -19,13 +19,13 @@
 "songs_count_plural" = "%d musiques";
 "created_date" = "Créée le %@";
 "no_songs_found" = "Aucune musique trouvée";
-"your_music_will_appear_here" = "Votre musique apparaîtra ici";
+"your_music_will_appear_here" = "Pour ajouter vos musiques :\n\n1. Ouvrez l'app Fichiers (ou appuyez sur 'Ouvrir Fichiers')\n2. Choisissez soit :\n   • iCloud Drive → dossier Cosmos Music Player\n   • Sur mon iPhone → Cosmos Music Player\n3. Glissez vos musiques dans l'un des deux emplacements";
 "create_first_playlist" = "Créez votre première playlist pour commencer";
 
 /* General UI strings */
 "all_songs" = "Vos musiques";
-"liked_songs" = "Musiques aimées";
-"add_songs" = "Ouvrir iDrive";
+"liked_songs" = "Favoris";
+"add_songs" = "Ouvrir Fichiers";
 "import_music_files" = "Importer des musiques";
 "ok" = "OK";
 "settings" = "Réglages";
@@ -116,7 +116,7 @@
 "icloud_drive_message" = "iCloud Drive vous permet d'accéder à vos fichiers musicaux depuis n'importe quel appareil et garde vos favoris synchronisés.";
 "if_icloud_enabled_continue" = "Si iCloud Drive est activé, vous pouvez continuer";
 "add_your_music" = "Ajoutez votre musique";
-"how_to_add_music" = "Voici comment ajouter vos fichiers musicaux à Cosmos Music Player :";
+"how_to_add_music" = "Vous pouvez ajouter vos musiques soit dans iCloud (synchronisé sur vos appareils) ou localement :";
 "open_files_app" = "Ouvrir l'app Fichiers";
 "navigate_to_icloud_drive" = "Naviguer vers iCloud Drive";
 "find_cosmos_player_folder" = "Trouver le dossier Cosmos Player";
@@ -132,8 +132,8 @@
 
 /* Tutorial Instructions */
 "find_open_files_app" = "Trouvez et ouvrez l'app Fichiers";
-"tap_icloud_drive_sidebar" = "Appuyez sur 'iCloud Drive' dans la barre latérale";
-"look_for_cosmos_folder" = "Cherchez le dossier 'Cosmos Player' et ouvrez-le";
+"tap_icloud_drive_sidebar" = "Choisissez 'iCloud Drive' ou 'Sur mon iPhone' dans la barre latérale";
+"look_for_cosmos_folder" = "Trouvez le dossier 'Cosmos Music Player' et ouvrez-le";
 "copy_music_files" = "Copiez vos fichiers FLAC ou MP3 dans ce dossier";
 
 /* Library Processing */
@@ -149,3 +149,11 @@
 "browse_by_artist" = "Parcourir par artiste";
 "browse_by_album" = "Parcourir par album";
 "unknown_album" = "Album inconnu";
+
+/* Sync result messages */
+"sync_no_new_tracks" = "Aucune nouvelle musique trouvée";
+"sync_one_new_track" = "1 nouvelle musique trouvée";
+"sync_multiple_new_tracks" = "%d nouvelles musiques trouvées";
+"sync_one_track_deleted" = "1 musique supprimée";
+"sync_multiple_tracks_deleted" = "%d musiques supprimées";
+"sync_no_changes" = "Bibliothèque à jour";
