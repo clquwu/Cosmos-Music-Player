@@ -2,15 +2,15 @@
 
 Cosmos Music Player is a high-quality music player that supports both iCloud Drive synchronization and local storage, giving users flexibility in how they manage their music. The app is built and designed for the iOS and Apple ecosystem.
 
-A premium FLAC and MP3 music player for iOS with advanced features including dual storage options (iCloud/local), playlist management, artist information integration, and multi-language support.
+A premium FLAC, MP3, and WAV music player for iOS with advanced features including dual storage options (iCloud/local), playlist management, artist information integration, and multi-language support.
 
 ## Features ✨
 
 ### 🎧 Audio Playback
-- **High-Quality FLAC Support**: Native support for lossless FLAC audio files
+- **High-Quality Lossless Support**: Native support for lossless FLAC and WAV audio files, plus MP3
 - **Background Playback**: Continue listening while using other apps
 - **ReplayGain Support**: Automatic volume normalization for consistent listening experience
-- **Embedded Artwork**: Displays album art from FLAC / MP3 metadata
+- **Embedded Artwork**: Displays album art from FLAC, MP3, and WAV metadata
 - **Advanced Audio Engine**: Built with AVFoundation for optimal audio quality
 
 ### 📚 Music Library Management
@@ -18,7 +18,7 @@ A premium FLAC and MP3 music player for iOS with advanced features including dua
 - **iCloud Drive Integration**: Automatic sync of music files across devices when using iCloud storage
 - **Local File Support**: Full support for music files stored locally in app's Documents folder
 - **Smart Library Indexing**: Automatic detection and indexing of music files from both storage locations
-- **Metadata Extraction**: Reads artist, album, title, and other metadata from FLAC/MP3 files
+- **Metadata Extraction**: Reads artist, album, title, and other metadata from FLAC, MP3, and WAV files
 - **Offline First**: Works completely offline with local files, no internet required
 - **File Organization**: Intelligent organization by artist and album regardless of storage location
 
@@ -203,13 +203,13 @@ You have two storage options:
 #### Option 1: iCloud Drive (Syncs Across Devices)
 1. Open Files app on your iOS device
 2. Navigate to "iCloud Drive" → "Cosmos Music Player"
-3. Add your FLAC or MP3 music files to this folder
+3. Add your FLAC, MP3, or WAV music files to this folder
 4. Files will sync to all your devices signed into the same iCloud account
 
 #### Option 2: Local Storage (This Device Only)
 1. Open Files app on your iOS device
 2. Navigate to "On My iPhone" → "Cosmos Music Player"
-3. Add your FLAC or MP3 music files to this folder
+3. Add your FLAC, MP3, or WAV music files to this folder
 4. Files remain on this device only (no iCloud required)
 
 **Mixed Storage**: You can use both methods simultaneously - the app will find and index music from both locations!
@@ -436,7 +436,7 @@ Thank you for contributing! 🚀
 **Music not appearing:**
 - For iCloud files: Check iCloud Drive is enabled and signed in
 - For local files: Ensure files are in the local "Cosmos Music Player" folder
-- Verify files are FLAC or MP3 format
+- Verify files are FLAC, MP3, or WAV format
 - Try manual sync from the app
 - Check both iCloud Drive and "On My iPhone" locations
 

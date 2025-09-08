@@ -55,6 +55,8 @@ class PlayerEngine: NSObject, ObservableObject {
     private let databaseManager = DatabaseManager.shared
     private let cloudDownloadManager = CloudDownloadManager.shared
     
+    // Enhanced Control Center synchronization (replaces MPNowPlayingSession approach)
+    
     // System volume integration
     private var silentPlayer: AVAudioPlayer?
     private nonisolated(unsafe) var volumeCheckTimer: Timer?
@@ -420,13 +422,21 @@ class PlayerEngine: NSObject, ObservableObject {
     private func setupRemoteCommands() {
         let cc = MPRemoteCommandCenter.shared()
         
+        // Play command handler - will be called from Control Center
         cc.playCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.play() }
+            Task { @MainActor in
+                print("🎛️ Play command from Control Center")
+                self?.play()
+            }
             return .success
         }
         
+        // Pause command handler - will be called from Control Center
         cc.pauseCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.pause() }
+            Task { @MainActor in
+                print("🎛️ Pause command from Control Center")
+                self?.pause()
+            }
             return .success
         }
         
@@ -448,7 +458,21 @@ class PlayerEngine: NSObject, ObservableObject {
         
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let self, let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            Task { @MainActor in await self.seek(to: e.positionTime) }
+            Task { @MainActor in
+                await self.seek(to: e.positionTime)
+            }
+            return .success
+        }
+        
+        // Toggle play/pause command (for headphone button and other accessories)
+        cc.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                if self?.isPlaying == true {
+                    self?.pause()
+                } else {
+                    self?.play()
+                }
+            }
             return .success
         }
         
@@ -458,6 +482,89 @@ class PlayerEngine: NSObject, ObservableObject {
         cc.nextTrackCommand.isEnabled = true
         cc.previousTrackCommand.isEnabled = true
         cc.changePlaybackPositionCommand.isEnabled = true
+        cc.togglePlayPauseCommand.isEnabled = true
+    }
+    
+    
+    // Enhanced manual approach with better Control Center synchronization
+    private func updateNowPlayingInfoEnhanced() {
+        guard let track = currentTrack else {
+            // Clear Now Playing info if no track
+            DispatchQueue.main.async {
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                print("🎛️ Cleared Control Center - no track loaded")
+            }
+            return
+        }
+        
+        // Create comprehensive Now Playing info
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: track.title,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: playbackTime,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyPlaybackQueueCount: playbackQueue.count
+        ]
+        
+        // Add queue position
+        if playbackQueue.indices.contains(currentIndex) {
+            info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = currentIndex
+        }
+        
+        // Add metadata
+        do {
+            if let artistId = track.artistId,
+               let artist = try databaseManager.read({ db in
+                   try Artist.fetchOne(db, key: artistId)
+               }) {
+                info[MPMediaItemPropertyArtist] = artist.name
+            }
+            
+            if let albumId = track.albumId,
+               let album = try databaseManager.read({ db in
+                   try Album.fetchOne(db, key: albumId)
+               }) {
+                info[MPMediaItemPropertyAlbumTitle] = album.title
+            }
+        } catch {
+            print("Failed to fetch metadata: \(error)")
+        }
+        
+        // Add track number
+        if let trackNo = track.trackNo {
+            info[MPMediaItemPropertyAlbumTrackNumber] = trackNo
+        }
+        
+        // Add cached artwork
+        if let cachedArtwork = cachedArtwork, cachedArtworkTrackId == track.stableId {
+            info[MPMediaItemPropertyArtwork] = cachedArtwork
+        }
+        
+        // Update with explicit synchronization
+        DispatchQueue.main.async { [weak self] in
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+            
+            // Force Control Center button state update
+            let commandCenter = MPRemoteCommandCenter.shared()
+            if self?.isPlaying == true {
+                commandCenter.playCommand.isEnabled = false
+                commandCenter.pauseCommand.isEnabled = true
+            } else {
+                commandCenter.playCommand.isEnabled = true
+                commandCenter.pauseCommand.isEnabled = false
+            }
+            
+            print("🎛️ Enhanced Control Center update - playing: \(self?.isPlaying ?? false)")
+            print("🎛️ Title: \(track.title), Time: \(self?.playbackTime ?? 0)")
+        }
+        
+        // Load artwork asynchronously if needed
+        if track.hasEmbeddedArt && cachedArtworkTrackId != track.stableId {
+            Task {
+                await loadAndCacheArtwork(track: track)
+            }
+        }
     }
     
     // MARK: - Audio Session Management
@@ -620,7 +727,8 @@ class PlayerEngine: NSObject, ObservableObject {
             
             await configureAudioSession(for: audioFile.processingFormat)
             
-            updateNowPlayingInfo()
+            // Update Now Playing info with enhanced approach
+            updateNowPlayingInfoEnhanced()
             
             playbackState = .stopped
             isLoadingTrack = false
@@ -658,7 +766,6 @@ class PlayerEngine: NSObject, ObservableObject {
         // Set up audio engine only when needed (FIRST)
         ensureAudioEngineSetup()
         
-        
         // Ensure basic audio session setup first
         ensureAudioSessionSetup()
         
@@ -671,30 +778,19 @@ class PlayerEngine: NSObject, ObservableObject {
         }
         
         if playbackState == .paused {
-            // Check if audio is scheduled - if not, we need to schedule it (happens after paused skip)
-            if !playerNode.isPlaying && playbackTime == 0 {
-                print("🔄 Paused after skip - need to schedule audio before playing")
-                // Fall through to the main scheduling logic below
-            } else {
-                // Normal resume from pause
-                // Ensure audio engine is running when resuming from pause
-                if !audioEngine.isRunning {
-                    do {
-                        try audioEngine.start()
-                        print("✅ Audio engine started when resuming from pause")
-                    } catch {
-                        print("❌ Failed to start audio engine when resuming: \(error)")
-                        return
-                    }
-                }
-                
+            do {
+                try audioEngine.start()
                 playerNode.play()
                 isPlaying = true
                 playbackState = .playing
                 startPlaybackTimer()
                 startBackgroundMonitoring()
                 
-                updateNowPlayingInfo()
+                // Update Now Playing info with enhanced approach
+                updateNowPlayingInfoEnhanced()
+                return
+            } catch {
+                print("❌ Failed to start audio engine when resuming: \(error)")
                 return
             }
         }
@@ -762,36 +858,31 @@ class PlayerEngine: NSObject, ObservableObject {
             setupBasicVolumeControl()
         }
         
-        // Session is already activated before engine start
-        
         playerNode.play()
         isPlaying = true
         playbackState = .playing
         startPlaybackTimer()
         
-        // Audio session lifecycle now handles background execution
-        
-        // Update Now Playing info AFTER setting playing state to show correct state
-        updateNowPlayingInfo()
+        // Update Now Playing info with enhanced approach
+        updateNowPlayingInfoEnhanced()
         
         print("✅ Playback started and control center claimed")
     }
     
     func pause() {
-        playerNode.pause()
+        // Use AVAudioEngine.pause() instead of playerNode.pause()
+        audioEngine.pause()
+        
+        // Update state
         isPlaying = false
         playbackState = .paused
         stopPlaybackTimer()
         endBackgroundMonitoring()
-        // Keep audio session active during pause for background audio continuation
-        // Do NOT deactivate the audio session here - that would allow the system to kill the app
-        // Keep audio engine running to maintain background audio eligibility
         
-        // Keep audio session active and audio engine running for background continuation
-        print("🔄 Keeping audio session and engine active during pause for background audio")
+        print("🔄 Paused audio engine - lock screen should update automatically")
         
-        // Update Now Playing info when paused
-        updateNowPlayingInfo()
+        // Update Now Playing info with enhanced approach
+        updateNowPlayingInfoEnhanced()
         
         // Save state when pausing
         savePlayerState()
@@ -814,7 +905,7 @@ class PlayerEngine: NSObject, ObservableObject {
         // Audio session deactivation will handle background execution cleanup
         
         // Clear Now Playing info when stopped
-        updateNowPlayingInfo()
+        updateNowPlayingInfoEnhanced()
         
         
         // Clear remote command targets to remove from control center
@@ -903,6 +994,12 @@ class PlayerEngine: NSObject, ObservableObject {
             isPlaying = true
             playbackState = .playing
             startPlaybackTimer()
+            
+            // Update Now Playing info after seek
+            updateNowPlayingInfoEnhanced()
+        } else {
+            // Update position even when paused
+            updateNowPlayingInfoEnhanced()
         }
         
         print("✅ Seek completed")
@@ -1047,7 +1144,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 self.playbackState = .paused
                 self.seekTimeOffset = 0
                 self.playbackTime = 0
-                self.updateNowPlayingInfo()
+                self.updateNowPlayingInfoEnhanced()
             }
         }
     }
@@ -1064,7 +1161,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 await MainActor.run {
                     isPlaying = false
                     playbackState = .paused
-                    updateNowPlayingInfo()
+                    updateNowPlayingInfoEnhanced()
                 }
             }
             return
@@ -1086,7 +1183,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 playbackState = .paused
                 seekTimeOffset = 0
                 playbackTime = 0
-                updateNowPlayingInfo()
+                updateNowPlayingInfoEnhanced()
             }
         }
     }
@@ -1215,7 +1312,7 @@ class PlayerEngine: NSObject, ObservableObject {
         
         // Update Now Playing info every few seconds to keep Lock Screen current
         if Int(playbackTime) % 3 == 0 {
-            updateNowPlayingInfo()
+            updateNowPlayingInfoEnhanced()
         }
     }
     
@@ -1254,85 +1351,6 @@ class PlayerEngine: NSObject, ObservableObject {
     }
     
     // MARK: - Now Playing Info
-    
-    private func updateNowPlayingInfo() {
-        guard let track = currentTrack else {
-            // Clear now playing info if no track
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            return
-        }
-        
-        // Keep info during .loading to avoid visual reset
-        if playbackState == .stopped && !isPlaying {
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            return
-        }
-        
-        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-        info[MPMediaItemPropertyTitle] = track.title
-        info[MPMediaItemPropertyPlaybackDuration] = duration
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = playbackTime
-        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = 1.0
-        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
-        
-        if playbackQueue.indices.contains(currentIndex) {
-            info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = currentIndex
-            info[MPNowPlayingInfoPropertyPlaybackQueueCount] = playbackQueue.count
-        } else {
-            info.removeValue(forKey: MPNowPlayingInfoPropertyPlaybackQueueIndex)
-            info[MPNowPlayingInfoPropertyPlaybackQueueCount] = playbackQueue.count
-        }
-        
-        // Audio format info (shows in some iOS versions)
-        if let sampleRate = track.sampleRate {
-            info[MPMediaItemPropertyComments] = "Hi-Res \(sampleRate/1000)kHz"
-        }
-        
-        do {
-            // Artist info
-            if let artistId = track.artistId,
-               let artist = try databaseManager.read({ db in
-                   try Artist.fetchOne(db, key: artistId)
-               }) {
-                info[MPMediaItemPropertyArtist] = artist.name
-            }
-            
-            // Album info
-            if let albumId = track.albumId,
-               let album = try databaseManager.read({ db in
-                   try Album.fetchOne(db, key: albumId)
-               }) {
-                info[MPMediaItemPropertyAlbumTitle] = album.title
-            }
-        } catch {
-            print("Failed to fetch artist/album info: \(error)")
-        }
-        
-        // Track number
-        if let trackNo = track.trackNo {
-            info[MPMediaItemPropertyAlbumTrackNumber] = trackNo
-        }
-        
-        // Handle artwork efficiently
-        if track.hasEmbeddedArt {
-            // Check if we already have cached artwork for this track
-            if let cachedArtwork = cachedArtwork,
-               cachedArtworkTrackId == track.stableId {
-                // Use cached artwork
-                info[MPMediaItemPropertyArtwork] = cachedArtwork
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-            } else {
-                // Load artwork asynchronously and cache it
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = info // Set basic info immediately
-                Task {
-                    await loadAndCacheArtwork(track: track)
-                }
-            }
-        } else {
-            // No embedded artwork
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        }
-    }
     
     private func loadAndCacheArtwork(track: Track) async {
         guard track.hasEmbeddedArt else { return }
