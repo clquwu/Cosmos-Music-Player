@@ -29,6 +29,9 @@ struct Cosmos_Music_PlayerApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: UIScene.willDeactivateNotification)) { _ in
                     handleWillResignActive()
                 }
+                .onOpenURL { url in
+                    handleOpenURL(url)
+                }
         }
     }
     
@@ -47,6 +50,12 @@ struct Cosmos_Music_PlayerApp: App {
             if PlayerEngine.shared.isPlaying {
                 PlayerEngine.shared.startPlaybackTimer()
             }
+            
+            // Check for new shared files and refresh library
+            await LibraryIndexer.shared.copyFilesFromSharedContainer()
+            if !LibraryIndexer.shared.isIndexing {
+                LibraryIndexer.shared.start()
+            }
         }
     }
     
@@ -59,6 +68,25 @@ struct Cosmos_Music_PlayerApp: App {
             print("🎧 Session keepalive on resign active - success")
         } catch { 
             print("❌ Session keepalive fail:", error) 
+        }
+    }
+    
+    private func handleOpenURL(_ url: URL) {
+        print("🔗 Received URL: \(url.absoluteString)")
+        
+        guard url.scheme == "cosmos-music" else {
+            print("❌ Unknown URL scheme: \(url.scheme ?? "nil")")
+            return
+        }
+        
+        if url.host == "refresh" {
+            print("📁 URL triggered library refresh")
+            Task { @MainActor in
+                await LibraryIndexer.shared.copyFilesFromSharedContainer()
+                if !LibraryIndexer.shared.isIndexing {
+                    LibraryIndexer.shared.start()
+                }
+            }
         }
     }
     

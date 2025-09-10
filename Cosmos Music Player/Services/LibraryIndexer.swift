@@ -70,6 +70,11 @@ class LibraryIndexer: NSObject, ObservableObject {
         indexingProgress = 0.0
         tracksFound = 0
         
+        // Copy any new files from share extension first
+        Task {
+            await copyFilesFromSharedContainer()
+        }
+        
         if let musicFolderURL = stateManager.getMusicFolderURL() {
             print("Starting iCloud library indexing in: \(musicFolderURL)")
             
@@ -177,6 +182,9 @@ class LibraryIndexer: NSObject, ObservableObject {
         print("🔄 Starting fallback direct scan of both iCloud and local folders")
         
         var allMusicFiles: [URL] = []
+        
+        // First, copy any new files from shared container to Documents
+        await copyFilesFromSharedContainer()
         
         // Scan iCloud folder if available
         if let iCloudMusicFolderURL = stateManager.getMusicFolderURL() {
@@ -546,6 +554,68 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
         
         return cleaned.isEmpty ? "Unknown Artist" : cleaned
+    }
+    
+    func copyFilesFromSharedContainer() async {
+        print("📁 Checking shared container for new music files...")
+        
+        guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
+            print("❌ Failed to get shared container URL")
+            return
+        }
+        
+        let sharedMusicURL = sharedContainer.appendingPathComponent("Documents").appendingPathComponent("Music")
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let localMusicURL = documentsURL.appendingPathComponent("Music")
+        
+        // Create local Music directory if it doesn't exist
+        do {
+            try FileManager.default.createDirectory(at: localMusicURL, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            print("❌ Failed to create local Music directory: \(error)")
+            return
+        }
+        
+        // Check if shared Music directory exists
+        guard FileManager.default.fileExists(atPath: sharedMusicURL.path) else {
+            print("📁 No shared Music directory found")
+            return
+        }
+        
+        do {
+            let sharedFiles = try FileManager.default.contentsOfDirectory(at: sharedMusicURL, includingPropertiesForKeys: nil)
+            let audioFiles = sharedFiles.filter { url in
+                let ext = url.pathExtension.lowercased()
+                return ext == "mp3" || ext == "flac" || ext == "wav"
+            }
+            
+            print("📁 Found \(audioFiles.count) audio files in shared container")
+            
+            for audioFile in audioFiles {
+                let localDestination = localMusicURL.appendingPathComponent(audioFile.lastPathComponent)
+                
+                // Skip if file already exists in local directory
+                if FileManager.default.fileExists(atPath: localDestination.path) {
+                    print("⏭️ File already exists locally: \(audioFile.lastPathComponent)")
+                    continue
+                }
+                
+                do {
+                    try FileManager.default.copyItem(at: audioFile, to: localDestination)
+                    print("✅ Copied to Documents/Music: \(audioFile.lastPathComponent)")
+                    
+                    // Optional: Remove from shared container after successful copy
+                    try FileManager.default.removeItem(at: audioFile)
+                    print("🗑️ Removed from shared container: \(audioFile.lastPathComponent)")
+                    
+                } catch {
+                    print("❌ Failed to copy \(audioFile.lastPathComponent): \(error)")
+                }
+            }
+            
+        } catch {
+            print("❌ Failed to read shared container directory: \(error)")
+        }
     }
 }
 

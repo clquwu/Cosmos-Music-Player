@@ -17,5 +17,9 @@
 	<array>
 		<string>iCloud.$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	</array>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.dev.clq.Cosmos-Music-Player</string>
+	</array>
 </dict>
 </plist>
