@@ -971,8 +971,13 @@ struct SearchView: View {
         let allTracks: [Track]
         let onDismiss: () -> Void
         @EnvironmentObject private var appCoordinator: AppCoordinator
+        @StateObject private var playerEngine = PlayerEngine.shared
         @State private var settings = DeleteSettings.load()
         @State private var artworkImage: UIImage?
+        
+        private var isCurrentlyPlaying: Bool {
+            playerEngine.currentTrack?.stableId == track.stableId
+        }
         
         var body: some View {
             Button(action: {
@@ -983,26 +988,34 @@ struct SearchView: View {
             }) {
                 HStack(spacing: 12) {
                     // Album artwork
-                    Group {
-                        if let artworkImage = artworkImage {
-                            Image(uiImage: artworkImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } else {
-                            Image(systemName: "music.note")
-                                .font(.system(size: 16))
-                                .foregroundColor(settings.backgroundColorChoice.color)
+                    ZStack {
+                        Group {
+                            if let artworkImage = artworkImage {
+                                Image(uiImage: artworkImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            } else {
+                                Image(systemName: "music.note")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(settings.backgroundColorChoice.color)
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .background(Color(.systemGray5))
+                        
+                        if isCurrentlyPlaying {
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(settings.backgroundColorChoice.color, lineWidth: 1.5)
+                                .frame(width: 40, height: 40)
                         }
                     }
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .background(Color(.systemGray5))
                     
                     VStack(alignment: .leading, spacing: 4) {
                         Text(track.title)
                             .font(.body)
                             .fontWeight(.medium)
-                            .foregroundColor(.primary)
+                            .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color : .primary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                             .multilineTextAlignment(.leading)
@@ -1014,12 +1027,25 @@ struct SearchView: View {
                                }) {
                                 Text(artist.name)
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color.opacity(0.8) : .secondary)
                             }
                         }
                     }
                     
                     Spacer()
+                    
+                    // Currently playing indicator (Deezer-style equalizer)
+                    if isCurrentlyPlaying {
+                        let eqKey = "\(playerEngine.isPlaying && isCurrentlyPlaying)-\(playerEngine.currentTrack?.stableId ?? "")"
+                        
+                        EqualizerBarsExact(
+                            color: settings.backgroundColorChoice.color,
+                            isActive: playerEngine.isPlaying && isCurrentlyPlaying,
+                            isLarge: false,
+                            trackId: playerEngine.currentTrack?.stableId
+                        )
+                        .id(eqKey)
+                    }
                     
                     if let duration = track.durationMs {
                         Text(formatDuration(duration))
@@ -1049,6 +1075,7 @@ struct SearchView: View {
             let remainingSeconds = seconds % 60
             return String(format: "%d:%02d", minutes, remainingSeconds)
         }
+        
     }
     
     struct SearchArtistRowView: View {

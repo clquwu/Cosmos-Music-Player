@@ -1,6 +1,52 @@
 import SwiftUI
 import AVKit
 
+struct EqualizerBarsExact: View {
+    let color: Color
+    let isActive: Bool
+    let isLarge: Bool
+    let trackId: String?
+
+    private var minH: CGFloat { isLarge ? 2 : 1 }
+    private var targetH: [CGFloat] { isLarge ? [4, 12, 8, 16] : [3, 8, 6, 10] }
+    private let durations: [Double] = [0.6, 0.8, 0.4, 0.7]
+
+    @State private var kick = false
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var restartKey: String { "\(isActive)-\(trackId ?? "")" }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 1) {
+            ForEach(0..<4, id: \.self) { i in
+                RoundedRectangle(cornerRadius: 0.5)
+                    .fill(color)
+                    .frame(width: isLarge ? 2 : 1.5)
+                    .frame(height: isActive && kick ? targetH[i] : minH)
+                    .animation(
+                        isActive
+                        ? .easeInOut(duration: durations[i]).repeatForever(autoreverses: true)
+                        : .easeInOut(duration: 0.2),
+                        value: kick
+                    )
+            }
+        }
+        .frame(width: isLarge ? 12 : 10, height: isLarge ? 20 : 12)
+        .id(restartKey)                 // force view identity reset on key change
+        .task(id: restartKey) { restart() } // runs on mount and when key changes
+        .onChange(of: scenePhase) { p in
+            if p == .active { restart() }   // recover after app foregrounding
+        }
+    }
+
+    private func restart() {
+        kick = false
+        DispatchQueue.main.async {
+            if isActive { kick = true }     // start a fresh repeatForever cycle
+        }
+    }
+}
+
 extension Color {
     init(hex: String) {
         let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
@@ -727,6 +773,7 @@ struct TrackRowView: View {
     let onTap: () -> Void
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var cloudDownloadManager = CloudDownloadManager.shared
+    @StateObject private var playerEngine = PlayerEngine.shared
     
     @State private var isFavorite = false
     @State private var isPressed = false
@@ -738,6 +785,10 @@ struct TrackRowView: View {
     @State private var selectedArtist: Artist?
     @State private var dragStartLocation: CGPoint = .zero
     @State private var gestureTimer: Timer?
+    
+    private var isCurrentlyPlaying: Bool {
+        playerEngine.currentTrack?.stableId == track.stableId
+    }
     
     var body: some View {
         HStack {
@@ -758,12 +809,20 @@ struct TrackRowView: View {
                         .font(.title2)
                         .foregroundColor(.secondary)
                 }
+                
+                // Overlay playing indicator on artwork for currently playing track
+                if isCurrentlyPlaying {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(deleteSettings.backgroundColorChoice.color, lineWidth: 2)
+                        .frame(width: 60, height: 60)
+                }
             }
             
             VStack(alignment: .leading, spacing: 4) {
                 Text(track.title)
                     .font(.title3)
                     .fontWeight(.medium)
+                    .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color : .primary)
                     .lineLimit(1)
                 
                 if let artistId = track.artistId,
@@ -772,12 +831,25 @@ struct TrackRowView: View {
                    }) {
                     Text(artist.name)
                         .font(.body)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color.opacity(0.8) : .secondary)
                         .lineLimit(1)
                 }
             }
             
             Spacer()
+            
+            // Currently playing indicator (Deezer-style equalizer)
+            if isCurrentlyPlaying {
+                let eqKey = "\(playerEngine.isPlaying && isCurrentlyPlaying)-\(playerEngine.currentTrack?.stableId ?? "")"
+                
+                EqualizerBarsExact(
+                    color: deleteSettings.backgroundColorChoice.color,
+                    isActive: playerEngine.isPlaying && isCurrentlyPlaying,
+                    isLarge: true,
+                    trackId: playerEngine.currentTrack?.stableId
+                )
+                .id(eqKey)
+            }
             
             Menu {
                 Button(action: {
@@ -988,6 +1060,86 @@ struct TrackRowView: View {
             } catch {
                 print("❌ Failed to delete file: \(error)")
             }
+        }
+    }
+    
+}
+
+struct WaveformView: View {
+    let isPlaying: Bool
+    let color: Color
+    @State private var waveHeights: [CGFloat] = Array(repeating: 2, count: 6)
+    @State private var timer: Timer?
+    @State private var animationTrigger = false
+    
+    var body: some View {
+        HStack(alignment: .center, spacing: 1) {
+            ForEach(0..<waveHeights.count, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 0.5)
+                    .fill(color.opacity(0.8))
+                    .frame(width: 2, height: waveHeights[index])
+                    .animation(
+                        .easeInOut(duration: 0.3)
+                        .repeatForever(autoreverses: true),
+                        value: animationTrigger
+                    )
+            }
+        }
+        .onAppear {
+            startWaveform()
+        }
+        .onDisappear {
+            stopWaveform()
+        }
+        .onChange(of: isPlaying) { newValue in
+            if newValue {
+                startWaveform()
+            } else {
+                stopWaveform()
+            }
+        }
+    }
+    
+    private func startWaveform() {
+        guard timer == nil && isPlaying else { return }
+        
+        // Start with animated heights
+        updateWaveHeights()
+        
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            Task { @MainActor in
+                if isPlaying {
+                    updateWaveHeights()
+                    animationTrigger.toggle()
+                }
+            }
+        }
+    }
+    
+    private func stopWaveform() {
+        timer?.invalidate()
+        timer = nil
+        
+        // Animate to flat line when stopped
+        withAnimation(.easeOut(duration: 0.4)) {
+            waveHeights = Array(repeating: 2, count: waveHeights.count)
+        }
+    }
+    
+    private func updateWaveHeights() {
+        guard isPlaying else { return }
+        
+        let newHeights: [CGFloat] = [
+            CGFloat.random(in: 3...12),
+            CGFloat.random(in: 6...14),
+            CGFloat.random(in: 2...10),
+            CGFloat.random(in: 8...16),
+            CGFloat.random(in: 4...11),
+            CGFloat.random(in: 5...13)
+        ]
+        
+        withAnimation(.easeInOut(duration: 0.3)) {
+            waveHeights = newHeights
         }
     }
 }

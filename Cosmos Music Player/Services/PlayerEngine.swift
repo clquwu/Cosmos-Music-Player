@@ -1447,9 +1447,6 @@ class PlayerEngine: NSObject, ObservableObject {
                                 }
                             }
                             
-                        } catch {
-                            print("❌ Error loading artwork: \(error)")
-                            continuation.resume(throwing: error)
                         }
                     }
                     
@@ -1508,9 +1505,6 @@ class PlayerEngine: NSObject, ObservableObject {
             print("⚠️ No artwork found in AVAsset metadata")
             return nil
             
-        } catch {
-            print("❌ AVAsset artwork loading failed: \(error)")
-            return nil
         }
     }
     
