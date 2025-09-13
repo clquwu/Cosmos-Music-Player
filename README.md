@@ -506,7 +506,7 @@ For issues, questions, or feature requests:
 
 ## License 📄
 
-This project is licensed under [Your License] - see the LICENSE file for details.
+This project is licensed under GNU - see the LICENSE file for details.
 
 ---
 
