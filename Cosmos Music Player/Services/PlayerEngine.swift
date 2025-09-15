@@ -1131,18 +1131,21 @@ class PlayerEngine: NSObject, ObservableObject {
     
     func playTrack(_ track: Track, queue: [Track] = []) async {
         print("🎵 Playing track: \(track.title)")
-        
+
         // Restore player state on first interaction if not already done
         await ensurePlayerStateRestored()
-        
+
         playbackQueue = queue.isEmpty ? [track] : queue
         currentIndex = playbackQueue.firstIndex(where: { $0.stableId == track.stableId }) ?? 0
-        
+
+        // Explicitly set the current track to ensure UI synchronization
+        currentTrack = track
+
         // Save original queue for shuffle functionality
         originalQueue = playbackQueue
-        
+
         normalizeIndexAndTrack()
-        
+
         await loadTrack(track)
         
         // Auto-play immediately after loading completes

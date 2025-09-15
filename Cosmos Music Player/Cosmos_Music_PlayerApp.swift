@@ -7,9 +7,69 @@
 
 import SwiftUI
 import AVFoundation
+import Intents
+
+class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, handle intent: INIntent, completionHandler: @escaping (INIntentResponse) -> Void) {
+        guard let playMediaIntent = intent as? INPlayMediaIntent else {
+            completionHandler(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            return
+        }
+
+        Task { @MainActor in
+            await AppCoordinator.shared.handleSiriPlaybackIntent(playMediaIntent, completion: completionHandler)
+        }
+    }
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // Set up Siri vocabulary and media context
+        setupSiriIntegration()
+        return true
+    }
+
+    private func setupSiriIntegration() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Set up vocabulary for playlists, artists, and albums
+            Task { @MainActor in
+                do {
+                    // Playlist vocabulary
+                    let playlists = try AppCoordinator.shared.databaseManager.getAllPlaylists()
+                    var playlistVocabulary = playlists.map { $0.title }
+
+                    // Add French playlist generic terms to help recognition
+                    playlistVocabulary.append(contentsOf: [
+                        "ma playlist", "ma liste de lecture", "mes playlists",
+                        "liste de lecture", "playlist", "playlists"
+                    ])
+
+                    let playlistNames = NSOrderedSet(array: playlistVocabulary)
+                    INVocabulary.shared().setVocabularyStrings(playlistNames, of: .mediaPlaylistTitle)
+                    print("✅ Set up vocabulary for \(playlistNames.count) playlist terms")
+
+                } catch {
+                    print("❌ Failed to set up vocabulary: \\(error)")
+                }
+            }
+
+            // Create media user context
+            let context = INMediaUserContext()
+            Task { @MainActor in
+                do {
+                    let trackCount = try AppCoordinator.shared.databaseManager.getAllTracks().count
+                    context.numberOfLibraryItems = trackCount
+                    context.subscriptionStatus = .notSubscribed // Since this is a local music app
+                    context.becomeCurrent()
+                } catch {
+                    print("❌ Failed to set up media context: \\(error)")
+                }
+            }
+        }
+    }
+}
 
 @main
 struct Cosmos_Music_PlayerApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appCoordinator = AppCoordinator.shared
     
     var body: some Scene {
@@ -31,6 +91,9 @@ struct Cosmos_Music_PlayerApp: App {
                 }
                 .onOpenURL { url in
                     handleOpenURL(url)
+                }
+                .onContinueUserActivity("com.cosmos.music.play") { userActivity in
+                    handleSiriIntent(userActivity)
                 }
         }
     }
@@ -89,7 +152,14 @@ struct Cosmos_Music_PlayerApp: App {
             }
         }
     }
-    
+
+    private func handleSiriIntent(_ userActivity: NSUserActivity) {
+        print("🎤 Received Siri intent: \(userActivity.activityType)")
+        Task { @MainActor in
+            await appCoordinator.handleSiriPlayIntent(userActivity: userActivity)
+        }
+    }
+
     private func createiCloudContainerPlaceholder() async {
         guard let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
             print("❌ iCloud Drive not available")

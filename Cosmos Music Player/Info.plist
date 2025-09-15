@@ -20,6 +20,27 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>9</string>
+	<key>INAlternativeAppNames</key>
+	<array>
+		<dict>
+			<key>INAlternativeAppName</key>
+			<string>Cosmos Music Player</string>
+			<key>INAlternativeAppNamePronunciationHint</key>
+			<string>cosmos music player</string>
+		</dict>
+		<dict>
+			<key>INAlternativeAppName</key>
+			<string>Cosmos</string>
+			<key>INAlternativeAppNamePronunciationHint</key>
+			<string>cosmos</string>
+		</dict>
+		<dict>
+			<key>INAlternativeAppName</key>
+			<string>Cosmos Musique</string>
+			<key>INAlternativeAppNamePronunciationHint</key>
+			<string>cosmos musique</string>
+		</dict>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

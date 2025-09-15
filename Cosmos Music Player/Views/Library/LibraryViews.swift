@@ -663,7 +663,7 @@ struct SearchView: View {
         // Search artists
         let artists: [Artist] = {
             do {
-                let allArtists = try appCoordinator.getAllArtists()
+                let allArtists = try appCoordinator.databaseManager.getAllArtists()
                 return allArtists.filter { $0.name.lowercased().contains(lowercasedQuery) }
             } catch {
                 return []

@@ -9,6 +9,7 @@ A premium FLAC, MP3, and WAV music player for iOS with advanced features includi
 ### 🎧 Audio Playback
 - **High-Quality Lossless Support**: Native support for lossless FLAC and WAV audio files, plus MP3
 - **Background Playback**: Continue listening while using other apps
+- **Siri Integration**: Voice control for music playback in English and French
 - **ReplayGain Support**: Automatic volume normalization for consistent listening experience
 - **Embedded Artwork**: Displays album art from FLAC, MP3, and WAV metadata
 - **Advanced Audio Engine**: Built with AVFoundation for optimal audio quality
@@ -35,6 +36,27 @@ A premium FLAC, MP3, and WAV music player for iOS with advanced features includi
 - **High-Quality Images**: Artist photos and album artwork
 - **Alternative Sources**: "Wrong artist?" feature to switch between data sources
 - **Smart Caching**: Efficient caching system for offline access
+
+### 🎤 Siri Voice Control
+- **Full Voice Integration**: Control music playback with Siri voice commands
+- **Multi-Language Support**: Works in both English and French
+- **Smart Recognition**: Fuzzy matching for playlist and song names with pronunciation variations
+- **Complete Control**: Play favorites, playlists, specific songs, or all music via voice
+- **Seamless Experience**: Proper queue management and playback state synchronization
+
+#### Supported Siri Commands
+
+**English Commands:**
+- "Hey Siri, play my music on Cosmos"
+- "Hey Siri, play my favorites on Cosmos"
+- "Hey Siri, play [playlist name] on Cosmos"
+- "Hey Siri, play [song name] on Cosmos"
+
+**French Commands:**
+- "Dis Siri, joue ma musique sur Cosmos"
+- "Dis Siri, joue mes favoris sur Cosmos"
+- "Dis Siri, joue la playlist [nom] sur Cosmos"
+- "Dis Siri, joue [nom de chanson] sur Cosmos"
 
 ### 🌍 Internationalization
 - **Multi-Language Support**: English and French translations
@@ -225,6 +247,13 @@ You have two storage options:
 2. View rich artist information from Discogs/Spotify
 3. Tap "Wrong artist?" to switch data sources
 4. Artist data is cached for offline viewing
+
+### Using Siri Voice Control
+1. **Enable Siri**: Ensure Siri is enabled in your device settings
+2. **Grant Permissions**: Allow Siri access to Cosmos Music Player when prompted
+3. **Voice Commands**: Use any of the supported commands listed above
+4. **Language Support**: Works with both English and French Siri
+5. **Smart Matching**: Don't worry about exact pronunciation - the app uses fuzzy matching for names
 
 ### Language Settings
 The app automatically uses your device's language setting. Currently supported:
@@ -450,6 +479,13 @@ Thank you for contributing! 🚀
 - Check device is connected to internet
 - Try signing out and back into iCloud
 
+**Siri not working:**
+- Ensure Siri is enabled in Settings → Siri & Search
+- Grant Siri access to Cosmos Music Player when prompted
+- Try saying "Cosmos" or "Cosmos Musique" (French) to help Siri recognize the app
+- Restart the app to refresh Siri vocabulary
+- Make sure you're connected to the internet for initial Siri setup
+
 ## License 📄
 
 This project is licensed under [Your License] - see the LICENSE file for details.
@@ -506,7 +542,7 @@ For issues, questions, or feature requests:
 
 ## License 📄
 
-This project is licensed under [Your License] - see the LICENSE file for details.
+This project is licensed under GNU - see the LICENSE file for details.
 
 ---
 

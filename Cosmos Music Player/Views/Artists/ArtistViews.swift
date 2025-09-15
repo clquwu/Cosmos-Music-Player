@@ -92,7 +92,7 @@ struct ArtistsScreen: View {
     
     private func loadArtists() {
         do {
-            artists = try appCoordinator.getAllArtists()
+            artists = try appCoordinator.databaseManager.getAllArtists()
         } catch {
             print("Failed to load artists: \(error)")
         }

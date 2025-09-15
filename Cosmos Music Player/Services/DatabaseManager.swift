@@ -28,9 +28,15 @@ class DatabaseManager: @unchecked Sendable {
     }
     
     private func getDatabaseURL() throws -> URL {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory,
-                                                   in: .userDomainMask).first!
-        return documentsPath.appendingPathComponent("MusicLibrary.sqlite")
+        // Try to use app group container first for sharing with Siri extension
+        if let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") {
+            return containerURL.appendingPathComponent("cosmos_music.db")
+        } else {
+            // Fallback to documents directory
+            let documentsPath = FileManager.default.urls(for: .documentDirectory,
+                                                       in: .userDomainMask).first!
+            return documentsPath.appendingPathComponent("MusicLibrary.sqlite")
+        }
     }
     
     private func createTables() throws {
@@ -250,7 +256,79 @@ class DatabaseManager: @unchecked Sendable {
             return try Album.order(Column("title")).fetchAll(db)
         }
     }
-    
+
+    func getArtist(byId id: Int64) throws -> Artist? {
+        return try read { db in
+            return try Artist.filter(Column("id") == id).fetchOne(db)
+        }
+    }
+
+    func getTracksByStableIds(_ stableIds: [String]) throws -> [Track] {
+        return try read { db in
+            return try Track.filter(stableIds.contains(Column("stable_id"))).order(Column("id").desc).fetchAll(db)
+        }
+    }
+
+    func getTracksByAlbumId(_ albumId: Int64) throws -> [Track] {
+        return try read { db in
+            return try Track
+                .filter(Column("album_id") == albumId)
+                .order(Column("disc_no").ascNullsLast, Column("track_no").ascNullsLast)
+                .fetchAll(db)
+        }
+    }
+
+    func getTracksByArtistId(_ artistId: Int64) throws -> [Track] {
+        return try read { db in
+            return try Track
+                .filter(Column("artist_id") == artistId)
+                .order(Column("title"))
+                .fetchAll(db)
+        }
+    }
+
+    // MARK: - Search operations
+
+    func searchTracks(query: String) throws -> [Track] {
+        return try read { db in
+            let searchPattern = "%\(query)%"
+            return try Track
+                .filter(Column("title").like(searchPattern))
+                .order(Column("title"))
+                .fetchAll(db)
+        }
+    }
+
+    func searchAlbums(query: String) throws -> [Album] {
+        return try read { db in
+            let searchPattern = "%\(query)%"
+            return try Album
+                .filter(Column("title").like(searchPattern))
+                .order(Column("title"))
+                .fetchAll(db)
+        }
+    }
+
+    func searchArtists(query: String) throws -> [Artist] {
+        return try read { db in
+            let searchPattern = "%\(query)%"
+            return try Artist
+                .filter(Column("name").like(searchPattern))
+                .order(Column("name"))
+                .fetchAll(db)
+        }
+    }
+
+    func searchPlaylists(query: String) throws -> [Playlist] {
+        return try read { db in
+            let searchPattern = "%\(query)%"
+            return try Playlist
+                .filter(Column("title").like(searchPattern))
+                .order(Column("title"))
+                .fetchAll(db)
+        }
+    }
+
     // MARK: - Favorites operations
     
     func addToFavorites(trackStableId: String) throws {

@@ -7,6 +7,19 @@
 
 import Foundation
 import Combine
+import Intents
+
+extension Dictionary {
+    func compactMapKeys<T>(_ transform: (Key) throws -> T?) rethrows -> [T: Value] {
+        var result: [T: Value] = [:]
+        for (key, value) in self {
+            if let transformedKey = try transform(key) {
+                result[transformedKey] = value
+            }
+        }
+        return result
+    }
+}
 
 enum iCloudStatus: Equatable {
     case available
@@ -469,10 +482,6 @@ class AppCoordinator: ObservableObject {
         await startLibraryIndexing()
     }
     
-    func getAllArtists() throws -> [Artist] {
-        return try databaseManager.getAllArtists()
-    }
-    
     func getAllAlbums() throws -> [Album] {
         return try databaseManager.getAllAlbums()
     }
@@ -602,6 +611,234 @@ class AppCoordinator: ObservableObject {
     
     func playTrack(_ track: Track, queue: [Track] = []) async {
         await playerEngine.playTrack(track, queue: queue)
+    }
+
+    // MARK: - Siri Intent Handling
+
+    func handleSiriPlayIntent(userActivity: NSUserActivity) async {
+        guard let rawUserInfo = userActivity.userInfo else { return }
+
+        // Convert [AnyHashable: Any] to [String: Any]
+        let userInfo = rawUserInfo.compactMapKeys { $0 as? String }
+
+        if let mediaTypeRaw = userInfo["mediaType"] as? Int,
+           let mediaType = INMediaItemType(rawValue: mediaTypeRaw) {
+
+            switch mediaType {
+            case .song:
+                await handleSongPlayback(userInfo: userInfo)
+            case .album, .artist:
+                // Albums and artists are no longer supported - play all music instead
+                await handleGeneralMusicPlayback(userInfo: userInfo)
+            case .playlist:
+                await handlePlaylistPlayback(userInfo: userInfo)
+            case .music:
+                await handleGeneralMusicPlayback(userInfo: userInfo)
+            default:
+                print("❌ Unsupported media type from Siri")
+            }
+        } else if let mediaIdentifiers = userInfo["mediaIdentifiers"] as? [String] {
+            // Direct media identifiers provided
+            await handleDirectPlayback(identifiers: mediaIdentifiers)
+        }
+    }
+
+    private func handleSongPlayback(userInfo: [String: Any]) async {
+        do {
+            if let mediaName = userInfo["mediaName"] as? String {
+                let tracks = try databaseManager.searchTracks(query: mediaName)
+                if let firstTrack = tracks.first {
+                    await playerEngine.playTrack(firstTrack, queue: tracks)
+                }
+            } else {
+                // Play all songs or favorites
+                let tracks = try databaseManager.getAllTracks()
+                if let firstTrack = tracks.first {
+                    await playerEngine.playTrack(firstTrack, queue: tracks)
+                }
+            }
+        } catch {
+            print("❌ Error playing song: \(error)")
+        }
+    }
+
+
+    private func handlePlaylistPlayback(userInfo: [String: Any]) async {
+        do {
+            if let playlistName = userInfo["mediaName"] as? String {
+                let playlists = try databaseManager.searchPlaylists(query: playlistName)
+                if let firstPlaylist = playlists.first {
+                    let playlistItems = try databaseManager.getPlaylistItems(playlistId: firstPlaylist.id!)
+                    let trackStableIds = playlistItems.map { $0.trackStableId }
+                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    if let firstTrack = tracks.first {
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                    }
+                }
+            }
+        } catch {
+            print("❌ Error playing playlist: \(error)")
+        }
+    }
+
+    private func handleGeneralMusicPlayback(userInfo: [String: Any]) async {
+        do {
+            // Play all music - should always play all tracks, not favorites
+            let tracks = try databaseManager.getAllTracks()
+            print("🎵 Playing all music: \(tracks.count) tracks, starting with most recent")
+
+            if let firstTrack = tracks.first {
+                await playerEngine.playTrack(firstTrack, queue: tracks)
+            }
+        } catch {
+            print("❌ Error playing general music: \(error)")
+        }
+    }
+
+    private func handleDirectPlayback(identifiers: [String]) async {
+        do {
+            let tracks = try databaseManager.getTracksByStableIds(identifiers)
+            if let firstTrack = tracks.first {
+                await playerEngine.playTrack(firstTrack, queue: tracks)
+            }
+        } catch {
+            print("❌ Error with direct playback: \(error)")
+        }
+    }
+
+    func handleSiriPlaybackIntent(_ intent: INPlayMediaIntent, completion: @escaping (INIntentResponse) -> Void) async {
+        // Extract media item from the intent
+        guard let mediaItem = intent.mediaItems?.first, let identifier = mediaItem.identifier else {
+            completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            return
+        }
+
+        print("🎤 Handling Siri playback intent for: \(identifier)")
+
+        do {
+            if identifier.hasPrefix("search_song_") {
+                let songName = String(identifier.dropFirst(12)) // Remove "search_song_" prefix
+                print("🎤 Searching for song: '\(songName)'")
+                let tracks = try databaseManager.searchTracks(query: songName)
+                if let firstTrack = tracks.first {
+                    await playerEngine.playTrack(firstTrack, queue: tracks)
+                    completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                } else {
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            } else if identifier.hasPrefix("search_playlist_") {
+                let playlistName = String(identifier.dropFirst(16)) // Remove "search_playlist_" prefix
+                print("🎤 Searching for playlist: '\(playlistName)'")
+                let playlists = try databaseManager.searchPlaylists(query: playlistName)
+                if let firstPlaylist = playlists.first, let playlistId = firstPlaylist.id {
+                    let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
+                    let trackStableIds = playlistItems.map { $0.trackStableId }
+                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    if let firstTrack = tracks.first {
+                        // Update playlist last played time
+                        try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    } else {
+                        completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                    }
+                } else {
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            } else if identifier == "my_playlist" {
+                // Play the most recently played playlist
+                let playlists = try databaseManager.getAllPlaylists()
+                if let firstPlaylist = playlists.first, let playlistId = firstPlaylist.id {
+                    let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
+                    let trackStableIds = playlistItems.map { $0.trackStableId }
+                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    if let firstTrack = tracks.first {
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    } else {
+                        completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                    }
+                } else {
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            } else if identifier.hasPrefix("playlist_") {
+                let playlistIdString = String(identifier.dropFirst(9)) // Remove "playlist_" prefix
+                print("🎤 Playing playlist with ID: '\(playlistIdString)'")
+                if let playlistId = Int64(playlistIdString) {
+                    let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
+                    let trackStableIds = playlistItems.map { $0.trackStableId }
+                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    print("🎤 Found \(tracks.count) tracks in playlist \(playlistId)")
+                    if let firstTrack = tracks.first {
+                        // Update playlist last played time
+                        try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    } else {
+                        print("❌ No tracks found in playlist \(playlistId)")
+                        completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                    }
+                } else {
+                    print("❌ Invalid playlist ID: '\(playlistIdString)'")
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            } else if identifier == "search_playlist_unknown" {
+                // Generic playlist request - play first playlist
+                let playlists = try databaseManager.getAllPlaylists()
+                if let firstPlaylist = playlists.first, let playlistId = firstPlaylist.id {
+                    let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
+                    let trackStableIds = playlistItems.map { $0.trackStableId }
+                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    if let firstTrack = tracks.first {
+                        // Update playlist last played time
+                        try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    } else {
+                        completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                    }
+                } else {
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            } else if identifier == "no_favorites" {
+                // User requested favorites but none exist
+                print("🎵 No favorites found - user needs to add some favorites first")
+                completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            } else if identifier == "music_all" {
+                // Play all music
+                let tracks = try databaseManager.getAllTracks()
+                if let firstTrack = tracks.first {
+                    await playerEngine.playTrack(firstTrack, queue: tracks)
+                    completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                } else {
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            } else {
+                // Try to find by stable ID directly
+                if let track = try databaseManager.getTrack(byStableId: identifier) {
+                    // Check if this track is from favorites by looking at the intent's media items
+                    let favoriteIds = try databaseManager.getFavorites()
+
+                    if favoriteIds.contains(identifier) {
+                        // This is a favorite track - queue all favorites
+                        print("🎵 Playing favorite track with favorites queue")
+                        let favoritesTracks = try databaseManager.getTracksByStableIds(favoriteIds)
+                        await playerEngine.playTrack(track, queue: favoritesTracks)
+                    } else {
+                        // Regular track - queue all tracks
+                        print("🎵 Playing regular track with all tracks queue")
+                        let allTracks = try databaseManager.getAllTracks()
+                        await playerEngine.playTrack(track, queue: allTracks)
+                    }
+                    completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                } else {
+                    completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+                }
+            }
+        } catch {
+            print("❌ Error handling Siri playback: \(error)")
+            completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+        }
     }
 }
 
