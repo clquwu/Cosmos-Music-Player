@@ -8,6 +8,8 @@
 import Foundation
 import Combine
 import Intents
+import UIKit
+import AVFoundation
 
 extension Dictionary {
     func compactMapKeys<T>(_ transform: (Key) throws -> T?) rethrows -> [T: Value] {
@@ -688,6 +690,8 @@ class AppCoordinator: ObservableObject {
             print("🎵 Playing all music: \(tracks.count) tracks, starting with most recent")
 
             if let firstTrack = tracks.first {
+                // Set up background session BEFORE starting playback for Siri
+                await triggerBackgroundLifecycleForSiri()
                 await playerEngine.playTrack(firstTrack, queue: tracks)
             }
         } catch {
@@ -695,10 +699,20 @@ class AppCoordinator: ObservableObject {
         }
     }
 
+
+    private func triggerBackgroundLifecycleForSiri() async {
+        // Delegate to PlayerEngine to handle background session setup for Siri
+        await MainActor.run {
+            PlayerEngine.shared.setupBackgroundSessionForSiri()
+        }
+    }
+
     private func handleDirectPlayback(identifiers: [String]) async {
         do {
             let tracks = try databaseManager.getTracksByStableIds(identifiers)
             if let firstTrack = tracks.first {
+                // Set up background session BEFORE starting playback for Siri
+                await triggerBackgroundLifecycleForSiri()
                 await playerEngine.playTrack(firstTrack, queue: tracks)
             }
         } catch {
@@ -707,7 +721,7 @@ class AppCoordinator: ObservableObject {
     }
 
     func handleSiriPlaybackIntent(_ intent: INPlayMediaIntent, completion: @escaping (INIntentResponse) -> Void) async {
-        // Extract media item from the intent
+        // Extract media items from the intent
         guard let mediaItem = intent.mediaItems?.first, let identifier = mediaItem.identifier else {
             completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
             return
@@ -721,6 +735,8 @@ class AppCoordinator: ObservableObject {
                 print("🎤 Searching for song: '\(songName)'")
                 let tracks = try databaseManager.searchTracks(query: songName)
                 if let firstTrack = tracks.first {
+                    // Set up background session BEFORE starting playback for Siri
+                    await triggerBackgroundLifecycleForSiri()
                     await playerEngine.playTrack(firstTrack, queue: tracks)
                     completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                 } else {
@@ -808,6 +824,8 @@ class AppCoordinator: ObservableObject {
                 // Play all music
                 let tracks = try databaseManager.getAllTracks()
                 if let firstTrack = tracks.first {
+                    // Set up background session BEFORE starting playback for Siri
+                    await triggerBackgroundLifecycleForSiri()
                     await playerEngine.playTrack(firstTrack, queue: tracks)
                     completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                 } else {
@@ -828,6 +846,8 @@ class AppCoordinator: ObservableObject {
                         // Regular track - queue all tracks
                         print("🎵 Playing regular track with all tracks queue")
                         let allTracks = try databaseManager.getAllTracks()
+                        // Set up background session BEFORE starting playback for Siri
+                        await triggerBackgroundLifecycleForSiri()
                         await playerEngine.playTrack(track, queue: allTracks)
                     }
                     completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))

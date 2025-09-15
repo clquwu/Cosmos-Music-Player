@@ -694,7 +694,7 @@ class AudioMetadataParser {
         print("📊 FLAC file size: \(fileSize) bytes for \(url.lastPathComponent)")
         
         // Don't try to read files that are too large (>100MB) or too small (<1KB)
-        guard fileSize > 1024 && fileSize < 100_000_000 else {
+        guard fileSize > 1024 && fileSize < 300_000_000 else {
             print("❌ FLAC file size is unreasonable: \(fileSize) bytes")
             throw AudioParseError.fileSizeError
         }
