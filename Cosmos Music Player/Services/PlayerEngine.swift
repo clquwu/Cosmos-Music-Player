@@ -59,6 +59,7 @@ class PlayerEngine: NSObject, ObservableObject {
     
     // System volume integration
     private var silentPlayer: AVAudioPlayer?
+    private var pausedSilentPlayer: AVAudioPlayer?
     private nonisolated(unsafe) var volumeCheckTimer: Timer?
     private var lastKnownVolume: Float = -1
     private var isUserChangingVolume = false
@@ -779,28 +780,32 @@ class PlayerEngine: NSObject, ObservableObject {
         
         if playbackState == .paused {
             print("▶️ Resuming from pause at position: \(playbackTime)s")
-            
+
             // When resuming from pause, we need to re-schedule audio from the correct position
             // instead of just continuing the engine, because the timing may have drifted
             cancelPendingCompletions()
             playerNode.stop()
-            
+
             // Re-schedule from the stored pause position
             // Note: audioFile is already unwrapped from the guard statement above
-            
+
             let framePosition = AVAudioFramePosition(playbackTime * audioFile.processingFormat.sampleRate)
             scheduleSegment(from: framePosition, file: audioFile)
-            
+
             do {
                 try audioEngine.start()
                 playerNode.play()
                 isPlaying = true
                 playbackState = .playing
                 startPlaybackTimer()
+
+                // End paused state monitoring and start regular playing monitoring
+                stopSilentPlaybackForPause()
+                endBackgroundMonitoring()
                 startBackgroundMonitoring()
-                
+
                 print("✅ Resumed playback from position: \(playbackTime)s")
-                
+
                 // Update Now Playing info with enhanced approach
                 updateNowPlayingInfoEnhanced()
                 return
@@ -891,28 +896,31 @@ class PlayerEngine: NSObject, ObservableObject {
            let playerTime = playerNode.playerTime(forNodeTime: nodeTime) {
             let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
             let currentPosition = seekTimeOffset + nodePlaybackTime
-            
+
             print("🔄 Pausing at position: \(currentPosition)s")
-            
+
             // Store the exact pause position
             playbackTime = currentPosition
             seekTimeOffset = currentPosition
         }
-        
+
         // Use AVAudioEngine.pause() instead of playerNode.pause()
         audioEngine.pause()
-        
+
         // Update state
         isPlaying = false
         playbackState = .paused
         stopPlaybackTimer()
-        endBackgroundMonitoring()
-        
+
+        // CRITICAL: Keep background monitoring active when paused to prevent termination
+        // endBackgroundMonitoring() - commented out to maintain background execution
+        startPausedStateMonitoring()
+
         print("🔄 Paused audio engine - stored position: \(playbackTime)s")
-        
+
         // Update Now Playing info with enhanced approach
         updateNowPlayingInfoEnhanced()
-        
+
         // Save state when pausing
         savePlayerState()
     }
@@ -929,14 +937,14 @@ class PlayerEngine: NSObject, ObservableObject {
         playbackState = .stopped
         playbackTime = 0
         stopPlaybackTimer()
+
+        // Stop all background monitoring and silent playback
+        stopSilentPlaybackForPause()
         endBackgroundMonitoring()
-        
-        // Audio session deactivation will handle background execution cleanup
-        
+
         // Clear Now Playing info when stopped
         updateNowPlayingInfoEnhanced()
-        
-        
+
         // Clear remote command targets to remove from control center
         if hasSetupRemoteCommands {
             let commandCenter = MPRemoteCommandCenter.shared()
@@ -948,15 +956,15 @@ class PlayerEngine: NSObject, ObservableObject {
             hasSetupRemoteCommands = false
             print("🎛️ Remote commands cleared from control center")
         }
-        
-        // Deactivate audio session to allow other apps to play
+
+        // Deactivate audio session to allow other apps to play (only when truly stopping)
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             print("🎧 Audio session deactivated - allowing other apps to play")
         } catch {
             print("Failed to deactivate audio session: \(error)")
         }
-        
+
         // Save state when stopping
         savePlayerState()
     }
@@ -1054,11 +1062,14 @@ class PlayerEngine: NSObject, ObservableObject {
     }
     
     private func startBackgroundMonitoring() {
-        // Begin a background task to keep the app alive
-        backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
-            self?.endBackgroundMonitoring()
+        // Only create a background task if we don't already have one
+        if backgroundTask == .invalid {
+            backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
+                print("🚨 Background task expiring during playback")
+                self?.endBackgroundMonitoring()
+            }
         }
-        
+
         // Start a timer that works in background
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -1071,10 +1082,107 @@ class PlayerEngine: NSObject, ObservableObject {
     private func endBackgroundMonitoring() {
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = nil
-        
+
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
+        }
+    }
+
+    private func startPausedStateMonitoring() {
+        // Begin a background task to keep the app alive while paused
+        if backgroundTask == .invalid {
+            backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
+                print("🚨 Background task about to expire while paused - starting silent playback")
+                self?.startSilentPlaybackForPause()
+            }
+        }
+
+        // Start silent playback to maintain audio session during pause
+        startSilentPlaybackForPause()
+
+        print("🔄 Started paused state monitoring with silent playback to prevent termination")
+    }
+
+    private func startSilentPlaybackForPause() {
+        // Create a very quiet, looping audio player to maintain background execution
+        guard pausedSilentPlayer == nil else {
+            if pausedSilentPlayer?.isPlaying == false {
+                pausedSilentPlayer?.play()
+            }
+            return
+        }
+
+        do {
+            // Create a tiny silent buffer programmatically
+            let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4410)! // 0.1 seconds at 44.1kHz
+            buffer.frameLength = 4410
+
+            // Buffer is already silent (zero-filled by default)
+
+            // Write to temporary file
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("pause_silence.caf")
+            let audioFile = try AVAudioFile(forWriting: tempURL, settings: format.settings)
+            try audioFile.write(from: buffer)
+
+            // Create player with very low volume
+            pausedSilentPlayer = try AVAudioPlayer(contentsOf: tempURL)
+            pausedSilentPlayer?.volume = 0.001  // Nearly silent
+            pausedSilentPlayer?.numberOfLoops = -1  // Loop indefinitely
+            pausedSilentPlayer?.prepareToPlay()
+            pausedSilentPlayer?.play()
+
+            print("🔇 Started silent playback to maintain background execution during pause")
+
+        } catch {
+            print("❌ Failed to create silent player for pause: \(error)")
+            // Fallback to the original method
+            maintainAudioSessionForBackground()
+        }
+    }
+
+    private func stopSilentPlaybackForPause() {
+        pausedSilentPlayer?.stop()
+        pausedSilentPlayer = nil
+        print("🔇 Stopped silent playback for pause")
+    }
+
+    private func maintainAudioSessionForBackground() {
+        // Keep the audio session active to prevent app termination
+        do {
+            let session = AVAudioSession.sharedInstance()
+
+            // Only maintain session if we're not already active
+            guard !session.isOtherAudioPlaying else {
+                print("🎧 Other audio playing, not maintaining session")
+                return
+            }
+
+            // Don't change category if already correct - this prevents the error
+            if session.category != .playback {
+                try session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetooth, .allowBluetoothA2DP])
+            }
+
+            // Only activate if not already active
+            if !session.secondaryAudioShouldBeSilencedHint {
+                try session.setActive(true, options: [])
+                print("🎧 Audio session maintained during pause to prevent termination")
+            } else {
+                print("🎧 Audio session already active during pause")
+            }
+
+            // Refresh background time remaining
+            let timeRemaining = UIApplication.shared.backgroundTimeRemaining
+            if timeRemaining < Double.infinity {
+                print("⏰ Background time remaining: \(Int(timeRemaining))s")
+            } else {
+                print("⏰ Background time: unlimited (audio session active)")
+            }
+
+        } catch {
+            print("❌ Failed to maintain audio session during pause: \(error)")
+            // Don't try to maintain session if it fails - let the app handle it naturally
         }
     }
     
