@@ -43,6 +43,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var hasRestoredState = false
     private var hasSetupAudioEngine = false
     private var hasSetupAudioSession = false
+    private var hasSetupSiriBackgroundSession = false
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -1422,8 +1423,15 @@ class PlayerEngine: NSObject, ObservableObject {
     // MARK: - Timer and Updates
     
     func startPlaybackTimer() {
+        // Don't start timer if we're in Siri background mode (app launched by Siri)
+        let appState = UIApplication.shared.applicationState
+        if hasSetupSiriBackgroundSession && appState == .background {
+            print("🔄 Skipping playback timer start - Siri background mode active")
+            return
+        }
+
         stopPlaybackTimer()
-        
+
         playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.updatePlaybackTime()
@@ -1794,6 +1802,50 @@ class PlayerEngine: NSObject, ObservableObject {
     
     // MARK: - State Persistence
     
+    func setupBackgroundSessionForSiri() {
+        // When Siri launches the app, it bypasses normal lifecycle events
+        // This method manually sets up the background session that would normally
+        // happen via handleWillResignActive() and handleDidEnterBackground()
+
+        print("🎤 Setting up background session for Siri-initiated playback")
+
+        // Check app state to confirm we're in background
+        let appState = UIApplication.shared.applicationState
+        print("🎤 App state: \(appState == .background ? "background" : appState == .inactive ? "inactive" : "active")")
+
+        // Mark that we've set up Siri background session
+        hasSetupSiriBackgroundSession = true
+
+        // Set up audio session for background (same as handleWillResignActive)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: []) // no mixWithOthers in bg
+            try session.setActive(true, options: [])
+            print("🎧 Session keepalive on resign active - success")
+        } catch {
+            print("❌ Session keepalive on resign active failed: \(error)")
+        }
+
+        // Background diagnostic and state saving (same as handleDidEnterBackground)
+        let backgroundTime = UIApplication.shared.backgroundTimeRemaining
+        print("🔍 DIAGNOSTIC - backgroundTimeRemaining: \(backgroundTime)")
+
+        // Stop playback timer since we're in background - use force stop to ensure it's really stopped
+        stopPlaybackTimer()
+
+        // Double-check timer is stopped
+        if playbackTimer == nil {
+            print("🔄 Playback timer stopped for Siri background mode")
+        } else {
+            print("⚠️ Playback timer still running - forcing stop")
+            playbackTimer?.invalidate()
+            playbackTimer = nil
+        }
+
+        // Save player state
+        savePlayerState()
+    }
+
     func savePlayerState() {
         guard let currentTrack = currentTrack else {
             print("🚫 No current track to save state for")
