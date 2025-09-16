@@ -50,12 +50,12 @@ class FileCleanupManager: ObservableObject {
                     // Check if it's in iCloud Drive folder
                     let isInICloud = trackURL.path.contains(iCloudFolderURL.path)
                     print("🧹   Is in iCloud folder: \(isInICloud)")
-                    
+
                     if isInICloud {
                         // This is an iCloud file, check if it still exists in iCloud
                         let existsInCloud = await fileExistsInCloud(trackURL)
                         print("🧹   Exists in iCloud: \(existsInCloud)")
-                        
+
                         if !existsInCloud {
                             orphanedFiles.append(trackURL)
                             print("🧹 ✅ Found orphaned iCloud file (deleted from iCloud): \(trackURL.lastPathComponent)")
@@ -65,9 +65,17 @@ class FileCleanupManager: ObservableObject {
                         print("🧹 ✅ Local file found (keeping): \(trackURL.lastPathComponent)")
                     }
                 } else {
-                    print("🧹   File doesn't exist anywhere - will auto-clean from database")
-                    // File doesn't exist at all, auto-remove from database without asking user
-                    nonExistentFiles.append(trackURL)
+                    // File doesn't exist locally - check if it's an external file with bookmark
+                    let canResolveBookmark = await canResolveExternalFile(trackURL)
+                    print("🧹   Can resolve external bookmark: \(canResolveBookmark)")
+
+                    if canResolveBookmark {
+                        print("🧹 ✅ External file accessible via bookmark (keeping): \(trackURL.lastPathComponent)")
+                    } else {
+                        print("🧹   File doesn't exist anywhere - will auto-clean from database")
+                        // File doesn't exist at all, auto-remove from database without asking user
+                        nonExistentFiles.append(trackURL)
+                    }
                 }
             }
             
@@ -169,6 +177,30 @@ class FileCleanupManager: ObservableObject {
     }
     
     
+    private func canResolveExternalFile(_ fileURL: URL) async -> Bool {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else {
+            return false
+        }
+
+        do {
+            let data = try Data(contentsOf: bookmarksURL)
+            guard let bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data],
+                  let bookmarkData = bookmarks[fileURL.path] else {
+                return false
+            }
+
+            var isStale = false
+            let _ = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+
+            return !isStale
+        } catch {
+            return false
+        }
+    }
+
     private func generateStableId(for url: URL) -> String {
         // Simple stable ID based only on filename - matches LibraryIndexer
         let filename = url.lastPathComponent

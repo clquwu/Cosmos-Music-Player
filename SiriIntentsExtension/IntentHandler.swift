@@ -346,10 +346,18 @@ class IntentHandler: INExtension, INPlayMediaIntentHandling {
             let lowercased = mediaName.lowercased()
             print("🔍 Checking if '\(mediaName)' is a favorites request...")
 
-            // English keywords
-            let englishFavoriteKeywords = ["favorite", "favourite", "liked", "love"]
+            let englishFavoriteKeywords = [
+                "favorite", "favourite", "liked", "love", "loved",
+                "liked songs", "favorite songs", "favourite songs",
+                "my liked songs", "my favorite songs", "my favourite songs",
+                "my loved songs", "loved songs"
+            ]
             // French keywords
-            let frenchFavoriteKeywords = ["préféré", "prefere", "favori", "favoris", "aimé", "aime", "coup de coeur"]
+            let frenchFavoriteKeywords = [
+                "préféré", "prefere", "favori", "favoris", "aimé", "aime", "coup de coeur",
+                "chansons préférées", "mes chansons préférées", "chansons aimées",
+                "mes chansons aimées", "musique préférée", "ma musique préférée"
+            ]
 
             let isFavorites = englishFavoriteKeywords.contains { lowercased.contains($0) } ||
                              frenchFavoriteKeywords.contains { lowercased.contains($0) }
