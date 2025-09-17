@@ -43,6 +43,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var hasRestoredState = false
     private var hasSetupAudioEngine = false
     private var hasSetupAudioSession = false
+    private var hasSetupSiriBackgroundSession = false
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -88,24 +89,26 @@ class PlayerEngine: NSObject, ObservableObject {
         setupPeriodicStateSaving()
     }
     
-    private func ensureAudioEngineSetup() {
+    private func ensureAudioEngineSetup(with format: AVAudioFormat? = nil) {
         guard !hasSetupAudioEngine else { return }
         hasSetupAudioEngine = true
-        setupAudioEngine()
+        setupAudioEngine(with: format)
     }
     
-    private func setupAudioEngine() {
+    private func setupAudioEngine(with format: AVAudioFormat? = nil) {
         audioEngine.attach(playerNode)
-        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: nil)
+
+        // Use the file's format when available to maintain proper sample rate
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
         audioEngine.connect(audioEngine.mainMixerNode,
                             to: audioEngine.outputNode,
                             format: audioEngine.mainMixerNode.outputFormat(forBus: 0))
-        
+
         // CRITICAL: Prepare the engine to guarantee render loop activity
         audioEngine.prepare()
-        
+
         // Don't start the engine here - wait until we actually need to play
-        print("✅ Audio engine configured and prepared with explicit output connection")
+        print("✅ Audio engine configured and prepared with format: \(format?.description ?? "auto")")
     }
     
     
@@ -497,12 +500,22 @@ class PlayerEngine: NSObject, ObservableObject {
             }
             return
         }
-        
+
+        // Get accurate current time from node for Control Center synchronization
+        var currentTime = playbackTime
+        if let audioFile = audioFile,
+           hasSetupAudioEngine && audioEngine.isRunning,
+           let nodeTime = playerNode.lastRenderTime,
+           let playerTime = playerNode.playerTime(forNodeTime: nodeTime) {
+            let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
+            currentTime = seekTimeOffset + nodePlaybackTime
+        }
+
         // Create comprehensive Now Playing info
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPMediaItemPropertyPlaybackDuration: duration,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: playbackTime,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyPlaybackQueueCount: playbackQueue.count
@@ -557,7 +570,7 @@ class PlayerEngine: NSObject, ObservableObject {
             }
             
             print("🎛️ Enhanced Control Center update - playing: \(self?.isPlaying ?? false)")
-            print("🎛️ Title: \(track.title), Time: \(self?.playbackTime ?? 0)")
+            print("🎛️ Title: \(track.title), Time: \(currentTime)")
         }
         
         // Load artwork asynchronously if needed
@@ -764,8 +777,8 @@ class PlayerEngine: NSObject, ObservableObject {
             return
         }
         
-        // Set up audio engine only when needed (FIRST)
-        ensureAudioEngineSetup()
+        // Set up audio engine only when needed (FIRST) with file's format
+        ensureAudioEngineSetup(with: audioFile.processingFormat)
         
         // Ensure basic audio session setup first
         ensureAudioSessionSetup()
@@ -1014,8 +1027,8 @@ class PlayerEngine: NSObject, ObservableObject {
         
         print("🔍 Seeking to: \(time)s (frame: \(framePosition))")
         
-        // Ensure audio engine is set up before seeking
-        ensureAudioEngineSetup()
+        // Ensure audio engine is set up before seeking with file's format
+        ensureAudioEngineSetup(with: audioFile.processingFormat)
         
         cancelPendingCompletions()
         playerNode.stop()
@@ -1047,7 +1060,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private func scheduleSegment(from startFrame: AVAudioFramePosition, file: AVAudioFile) {
         let remaining = file.length - startFrame
         guard remaining > 0 else { return }
-        
+
         // Schedule WITHOUT any completion handler
         playerNode.scheduleSegment(
             file,
@@ -1056,7 +1069,7 @@ class PlayerEngine: NSObject, ObservableObject {
             at: nil,
             completionHandler: nil
         )
-        
+
         // Start background monitoring when we schedule a segment
         startBackgroundMonitoring()
     }
@@ -1407,12 +1420,13 @@ class PlayerEngine: NSObject, ObservableObject {
             
             if let sampleRate = currentTrack?.sampleRate {
                 try session.setPreferredSampleRate(Double(sampleRate))
+                // CRITICAL: Must activate session for sample rate change to take effect
+                try session.setActive(true)
             }
             
-            // Don't activate session here - only activate when actually playing
-            // try session.setActive(true) - removed to prevent interrupting other apps during track loading
-            
             print("Configured audio session preferences - Sample Rate: \(session.sampleRate)")
+            print("🎵 File format rate: \(format.sampleRate)")
+            print("🎧 Audio session ACTUAL sample rate: \(session.sampleRate)")
             
         } catch {
             print("Failed to configure audio session: \(error)")
@@ -1422,8 +1436,16 @@ class PlayerEngine: NSObject, ObservableObject {
     // MARK: - Timer and Updates
     
     func startPlaybackTimer() {
+        // Don't start timer if we're in Siri background mode (app launched by Siri)
+        let appState = UIApplication.shared.applicationState
+        if hasSetupSiriBackgroundSession && appState == .background {
+            print("🔄 Skipping playback timer start - Siri background mode active")
+            return
+        }
+
         stopPlaybackTimer()
-        
+
+        // Keep 0.1s interval for accurate timing
         playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.updatePlaybackTime()
@@ -1431,26 +1453,25 @@ class PlayerEngine: NSObject, ObservableObject {
         }
     }
     
+    private var lastControlCenterUpdate: TimeInterval = 0
+
     private func updatePlaybackTime() async {
         guard let audioFile = audioFile,
               let nodeTime = playerNode.lastRenderTime,
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
             return
         }
-        
+
         // Add seek offset to handle scheduleSegment from non-zero positions
+        // playerTime.sampleTime is in the file's sample rate, so use file rate for calculation
         let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
         let calculatedTime = seekTimeOffset + nodePlaybackTime
-        
+
         // Only update playback time if we're actually playing (prevents drift during pause/resume)
         if isPlaying {
             playbackTime = calculatedTime
-            // Debug timing every 5 seconds
-            if Int(calculatedTime) % 5 == 0 && Int(calculatedTime) != Int(seekTimeOffset) {
-                print("⏱️ Playback time: \(String(format: "%.2f", calculatedTime))s (offset: \(String(format: "%.2f", seekTimeOffset))s, node: \(String(format: "%.2f", nodePlaybackTime))s)")
-            }
         }
-        
+
         // Remove this duplicate detection - it's handled by checkIfTrackEnded()
         /* DELETE THIS BLOCK:
          if isPlaying && playbackTime >= duration - 0.1 && duration > 0 {
@@ -1458,9 +1479,10 @@ class PlayerEngine: NSObject, ObservableObject {
          await handleTrackEnd()
          }
          */
-        
-        // Update Now Playing info every few seconds to keep Lock Screen current
-        if Int(playbackTime) % 3 == 0 {
+
+        // Update Now Playing info less frequently for large files - only every 2 seconds and avoid spam
+        if playbackTime - lastControlCenterUpdate >= 2.0 {
+            lastControlCenterUpdate = playbackTime
             updateNowPlayingInfoEnhanced()
         }
     }
@@ -1794,6 +1816,50 @@ class PlayerEngine: NSObject, ObservableObject {
     
     // MARK: - State Persistence
     
+    func setupBackgroundSessionForSiri() {
+        // When Siri launches the app, it bypasses normal lifecycle events
+        // This method manually sets up the background session that would normally
+        // happen via handleWillResignActive() and handleDidEnterBackground()
+
+        print("🎤 Setting up background session for Siri-initiated playback")
+
+        // Check app state to confirm we're in background
+        let appState = UIApplication.shared.applicationState
+        print("🎤 App state: \(appState == .background ? "background" : appState == .inactive ? "inactive" : "active")")
+
+        // Mark that we've set up Siri background session
+        hasSetupSiriBackgroundSession = true
+
+        // Set up audio session for background (same as handleWillResignActive)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: []) // no mixWithOthers in bg
+            try session.setActive(true, options: [])
+            print("🎧 Session keepalive on resign active - success")
+        } catch {
+            print("❌ Session keepalive on resign active failed: \(error)")
+        }
+
+        // Background diagnostic and state saving (same as handleDidEnterBackground)
+        let backgroundTime = UIApplication.shared.backgroundTimeRemaining
+        print("🔍 DIAGNOSTIC - backgroundTimeRemaining: \(backgroundTime)")
+
+        // Stop playback timer since we're in background - use force stop to ensure it's really stopped
+        stopPlaybackTimer()
+
+        // Double-check timer is stopped
+        if playbackTimer == nil {
+            print("🔄 Playback timer stopped for Siri background mode")
+        } else {
+            print("⚠️ Playback timer still running - forcing stop")
+            playbackTimer?.invalidate()
+            playbackTimer = nil
+        }
+
+        // Save player state
+        savePlayerState()
+    }
+
     func savePlayerState() {
         guard let currentTrack = currentTrack else {
             print("🚫 No current track to save state for")

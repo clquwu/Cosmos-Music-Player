@@ -88,31 +88,47 @@ class ShareViewController: SLComposeServiceViewController {
             print("Failed to get shared container URL")
             return
         }
-        
-        let documentsURL = sharedContainer.appendingPathComponent("Documents")
-        let musicURL = documentsURL.appendingPathComponent("Music")
-        
-        // Create directories if they don't exist
-        do {
-            try FileManager.default.createDirectory(at: musicURL, withIntermediateDirectories: true, attributes: nil)
-        } catch {
-            print("Failed to create directories: \(error)")
+
+        // Instead of copying, store the URL and bookmark data for the main app to process
+        storeSharedURL(sourceURL)
+    }
+
+    private func storeSharedURL(_ url: URL) {
+        guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
+            print("Failed to get shared container URL")
             return
         }
-        
-        let fileName = sourceURL.lastPathComponent
-        let destinationURL = musicURL.appendingPathComponent(fileName)
-        
+
+        let sharedDataURL = sharedContainer.appendingPathComponent("SharedAudioFiles.plist")
+
         do {
-            // Remove existing file if it exists
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
+            // Create bookmark data for security-scoped access
+            let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+
+            // Load existing shared files or create new array
+            var sharedFiles: [[String: Data]] = []
+            if FileManager.default.fileExists(atPath: sharedDataURL.path) {
+                if let data = try? Data(contentsOf: sharedDataURL),
+                   let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [[String: Data]] {
+                    sharedFiles = plist
+                }
             }
-            
-            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-            print("Successfully copied audio file to: \(destinationURL.path)")
+
+            // Add new file info
+            let fileInfo: [String: Data] = [
+                "url": url.absoluteString.data(using: .utf8) ?? Data(),
+                "bookmark": bookmarkData,
+                "filename": url.lastPathComponent.data(using: .utf8) ?? Data()
+            ]
+            sharedFiles.append(fileInfo)
+
+            // Save updated list
+            let plistData = try PropertyListSerialization.data(fromPropertyList: sharedFiles, format: .xml, options: 0)
+            try plistData.write(to: sharedDataURL)
+
+            print("Successfully stored shared audio file reference: \(url.lastPathComponent)")
         } catch {
-            print("Failed to copy audio file: \(error)")
+            print("Failed to store shared audio file reference: \(error)")
         }
     }
     

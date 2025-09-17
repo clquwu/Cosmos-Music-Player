@@ -34,40 +34,40 @@ class FileCleanupManager: ObservableObject {
             let allTracks = try databaseManager.getAllTracks()
             print("🧹 Found \(allTracks.count) tracks in database")
             
-            var orphanedFiles: [URL] = []
             var nonExistentFiles: [URL] = []
             
             for track in allTracks {
                 let trackURL = URL(fileURLWithPath: track.path)
                 print("🧹 Checking track: \(trackURL.lastPathComponent)")
                 print("🧹   Path: \(trackURL.path)")
-                
-                // Check if file exists locally
-                let fileExists = FileManager.default.fileExists(atPath: trackURL.path)
-                print("🧹   File exists locally: \(fileExists)")
-                
-                if fileExists {
-                    // Check if it's in iCloud Drive folder
-                    let isInICloud = trackURL.path.contains(iCloudFolderURL.path)
-                    print("🧹   Is in iCloud folder: \(isInICloud)")
-                    
-                    if isInICloud {
-                        // This is an iCloud file, check if it still exists in iCloud
-                        let existsInCloud = await fileExistsInCloud(trackURL)
-                        print("🧹   Exists in iCloud: \(existsInCloud)")
-                        
-                        if !existsInCloud {
-                            orphanedFiles.append(trackURL)
-                            print("🧹 ✅ Found orphaned iCloud file (deleted from iCloud): \(trackURL.lastPathComponent)")
-                        }
+
+                // Check if this is an internal file (iCloud/Documents) or external file
+                let isInternalFile = trackURL.path.contains(iCloudFolderURL.path) ||
+                                   trackURL.path.contains("/Documents/")
+                print("🧹   Is internal file: \(isInternalFile)")
+
+                if isInternalFile {
+                    // For internal files, simple existence check
+                    let fileExists = FileManager.default.fileExists(atPath: trackURL.path)
+                    print("🧹   Internal file exists: \(fileExists)")
+
+                    if fileExists {
+                        print("🧹 ✅ Internal file exists (keeping): \(trackURL.lastPathComponent)")
                     } else {
-                        // File exists locally but NOT in iCloud Drive folder - this is a LOCAL file, keep it!
-                        print("🧹 ✅ Local file found (keeping): \(trackURL.lastPathComponent)")
+                        print("🧹   Internal file doesn't exist - will auto-clean from database")
+                        nonExistentFiles.append(trackURL)
                     }
                 } else {
-                    print("🧹   File doesn't exist anywhere - will auto-clean from database")
-                    // File doesn't exist at all, auto-remove from database without asking user
-                    nonExistentFiles.append(trackURL)
+                    // For external files (from share/document picker), check if still accessible
+                    let isAccessible = await checkExternalFileAccessibility(trackURL)
+                    print("🧹   External file accessible: \(isAccessible)")
+
+                    if isAccessible {
+                        print("🧹 ✅ External file still accessible (keeping): \(trackURL.lastPathComponent)")
+                    } else {
+                        print("🧹   External file no longer accessible - will auto-clean from database")
+                        nonExistentFiles.append(trackURL)
+                    }
                 }
             }
             
@@ -93,82 +93,204 @@ class FileCleanupManager: ObservableObject {
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             }
             
-            print("🧹 Total orphaned files found: \(orphanedFiles.count)")
-            
-            // Auto-remove orphaned iCloud files (deleted from iCloud Drive) without asking user
-            if !orphanedFiles.isEmpty {
-                print("🧹 Auto-removing \(orphanedFiles.count) files that were deleted from iCloud")
-                
-                for fileURL in orphanedFiles {
-                    do {
-                        let stableId = generateStableId(for: fileURL)
-                        print("🧹 Auto-removing orphaned file: \(fileURL.lastPathComponent)")
-                        
-                        // Remove from database
-                        if let track = try databaseManager.getTrack(byStableId: stableId) {
-                            print("🧹 Removing track from database: \(track.title)")
-                            try databaseManager.deleteTrack(byStableId: stableId)
-                        }
-                        
-                        // Remove local file if it exists
-                        if FileManager.default.fileExists(atPath: fileURL.path) {
-                            try FileManager.default.removeItem(at: fileURL)
-                            print("🧹 Deleted local file: \(fileURL.lastPathComponent)")
-                        }
-                        
-                    } catch {
-                        print("🧹 Error removing orphaned file \(fileURL.lastPathComponent): \(error)")
-                    }
-                }
-                
-                // Notify UI to refresh since we made changes
-                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
-            } else {
-                print("🧹 No orphaned files found")
-            }
+            print("🧹 No additional cleanup needed")
             
         } catch {
             print("🧹 Error checking for orphaned files: \(error)")
         }
     }
     
-    private func fileExistsInCloud(_ fileURL: URL) async -> Bool {
-        do {
-            print("🧹 Checking iCloud status for: \(fileURL.lastPathComponent)")
-            let resourceValues = try fileURL.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-            
-            let isUbiquitous = resourceValues.isUbiquitousItem ?? false
-            print("🧹   Is ubiquitous: \(isUbiquitous)")
-            
-            guard isUbiquitous else {
-                // Not an iCloud file, so it "exists" (locally)
-                print("🧹   Not an iCloud file, returning true")
+
+    private func checkExternalFileAccessibility(_ fileURL: URL) async -> Bool {
+        // First check if file exists at the path
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            // File exists at original path, try to access it
+            do {
+                _ = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                print("🧹     External file accessible at original path")
                 return true
+            } catch {
+                print("🧹     External file exists but not accessible: \(error)")
+                return false
             }
-            
-            // Check if the file is available in iCloud (not deleted from iCloud Drive)
-            if let downloadStatus = resourceValues.ubiquitousItemDownloadingStatus {
-                print("🧹   Download status: \(downloadStatus.rawValue)")
-                switch downloadStatus {
-                case .current, .downloaded, .notDownloaded:
-                    print("🧹   File exists in iCloud (status: \(downloadStatus.rawValue))")
-                    return true
-                default:
-                    print("🧹   File does NOT exist in iCloud (status: \(downloadStatus.rawValue))")
-                    return false
+        }
+
+        // File doesn't exist at original path, check if we have bookmark data for it
+        print("🧹     External file doesn't exist at original path, checking bookmark data")
+        return await checkBookmarkAccessibility(for: fileURL)
+    }
+
+    private func checkBookmarkAccessibility(for fileURL: URL) async -> Bool {
+        // Check document picker bookmarks
+        if let resolvedURL = await resolveDocumentPickerBookmark(for: fileURL.path) {
+            // If the resolved path is different from original, consider the file as moved (should be removed)
+            if resolvedURL.path != fileURL.path {
+                print("🧹     File has been moved from \(fileURL.path) to \(resolvedURL.path) - will remove from library")
+                return false
+            }
+            return await testFileAccessibility(resolvedURL)
+        }
+
+        // Check share extension bookmarks
+        if let resolvedURL = await resolveShareExtensionBookmark(for: fileURL.path) {
+            // If the resolved path is different from original, consider the file as moved (should be removed)
+            if resolvedURL.path != fileURL.path {
+                print("🧹     File has been moved from \(fileURL.path) to \(resolvedURL.path) - will remove from library")
+                return false
+            }
+            return await testFileAccessibility(resolvedURL)
+        }
+
+        print("🧹     No valid bookmark found for external file")
+        return false
+    }
+
+    private func resolveDocumentPickerBookmark(for filePath: String) async -> URL? {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else {
+            print("🧹     No document picker bookmarks file found")
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: bookmarksURL)
+            guard let bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data],
+                  let bookmarkData = bookmarks[filePath] else {
+                print("🧹     No bookmark found for file path: \(filePath)")
+                return nil
+            }
+
+            var isStale = false
+            let resolvedURL = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+
+            if isStale {
+                print("🧹     Document picker bookmark is STALE for: \(filePath)")
+                print("🧹     Original path: \(filePath)")
+                print("🧹     Resolved path: \(resolvedURL.path)")
+                return nil
+            }
+
+            print("🧹     Document picker bookmark resolved successfully")
+            print("🧹     Original path: \(filePath)")
+            print("🧹     Resolved path: \(resolvedURL.path)")
+            return resolvedURL
+        } catch {
+            print("🧹     Failed to resolve document picker bookmark: \(error)")
+            return nil
+        }
+    }
+
+    private func resolveShareExtensionBookmark(for filePath: String) async -> URL? {
+        guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
+            print("🧹     No shared container available")
+            return nil
+        }
+
+        let sharedDataURL = sharedContainer.appendingPathComponent("SharedAudioFiles.plist")
+
+        guard FileManager.default.fileExists(atPath: sharedDataURL.path) else {
+            print("🧹     No share extension bookmarks file found")
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: sharedDataURL)
+            guard let sharedFiles = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [[String: Data]] else {
+                print("🧹     Invalid share extension bookmarks format")
+                return nil
+            }
+
+            // Look for matching file by original path
+            for fileInfo in sharedFiles {
+                if let urlData = fileInfo["url"],
+                   let urlString = String(data: urlData, encoding: .utf8),
+                   let originalURL = URL(string: urlString),
+                   originalURL.path == filePath,
+                   let bookmarkData = fileInfo["bookmark"] {
+
+                    var isStale = false
+                    let resolvedURL = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+
+                    if isStale {
+                        print("🧹     Share extension bookmark is STALE for: \(filePath)")
+                        print("🧹     Original path: \(filePath)")
+                        print("🧹     Resolved path: \(resolvedURL.path)")
+                        return nil
+                    }
+
+                    print("🧹     Share extension bookmark resolved successfully")
+                    print("🧹     Original path: \(filePath)")
+                    print("🧹     Resolved path: \(resolvedURL.path)")
+                    return resolvedURL
                 }
-            } else {
-                print("🧹   No download status available, assuming exists")
+            }
+
+            print("🧹     No share extension bookmark found for file path: \(filePath)")
+            return nil
+        } catch {
+            print("🧹     Failed to resolve share extension bookmark: \(error)")
+            return nil
+        }
+    }
+
+    private func testFileAccessibility(_ fileURL: URL) async -> Bool {
+        print("🧹     Testing accessibility for resolved URL: \(fileURL.path)")
+
+        guard fileURL.startAccessingSecurityScopedResource() else {
+            print("🧹     ❌ Failed to start accessing security-scoped resource")
+            return false
+        }
+
+        defer {
+            fileURL.stopAccessingSecurityScopedResource()
+            print("🧹     ⏹️ Stopped accessing security-scoped resource")
+        }
+
+        // Check if file exists at the resolved path
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            print("🧹     ❌ File doesn't exist at resolved bookmark path: \(fileURL.path)")
+            return false
+        }
+
+        print("🧹     ✅ File exists at resolved path")
+
+        do {
+            // Try to get file attributes - this tests basic access permissions
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let fileSize = attributes[.size] as? Int64 ?? 0
+            print("🧹     ✅ Got file attributes - size: \(fileSize) bytes")
+
+            // For additional verification, try to actually read the file
+            // This will catch cases where the file exists but is corrupted or inaccessible
+            let fileHandle = try FileHandle(forReadingFrom: fileURL)
+            defer {
+                do {
+                    try fileHandle.close()
+                    print("🧹     ✅ Successfully closed file handle")
+                } catch {
+                    print("🧹     ⚠️ Error closing file handle: \(error)")
+                }
+            }
+
+            let data = try fileHandle.read(upToCount: 1024)
+
+            if let data = data, data.count > 0 {
+                print("🧹     ✅ External file accessible and readable via bookmark (\(data.count) bytes read)")
                 return true
+            } else {
+                print("🧹     ❌ External file exists but appears to be empty or unreadable")
+                return false
             }
         } catch {
-            // If we can't get resource values, the file might be deleted from iCloud
-            print("🧹 Cannot check iCloud status for \(fileURL.lastPathComponent): \(error)")
+            print("🧹     ❌ External file not accessible or readable via bookmark")
+            print("🧹     ❌ Error details: \(error)")
+            print("🧹     ❌ Error type: \(type(of: error))")
             return false
         }
     }
-    
-    
+
     private func generateStableId(for url: URL) -> String {
         // Simple stable ID based only on filename - matches LibraryIndexer
         let filename = url.lastPathComponent

@@ -131,6 +131,46 @@ class LibraryIndexer: NSObject, ObservableObject {
         stop()
         startOfflineMode()
     }
+
+    func processExternalFile(_ fileURL: URL) async {
+        do {
+            print("🎵 Starting to process external file: \(fileURL.lastPathComponent)")
+            print("📱 Processing external file from: \(fileURL.path)")
+
+            print("🆔 Generating stable ID for: \(fileURL.lastPathComponent)")
+            let stableId = try generateStableId(for: fileURL)
+            print("🆔 Generated stable ID: \(stableId)")
+
+            // Check if track already exists in database
+            if try databaseManager.getTrack(byStableId: stableId) != nil {
+                print("⏭️ Track already exists in database: \(fileURL.lastPathComponent)")
+                return
+            }
+
+            print("🎶 Parsing external audio file: \(fileURL.lastPathComponent)")
+            let track = try await parseAudioFile(at: fileURL, stableId: stableId)
+            print("✅ External audio file parsed successfully: \(track.title)")
+
+            print("💾 Inserting external track into database: \(track.title)")
+            try databaseManager.upsertTrack(track)
+            print("✅ External track inserted into database: \(track.title)")
+
+            await MainActor.run {
+                tracksFound += 1
+                print("📢 Posting TrackFound notification for external file: \(track.title)")
+                // Notify UI immediately that a new track was found
+                NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
+            }
+
+        } catch LibraryIndexerError.parseTimeout {
+            print("⏰ Timeout parsing external audio file: \(fileURL.lastPathComponent)")
+            print("❌ Skipping external file due to parsing timeout")
+        } catch {
+            print("❌ Failed to process external track at \(fileURL.lastPathComponent): \(error)")
+            print("❌ Error type: \(type(of: error))")
+            print("❌ Error details: \(String(describing: error))")
+        }
+    }
     
     @objc private func queryDidGatherInitialResults() {
         print("🔍 NSMetadataQuery gathered initial results: \(metadataQuery.resultCount) items")
@@ -558,16 +598,85 @@ class LibraryIndexer: NSObject, ObservableObject {
     
     func copyFilesFromSharedContainer() async {
         print("📁 Checking shared container for new music files...")
-        
+
         guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
             print("❌ Failed to get shared container URL")
             return
         }
-        
+
+        // Process shared URLs from share extension
+        await processSharedURLs(from: sharedContainer)
+
+        // Also check for legacy copied files (for backward compatibility)
+        await processLegacySharedFiles(from: sharedContainer)
+    }
+
+    private func processSharedURLs(from sharedContainer: URL) async {
+        let sharedDataURL = sharedContainer.appendingPathComponent("SharedAudioFiles.plist")
+
+        guard FileManager.default.fileExists(atPath: sharedDataURL.path) else {
+            print("📁 No shared audio files found")
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: sharedDataURL)
+            guard let sharedFiles = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [[String: Data]] else {
+                return
+            }
+
+            print("📁 Found \(sharedFiles.count) shared audio file references")
+
+            for fileInfo in sharedFiles {
+                guard let bookmarkData = fileInfo["bookmark"],
+                      let filenameData = fileInfo["filename"],
+                      let filename = String(data: filenameData, encoding: .utf8) else {
+                    continue
+                }
+
+                do {
+                    // Resolve bookmark to get access to the original file
+                    var isStale = false
+                    let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+
+                    if isStale {
+                        print("⚠️ Bookmark is stale for: \(filename)")
+                        continue
+                    }
+
+                    // Start accessing security-scoped resource
+                    guard url.startAccessingSecurityScopedResource() else {
+                        print("❌ Failed to access security-scoped resource for: \(filename)")
+                        continue
+                    }
+
+                    defer {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+
+                    // Process the file directly from its original location
+                    await processExternalFile(url)
+                    print("✅ Processed shared file from original location: \(filename)")
+
+                } catch {
+                    print("❌ Failed to resolve bookmark for \(filename): \(error)")
+                }
+            }
+
+            // Clear the shared files list after processing
+            try FileManager.default.removeItem(at: sharedDataURL)
+            print("🗑️ Cleared shared audio files list")
+
+        } catch {
+            print("❌ Failed to process shared audio files: \(error)")
+        }
+    }
+
+    private func processLegacySharedFiles(from sharedContainer: URL) async {
         let sharedMusicURL = sharedContainer.appendingPathComponent("Documents").appendingPathComponent("Music")
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let localMusicURL = documentsURL.appendingPathComponent("Music")
-        
+
         // Create local Music directory if it doesn't exist
         do {
             try FileManager.default.createDirectory(at: localMusicURL, withIntermediateDirectories: true, attributes: nil)
@@ -575,44 +684,44 @@ class LibraryIndexer: NSObject, ObservableObject {
             print("❌ Failed to create local Music directory: \(error)")
             return
         }
-        
+
         // Check if shared Music directory exists
         guard FileManager.default.fileExists(atPath: sharedMusicURL.path) else {
             print("📁 No shared Music directory found")
             return
         }
-        
+
         do {
             let sharedFiles = try FileManager.default.contentsOfDirectory(at: sharedMusicURL, includingPropertiesForKeys: nil)
             let audioFiles = sharedFiles.filter { url in
                 let ext = url.pathExtension.lowercased()
                 return ext == "mp3" || ext == "flac" || ext == "wav"
             }
-            
-            print("📁 Found \(audioFiles.count) audio files in shared container")
-            
+
+            print("📁 Found \(audioFiles.count) legacy audio files in shared container")
+
             for audioFile in audioFiles {
                 let localDestination = localMusicURL.appendingPathComponent(audioFile.lastPathComponent)
-                
+
                 // Skip if file already exists in local directory
                 if FileManager.default.fileExists(atPath: localDestination.path) {
                     print("⏭️ File already exists locally: \(audioFile.lastPathComponent)")
                     continue
                 }
-                
+
                 do {
                     try FileManager.default.copyItem(at: audioFile, to: localDestination)
-                    print("✅ Copied to Documents/Music: \(audioFile.lastPathComponent)")
-                    
-                    // Optional: Remove from shared container after successful copy
+                    print("✅ Copied legacy file to Documents/Music: \(audioFile.lastPathComponent)")
+
+                    // Remove from shared container after successful copy
                     try FileManager.default.removeItem(at: audioFile)
-                    print("🗑️ Removed from shared container: \(audioFile.lastPathComponent)")
-                    
+                    print("🗑️ Removed legacy file from shared container: \(audioFile.lastPathComponent)")
+
                 } catch {
-                    print("❌ Failed to copy \(audioFile.lastPathComponent): \(error)")
+                    print("❌ Failed to copy legacy file \(audioFile.lastPathComponent): \(error)")
                 }
             }
-            
+
         } catch {
             print("❌ Failed to read shared container directory: \(error)")
         }
@@ -694,7 +803,7 @@ class AudioMetadataParser {
         print("📊 FLAC file size: \(fileSize) bytes for \(url.lastPathComponent)")
         
         // Don't try to read files that are too large (>100MB) or too small (<1KB)
-        guard fileSize > 1024 && fileSize < 100_000_000 else {
+        guard fileSize > 1024 && fileSize < 300_000_000 else {
             print("❌ FLAC file size is unreasonable: \(fileSize) bytes")
             throw AudioParseError.fileSizeError
         }

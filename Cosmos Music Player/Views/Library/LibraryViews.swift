@@ -44,6 +44,7 @@ struct LibraryView: View {
     @State private var syncToastColor = Color.green
     @State private var newTracksFoundCount = 0
     @State private var syncCompleted = false
+    @State private var showMusicPicker = false
     
     // Helper function to show sync feedback
     private func showSyncFeedback(trackCountBefore: Int, trackCountAfter: Int) {
@@ -101,7 +102,104 @@ struct LibraryView: View {
         newTracksFoundCount = 0
         syncCompleted = false
     }
-    
+
+    private func importMusicFiles(_ urls: [URL]) {
+        Task {
+            var processedCount = 0
+            let trackCountBefore = tracks.count
+
+            for url in urls {
+                // Start accessing security-scoped resource
+                guard url.startAccessingSecurityScopedResource() else {
+                    print("Failed to access security scoped resource for: \(url.lastPathComponent)")
+                    continue
+                }
+
+                defer {
+                    url.stopAccessingSecurityScopedResource()
+                }
+
+                do {
+                    // Create bookmark data for persistent access
+                    let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+
+                    // Store bookmark data for this file
+                    await storeBookmarkData(bookmarkData, for: url)
+
+                    // Process the file directly from its original location
+                    await libraryIndexer.processExternalFile(url)
+                    processedCount += 1
+                    print("Processed and bookmarked file from original location: \(url.lastPathComponent)")
+
+                } catch {
+                    print("Failed to create bookmark for \(url.lastPathComponent): \(error)")
+
+                    // Still try to process the file even if bookmark creation fails
+                    await libraryIndexer.processExternalFile(url)
+                    processedCount += 1
+                    print("Processed file from original location (no bookmark): \(url.lastPathComponent)")
+                }
+            }
+
+            // Show feedback
+            await MainActor.run {
+                if processedCount > 0 {
+                    syncToastIcon = "plus.circle.fill"
+                    syncToastColor = .green
+                    if processedCount == 1 {
+                        syncToastMessage = "1 song processed"
+                    } else {
+                        syncToastMessage = "\(processedCount) songs processed"
+                    }
+
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showSyncToast = true
+                    }
+
+                    // Auto-hide toast after 3 seconds
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            showSyncToast = false
+                        }
+                    }
+                }
+            }
+
+            // Trigger library refresh to update UI
+            if processedCount > 0, let onManualSync = onManualSync {
+                _ = await onManualSync()
+            }
+        }
+    }
+
+    private func storeBookmarkData(_ bookmarkData: Data, for url: URL) async {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        do {
+            // Load existing bookmarks or create new dictionary
+            var bookmarks: [String: Data] = [:]
+            if FileManager.default.fileExists(atPath: bookmarksURL.path) {
+                if let data = try? Data(contentsOf: bookmarksURL),
+                   let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] {
+                    bookmarks = plist
+                }
+            }
+
+            // Store bookmark using the file path as key
+            bookmarks[url.path] = bookmarkData
+
+            // Save updated bookmarks
+            let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
+            try plistData.write(to: bookmarksURL)
+
+            print("Stored bookmark for external file: \(url.lastPathComponent)")
+        } catch {
+            print("Failed to store bookmark data: \(error)")
+        }
+    }
+
+
     var body: some View {
         NavigationStack {
                 ZStack {
@@ -267,19 +365,7 @@ struct LibraryView: View {
                         .buttonStyle(PlainButtonStyle())
                         
                         Button(action: {
-                            // Try to open iCloud Drive directly first
-                            if let iCloudURL = URL(string: "com-apple-CloudDocs://") {
-                                UIApplication.shared.open(iCloudURL) { success in
-                                    if !success {
-                                        // Fall back to Files app if iCloud Drive doesn't open
-                                        if let filesURL = URL(string: "shareddocuments://") {
-                                            UIApplication.shared.open(filesURL)
-                                        }
-                                    }
-                                }
-                            } else if let filesURL = URL(string: "shareddocuments://") {
-                                UIApplication.shared.open(filesURL)
-                            }
+                            showMusicPicker = true
                         }) {
                             LibrarySectionRowView(
                                 title: Localized.addSongs,
@@ -422,6 +508,11 @@ struct LibraryView: View {
                 }
             )
             .accentColor(settings.backgroundColorChoice.color)
+        }
+        .sheet(isPresented: $showMusicPicker) {
+            MusicFilePicker { urls in
+                importMusicFiles(urls)
+            }
         }
     }
 }
@@ -1260,6 +1351,46 @@ struct SearchView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
+        }
+    }
+}
+
+struct MusicFilePicker: UIViewControllerRepresentable {
+    let onFilesPicked: ([URL]) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [
+            UTType.audio,
+            UTType("public.mp3")!,
+            UTType("org.xiph.flac")!
+        ])
+
+        picker.delegate = context.coordinator
+        picker.allowsMultipleSelection = true
+        picker.modalPresentationStyle = .formSheet
+
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFilesPicked: onFilesPicked)
+    }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onFilesPicked: ([URL]) -> Void
+
+        init(onFilesPicked: @escaping ([URL]) -> Void) {
+            self.onFilesPicked = onFilesPicked
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onFilesPicked(urls)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            // User cancelled, do nothing
         }
     }
 }
