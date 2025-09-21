@@ -454,57 +454,14 @@ struct AlbumTrackRowView: View {
         Task {
             do {
                 let url = URL(fileURLWithPath: track.path)
-                let artistId = track.artistId
-                let albumId = track.albumId
                 
                 // Delete file from storage
                 try FileManager.default.removeItem(at: url)
                 print("🗑️ Deleted file from storage: \(track.title)")
                 
                 // Delete from database with cleanup of orphaned relations
-                try DatabaseManager.shared.write { db in
-                    print("🔍 Starting database deletion for track: \(track.title) with stableId: \(track.stableId)")
-                    
-                    // Remove from favorites if it exists
-                    let favoritesDeleted = try Favorite.filter(Column("track_stable_id") == track.stableId).deleteAll(db)
-                    print("🗑️ Removed \(favoritesDeleted) favorite entries for: \(track.title)")
-                    
-                    // Remove from playlists
-                    let playlistItemsDeleted = try PlaylistItem.filter(Column("track_stable_id") == track.stableId).deleteAll(db)
-                    print("🗑️ Removed \(playlistItemsDeleted) playlist entries for: \(track.title)")
-                    
-                    // Delete the track using stableId (primary key)
-                    let tracksDeleted = try Track.filter(Column("stable_id") == track.stableId).deleteAll(db)
-                    print("🗑️ Deleted \(tracksDeleted) tracks from database: \(track.title)")
-                    
-                    if tracksDeleted == 0 {
-                        print("❌ WARNING: No tracks were deleted from database!")
-                        return
-                    }
-                    
-                    // Clean up orphaned album
-                    if let albumId = albumId {
-                        let remainingTracksInAlbum = try Track.filter(Column("album_id") == albumId).fetchCount(db)
-                        print("🔍 Remaining tracks in album \(albumId): \(remainingTracksInAlbum)")
-                        if remainingTracksInAlbum == 0 {
-                            let albumsDeleted = try Album.deleteOne(db, key: albumId)
-                            print("🗑️ Deleted orphaned album: \(albumId) (success: \(albumsDeleted))")
-                        }
-                    }
-                    
-                    // Clean up orphaned artist
-                    if let artistId = artistId {
-                        let remainingTracksForArtist = try Track.filter(Column("artist_id") == artistId).fetchCount(db)
-                        let remainingAlbumsForArtist = try Album.filter(Column("artist_id") == artistId).fetchCount(db)
-                        print("🔍 Remaining tracks for artist \(artistId): \(remainingTracksForArtist)")
-                        print("🔍 Remaining albums for artist \(artistId): \(remainingAlbumsForArtist)")
-                        if remainingTracksForArtist == 0 && remainingAlbumsForArtist == 0 {
-                            let artistsDeleted = try Artist.deleteOne(db, key: artistId)
-                            print("🗑️ Deleted orphaned artist: \(artistId) (success: \(artistsDeleted))")
-                        }
-                    }
-                }
-                print("✅ Database transaction completed successfully")
+                try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                print("✅ Database deletion completed successfully")
                 
                 // Notify UI to refresh
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)

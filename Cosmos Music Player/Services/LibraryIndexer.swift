@@ -609,6 +609,9 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         // Also check for legacy copied files (for backward compatibility)
         await processLegacySharedFiles(from: sharedContainer)
+
+        // Process previously stored external bookmarks (both document picker and share extension files)
+        await processStoredExternalBookmarks()
     }
 
     private func processSharedURLs(from sharedContainer: URL) async {
@@ -658,14 +661,17 @@ class LibraryIndexer: NSObject, ObservableObject {
                     await processExternalFile(url)
                     print("✅ Processed shared file from original location: \(filename)")
 
+                    // Store the bookmark permanently for future access after app updates
+                    await storeBookmarkPermanently(bookmarkData, for: url)
+
                 } catch {
                     print("❌ Failed to resolve bookmark for \(filename): \(error)")
                 }
             }
 
-            // Clear the shared files list after processing
+            // Clear the shared files list after processing and storing bookmarks permanently
             try FileManager.default.removeItem(at: sharedDataURL)
-            print("🗑️ Cleared shared audio files list")
+            print("🗑️ Cleared shared audio files list (bookmarks moved to permanent storage)")
 
         } catch {
             print("❌ Failed to process shared audio files: \(error)")
@@ -724,6 +730,93 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         } catch {
             print("❌ Failed to read shared container directory: \(error)")
+        }
+    }
+
+    private func storeBookmarkPermanently(_ bookmarkData: Data, for url: URL) async {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        do {
+            // Load existing bookmarks or create new dictionary
+            var bookmarks: [String: Data] = [:]
+            if FileManager.default.fileExists(atPath: bookmarksURL.path) {
+                let data = try Data(contentsOf: bookmarksURL)
+                if let existingBookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] {
+                    bookmarks = existingBookmarks
+                }
+            }
+
+            // Store bookmark data using the file path as key
+            bookmarks[url.path] = bookmarkData
+
+            // Save updated bookmarks
+            let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
+            try plistData.write(to: bookmarksURL)
+
+            print("💾 Stored permanent bookmark for shared file: \(url.lastPathComponent)")
+        } catch {
+            print("❌ Failed to store permanent bookmark for \(url.lastPathComponent): \(error)")
+        }
+    }
+
+    private func processStoredExternalBookmarks() async {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else {
+            print("📁 No stored external bookmarks found")
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: bookmarksURL)
+            guard let bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else {
+                print("❌ Invalid external bookmarks format")
+                return
+            }
+
+            print("📁 Found \(bookmarks.count) stored external file bookmarks")
+
+            for (filePath, bookmarkData) in bookmarks {
+                do {
+                    // Resolve bookmark to get access to the file
+                    var isStale = false
+                    let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+
+                    if isStale {
+                        print("⚠️ Bookmark is stale for: \(URL(fileURLWithPath: filePath).lastPathComponent)")
+                        continue
+                    }
+
+                    // Check if this file is already in the database
+                    let stableId = try generateStableId(for: url)
+                    if try databaseManager.getTrack(byStableId: stableId) != nil {
+                        print("⏭️ External file already in database: \(url.lastPathComponent)")
+                        continue
+                    }
+
+                    // Start accessing security-scoped resource
+                    guard url.startAccessingSecurityScopedResource() else {
+                        print("❌ Failed to access security-scoped resource for: \(url.lastPathComponent)")
+                        continue
+                    }
+
+                    defer {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+
+                    // Process the file
+                    await processExternalFile(url)
+                    print("✅ Processed stored external file: \(url.lastPathComponent)")
+
+                } catch {
+                    print("❌ Failed to resolve bookmark for \(URL(fileURLWithPath: filePath).lastPathComponent): \(error)")
+                }
+            }
+
+        } catch {
+            print("❌ Failed to process stored external bookmarks: \(error)")
         }
     }
 }

@@ -100,6 +100,8 @@ class TutorialViewModel: ObservableObject {
                     self.appleIDDetectionFailed = true
                     print("📱 Apple ID check: ❓ Could not determine status (CloudKit)")
                     
+                case .temporarilyUnavailable:
+                    print("Error line 104 of TutorialViewModel")
                 @unknown default:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true

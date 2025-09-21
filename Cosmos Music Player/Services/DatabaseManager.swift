@@ -365,9 +365,54 @@ class DatabaseManager: @unchecked Sendable {
     func deleteTrack(byStableId stableId: String) throws {
         print("🗃️ Database: Deleting track with stable ID - \(stableId)")
         let deletedCount = try write { db in
+            // Remove from favorites if it exists
+            let favoritesDeleted = try Favorite.filter(Column("track_stable_id") == stableId).deleteAll(db)
+            if favoritesDeleted > 0 {
+                print("🗃️ Database: Removed \(favoritesDeleted) favorite entries for track")
+            }
+
+            // Remove from playlists
+            let playlistItemsDeleted = try PlaylistItem.filter(Column("track_stable_id") == stableId).deleteAll(db)
+            if playlistItemsDeleted > 0 {
+                print("🗃️ Database: Removed \(playlistItemsDeleted) playlist entries for track")
+            }
+
+            // Delete the track
             return try Track.filter(Column("stable_id") == stableId).deleteAll(db)
         }
         print("🗃️ Database: Deleted \(deletedCount) track(s)")
+
+        // Clean up orphaned albums and artists after track deletion
+        try cleanupOrphanedAlbums()
+        try cleanupOrphanedArtists()
+    }
+
+    func cleanupOrphanedAlbums() throws {
+        try write { db in
+            // Delete albums that have no tracks referencing them
+            try db.execute(sql: """
+                DELETE FROM album
+                WHERE id NOT IN (
+                    SELECT DISTINCT album_id
+                    FROM track
+                    WHERE album_id IS NOT NULL
+                )
+            """)
+        }
+    }
+
+    func cleanupOrphanedArtists() throws {
+        try write { db in
+            // Delete artists that have no tracks referencing them
+            try db.execute(sql: """
+                DELETE FROM artist
+                WHERE id NOT IN (
+                    SELECT DISTINCT artist_id
+                    FROM track
+                    WHERE artist_id IS NOT NULL
+                )
+            """)
+        }
     }
     
     // MARK: - Playlist operations

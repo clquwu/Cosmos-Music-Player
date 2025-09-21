@@ -32,6 +32,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var scheduleGeneration: UInt64 = 0
     
     private var seekTimeOffset: TimeInterval = 0
+    private var lastSampleRate: Double = 0
     
     private lazy var audioEngine = AVAudioEngine()
     private lazy var playerNode = AVAudioPlayerNode()
@@ -90,9 +91,57 @@ class PlayerEngine: NSObject, ObservableObject {
     }
     
     private func ensureAudioEngineSetup(with format: AVAudioFormat? = nil) {
-        guard !hasSetupAudioEngine else { return }
-        hasSetupAudioEngine = true
-        setupAudioEngine(with: format)
+        if !hasSetupAudioEngine {
+            hasSetupAudioEngine = true
+            setupAudioEngine(with: format)
+            if let format = format {
+                lastSampleRate = format.sampleRate
+            }
+        } else if let format = format {
+            // Check if sample rate has changed - if so, force reconfiguration
+            if abs(format.sampleRate - lastSampleRate) > 0.1 {
+                print("📊 Sample rate changed from \(lastSampleRate)Hz to \(format.sampleRate)Hz - forcing reconfiguration")
+                reconfigureAudioEngineForNewFormat(format)
+                lastSampleRate = format.sampleRate
+
+                // Reset timing state completely when sample rate changes
+                seekTimeOffset = 0
+                playbackTime = 0
+                lastControlCenterUpdate = 0
+
+                // Stop and restart playback timer to ensure proper timing with new sample rate
+                stopPlaybackTimer()
+                if isPlaying {
+                    startPlaybackTimer()
+                }
+                print("🔄 Reset timing state and timer for new sample rate")
+            }
+        }
+    }
+
+    private func reconfigureAudioEngineForNewFormat(_ format: AVAudioFormat) {
+        // Force reconfiguration for new sample rate - stop engine if needed
+        let wasRunning = audioEngine.isRunning
+        if wasRunning {
+            audioEngine.stop()
+            print("🛑 Stopped audio engine for reconfiguration")
+        }
+
+        print("🔧 Reconfiguring audio engine for new format: \(format.sampleRate)Hz")
+        audioEngine.disconnectNodeInput(playerNode)
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
+        audioEngine.prepare()
+        print("✅ Audio engine reconfigured for sample rate: \(format.sampleRate)Hz")
+
+        // Restart engine if it was running
+        if wasRunning {
+            do {
+                try audioEngine.start()
+                print("▶️ Restarted audio engine after reconfiguration")
+            } catch {
+                print("❌ Failed to restart audio engine: \(error)")
+            }
+        }
     }
     
     private func setupAudioEngine(with format: AVAudioFormat? = nil) {
@@ -672,12 +721,19 @@ class PlayerEngine: NSObject, ObservableObject {
         
         // Stop current playback and clean up
         await cleanupCurrentPlayback(resetTime: !preservePlaybackTime)
-        
+
+        // Reset timing state when loading a new track to ensure clean state for new sample rate
+        if !preservePlaybackTime {
+            seekTimeOffset = 0
+            playbackTime = 0
+            lastControlCenterUpdate = 0
+        }
+
         // Clear cached artwork when loading new track
         cachedArtwork = nil
         cachedArtworkTrackId = nil
-        
-        
+
+
         currentTrack = track
         playbackState = .loading
         
@@ -740,10 +796,14 @@ class PlayerEngine: NSObject, ObservableObject {
             }
             
             await configureAudioSession(for: audioFile.processingFormat)
-            
-            // Update Now Playing info with enhanced approach
+
+            // Ensure remote commands are set up for Control Center
+            ensureRemoteCommandsSetup()
+
+            // Force immediate Control Center update with new track info and reset timing
+            lastControlCenterUpdate = 0
             updateNowPlayingInfoEnhanced()
-            
+
             playbackState = .stopped
             isLoadingTrack = false
             
@@ -778,6 +838,7 @@ class PlayerEngine: NSObject, ObservableObject {
         }
         
         // Set up audio engine only when needed (FIRST) with file's format
+        // For new tracks, always ensure proper format configuration
         ensureAudioEngineSetup(with: audioFile.processingFormat)
         
         // Ensure basic audio session setup first
@@ -955,28 +1016,17 @@ class PlayerEngine: NSObject, ObservableObject {
         stopSilentPlaybackForPause()
         endBackgroundMonitoring()
 
-        // Clear Now Playing info when stopped
+        // Update Now Playing info to show stopped state (but keep track info)
         updateNowPlayingInfoEnhanced()
 
-        // Clear remote command targets to remove from control center
-        if hasSetupRemoteCommands {
-            let commandCenter = MPRemoteCommandCenter.shared()
-            commandCenter.playCommand.removeTarget(nil)
-            commandCenter.pauseCommand.removeTarget(nil)
-            commandCenter.nextTrackCommand.removeTarget(nil)
-            commandCenter.previousTrackCommand.removeTarget(nil)
-            commandCenter.changePlaybackPositionCommand.removeTarget(nil)
-            hasSetupRemoteCommands = false
-            print("🎛️ Remote commands cleared from control center")
-        }
+        // Don't clear remote commands during track transitions - keep Control Center connected
+        // Remote commands should only be cleared when the app is truly shutting down
+        print("🎛️ Keeping remote commands connected for Control Center")
 
-        // Deactivate audio session to allow other apps to play (only when truly stopping)
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            print("🎧 Audio session deactivated - allowing other apps to play")
-        } catch {
-            print("Failed to deactivate audio session: \(error)")
-        }
+        // Don't deactivate audio session during track transitions - keep Control Center connected
+        // Audio session should stay active to maintain Control Center connection
+        // Only deactivate when the app is truly backgrounded or user explicitly stops playback
+        print("🎧 Keeping audio session active to maintain Control Center connection")
 
         // Save state when stopping
         savePlayerState()
@@ -1480,8 +1530,9 @@ class PlayerEngine: NSObject, ObservableObject {
          }
          */
 
-        // Update Now Playing info less frequently for large files - only every 2 seconds and avoid spam
-        if playbackTime - lastControlCenterUpdate >= 2.0 {
+        // Update Control Center more frequently for better synchronization - every 0.5 seconds instead of 2 seconds
+        // This ensures smooth time display in Control Center regardless of sample rate changes
+        if abs(playbackTime - lastControlCenterUpdate) >= 0.5 {
             lastControlCenterUpdate = playbackTime
             updateNowPlayingInfoEnhanced()
         }

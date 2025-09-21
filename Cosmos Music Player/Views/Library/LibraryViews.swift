@@ -106,7 +106,6 @@ struct LibraryView: View {
     private func importMusicFiles(_ urls: [URL]) {
         Task {
             var processedCount = 0
-            let trackCountBefore = tracks.count
 
             for url in urls {
                 // Start accessing security-scoped resource
