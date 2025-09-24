@@ -1,5 +1,11 @@
 # Cosmos Music Player 🎵
 
+[![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/fr/app/cosmos-offline-music-player/id6751984723?l=en-GB)
+
+*Available now on the App Store*
+
+---
+
 Cosmos Music Player is a high-quality music player that supports both iCloud Drive synchronization and local storage, giving users flexibility in how they manage their music. The app is built and designed for the iOS and Apple ecosystem.
 
 A premium FLAC, MP3, and WAV music player for iOS with advanced features including dual storage options (iCloud/local), playlist management, artist information integration, and multi-language support.
