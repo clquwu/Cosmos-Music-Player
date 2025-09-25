@@ -22,6 +22,7 @@ class DatabaseManager: @unchecked Sendable {
             let databaseURL = try getDatabaseURL()
             dbWriter = try DatabaseQueue(path: databaseURL.path)
             try createTables()
+            try migrateDatabaseIfNeeded()
         } catch {
             fatalError("Failed to setup database: \(error)")
         }
@@ -94,7 +95,10 @@ class DatabaseManager: @unchecked Sendable {
                     title TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
-                    last_played_at INTEGER DEFAULT 0
+                    last_played_at INTEGER DEFAULT 0,
+                    folder_path TEXT,
+                    is_folder_synced BOOLEAN DEFAULT 0,
+                    last_folder_sync INTEGER
                 )
             """)
             
@@ -122,7 +126,36 @@ class DatabaseManager: @unchecked Sendable {
             }
         }
     }
-    
+
+    private func migrateDatabaseIfNeeded() throws {
+        try write { db in
+            // Migration: Add folder sync columns to playlist table
+            do {
+                try db.execute(sql: "ALTER TABLE playlist ADD COLUMN folder_path TEXT")
+                print("✅ Database: Added folder_path column to playlist table")
+            } catch {
+                // Column may already exist, which is fine
+                print("ℹ️ Database migration: folder_path column already exists or migration failed: \(error)")
+            }
+
+            do {
+                try db.execute(sql: "ALTER TABLE playlist ADD COLUMN is_folder_synced BOOLEAN DEFAULT 0")
+                print("✅ Database: Added is_folder_synced column to playlist table")
+            } catch {
+                // Column may already exist, which is fine
+                print("ℹ️ Database migration: is_folder_synced column already exists or migration failed: \(error)")
+            }
+
+            do {
+                try db.execute(sql: "ALTER TABLE playlist ADD COLUMN last_folder_sync INTEGER")
+                print("✅ Database: Added last_folder_sync column to playlist table")
+            } catch {
+                // Column may already exist, which is fine
+                print("ℹ️ Database migration: last_folder_sync column already exists or migration failed: \(error)")
+            }
+        }
+    }
+
     func read<T>(_ operation: @escaping (Database) throws -> T) throws -> T {
         return try dbWriter.read(operation)
     }
@@ -421,7 +454,44 @@ class DatabaseManager: @unchecked Sendable {
         return try write { db in
             let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
             let now = Int64(Date().timeIntervalSince1970)
-            let playlist = Playlist(id: nil, slug: slug, title: title, createdAt: now, updatedAt: now, lastPlayedAt: 0)
+            let playlist = Playlist(
+                id: nil,
+                slug: slug,
+                title: title,
+                createdAt: now,
+                updatedAt: now,
+                lastPlayedAt: 0,
+                folderPath: nil,
+                isFolderSynced: false,
+                lastFolderSync: nil
+            )
+            return try playlist.insertAndFetch(db)!
+        }
+    }
+
+    func createFolderPlaylist(title: String, folderPath: String) throws -> Playlist {
+        return try write { db in
+            let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
+            let now = Int64(Date().timeIntervalSince1970)
+
+            // Check if a folder-synced playlist already exists for this path
+            if let existingPlaylist = try Playlist.filter(Column("folder_path") == folderPath).fetchOne(db) {
+                print("📁 Folder playlist already exists: \(existingPlaylist.title)")
+                return existingPlaylist
+            }
+
+            let playlist = Playlist(
+                id: nil,
+                slug: slug,
+                title: title,
+                createdAt: now,
+                updatedAt: now,
+                lastPlayedAt: 0,
+                folderPath: folderPath,
+                isFolderSynced: true,
+                lastFolderSync: now
+            )
+            print("📁 Creating folder-synced playlist: \(title) -> \(folderPath)")
             return try playlist.insertAndFetch(db)!
         }
     }
@@ -429,6 +499,12 @@ class DatabaseManager: @unchecked Sendable {
     func getAllPlaylists() throws -> [Playlist] {
         return try read { db in
             return try Playlist.order(Column("last_played_at").desc, Column("updated_at").desc).fetchAll(db)
+        }
+    }
+
+    func getFolderPlaylist(forPath folderPath: String) throws -> Playlist? {
+        return try read { db in
+            return try Playlist.filter(Column("folder_path") == folderPath && Column("is_folder_synced") == true).fetchOne(db)
         }
     }
     
@@ -491,7 +567,72 @@ class DatabaseManager: @unchecked Sendable {
         }
         print("🗑️ Database: Deleted \(deletedCount) playlist(s)")
     }
-    
+
+    func renamePlaylist(playlistId: Int64, newTitle: String) throws {
+        print("✏️ Database: Renaming playlist \(playlistId) to '\(newTitle)'")
+        let now = Int64(Date().timeIntervalSince1970)
+        let updatedCount = try write { db in
+            return try Playlist
+                .filter(Column("id") == playlistId)
+                .updateAll(db,
+                    Column("title").set(to: newTitle),
+                    Column("updated_at").set(to: now)
+                )
+        }
+        print("✏️ Database: Updated \(updatedCount) playlist(s)")
+    }
+
+    func syncPlaylistWithFolder(playlistId: Int64, trackStableIds: [String]) throws {
+        print("🔄 Syncing playlist \(playlistId) with folder tracks (additive-only sync)")
+
+        try write { db in
+            // Get current playlist items
+            let currentItems = try PlaylistItem.filter(Column("playlist_id") == playlistId).fetchAll(db)
+            let currentTrackIds = Set(currentItems.map { $0.trackStableId })
+            let newTrackIds = Set(trackStableIds)
+
+            // Only add tracks that are in the folder but not in the playlist
+            // This preserves user additions and doesn't remove files (files deleted from
+            // library will be cleaned up automatically by database constraints)
+            let tracksToAdd = newTrackIds.subtracting(currentTrackIds)
+
+            print("🔄 Folder sync: Adding \(tracksToAdd.count) new tracks from folder")
+
+            // Add new tracks from folder
+            let maxPositionQuery = try PlaylistItem
+                .filter(Column("playlist_id") == playlistId)
+                .select(max(Column("position")))
+                .asRequest(of: Int?.self)
+                .fetchOne(db)
+
+            let maxPosition: Int
+            if let position = maxPositionQuery, let unwrappedPosition = position {
+                maxPosition = unwrappedPosition
+            } else {
+                maxPosition = -1
+            }
+
+            var position = maxPosition + 1
+            for trackId in tracksToAdd {
+                let item = PlaylistItem(playlistId: playlistId, position: position, trackStableId: trackId)
+                try item.insert(db)
+                position += 1
+            }
+
+            // Update last folder sync timestamp
+            let now = Int64(Date().timeIntervalSince1970)
+            _ = try Playlist
+                .filter(Column("id") == playlistId)
+                .updateAll(db, Column("last_folder_sync").set(to: now))
+        }
+    }
+
+    func getFolderSyncedPlaylists() throws -> [Playlist] {
+        return try read { db in
+            return try Playlist.filter(Column("is_folder_synced") == true).fetchAll(db)
+        }
+    }
+
     func updatePlaylistAccessed(playlistId: Int64) throws {
         print("⏰ Database: Updating playlist \(playlistId) last accessed time")
         let now = Int64(Date().timeIntervalSince1970)

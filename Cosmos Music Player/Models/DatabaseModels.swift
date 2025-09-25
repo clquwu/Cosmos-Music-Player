@@ -98,16 +98,22 @@ struct Playlist: Codable, FetchableRecord, PersistableRecord {
     var createdAt: Int64
     var updatedAt: Int64
     var lastPlayedAt: Int64
-    
+    var folderPath: String? // Path to the folder this playlist syncs with
+    var isFolderSynced: Bool // Whether this playlist is synced with a folder
+    var lastFolderSync: Int64? // Last time folder sync was performed
+
     static let databaseTableName = "playlist"
-    
+
     nonisolated(unsafe) static let items = hasMany(PlaylistItem.self)
-    
+
     enum CodingKeys: String, CodingKey {
         case id, slug, title
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case lastPlayedAt = "last_played_at"
+        case folderPath = "folder_path"
+        case isFolderSynced = "is_folder_synced"
+        case lastFolderSync = "last_folder_sync"
     }
 }
 

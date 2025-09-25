@@ -13,6 +13,10 @@
 "cancel" = "Annuler";
 "create" = "Créer";
 "done" = "Terminé";
+"edit" = "Modifier";
+"edit_playlist" = "Modifier la playlist";
+"save" = "Enregistrer";
+"enter_new_name" = "Entrez un nouveau nom pour la playlist";
 "manage_playlists" = "Gérer les playlist";
 "playlist" = "Playlist";
 "songs_count_singular" = "%d musique";

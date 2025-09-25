@@ -771,6 +771,8 @@ struct MiniPlayerView: View {
 struct TrackRowView: View {
     let track: Track
     let onTap: () -> Void
+    let playlist: Playlist?
+    let showDirectDeleteButton: Bool
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var cloudDownloadManager = CloudDownloadManager.shared
     @StateObject private var playerEngine = PlayerEngine.shared
@@ -785,7 +787,15 @@ struct TrackRowView: View {
     @State private var selectedArtist: Artist?
     @State private var dragStartLocation: CGPoint = .zero
     @State private var gestureTimer: Timer?
-    
+    @State private var isDeleteButtonInteracting = false
+
+    init(track: Track, onTap: @escaping () -> Void, playlist: Playlist? = nil, showDirectDeleteButton: Bool = false) {
+        self.track = track
+        self.onTap = onTap
+        self.playlist = playlist
+        self.showDirectDeleteButton = showDirectDeleteButton
+    }
+
     private var isCurrentlyPlaying: Bool {
         playerEngine.currentTrack?.stableId == track.stableId
     }
@@ -851,67 +861,97 @@ struct TrackRowView: View {
                 .id(eqKey)
             }
             
-            Menu {
+            // Show either direct delete button or menu based on context
+            if showDirectDeleteButton {
                 Button(action: {
-                    do {
-                        try appCoordinator.toggleFavorite(trackStableId: track.stableId)
-                        isFavorite.toggle()
-                    } catch {
-                        print("Failed to toggle favorite: \(error)")
-                    }
+                    removeFromPlaylist()
                 }) {
-                    HStack {
-                        Image(systemName: isFavorite ? "heart.slash" : "heart")
-                            .foregroundColor(isFavorite ? .red : .primary)
-                        Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
-                            .foregroundColor(.primary)
-                    }
+                    Image(systemName: "trash")
+                        .font(.title2)
+                        .foregroundColor(.red)
+                        .frame(width: 36, height: 36)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(
+                            Circle()
+                                .stroke(.red.opacity(0.3), lineWidth: 1)
+                        )
                 }
-                
-                if let artistId = track.artistId,
-                   let artist = try? DatabaseManager.shared.read({ db in
-                       try Artist.fetchOne(db, key: artistId)
-                   }),
-                   let allArtistTracks = try? DatabaseManager.shared.read({ db in
-                       try Track.filter(Column("artist_id") == artistId).fetchAll(db)
-                   }) {
-                    NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
-                        Label(Localized.showArtistPage, systemImage: "person.circle")
-                    }
-                }
-                
-                Button(action: {
-                    showPlaylistDialog = true
-                }) {
-                    Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
-                }
-                
-                Button(action: {
-                    showDeleteConfirmation = true
-                }) {
-                    Label(Localized.deleteFile, systemImage: "trash")
-                }
-                .foregroundColor(.red)
-                
-            } label: {
-                Image(systemName: "ellipsis")
-                    .foregroundColor(.secondary)
-                    .frame(width: 30, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(PlainButtonStyle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        isMenuInteracting = true
-                    }
-                    .onEnded { _ in
-                        // Reset after a short delay to ensure menu interaction is complete
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            isMenuInteracting = false
+                .buttonStyle(PlainButtonStyle())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in
+                            isDeleteButtonInteracting = true
+                        }
+                        .onEnded { _ in
+                            // Reset after a short delay to ensure button interaction is complete
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                isDeleteButtonInteracting = false
+                            }
+                        }
+                )
+            } else {
+                Menu {
+                    Button(action: {
+                        do {
+                            try appCoordinator.toggleFavorite(trackStableId: track.stableId)
+                            isFavorite.toggle()
+                        } catch {
+                            print("Failed to toggle favorite: \(error)")
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: isFavorite ? "heart.slash" : "heart")
+                                .foregroundColor(isFavorite ? .red : .primary)
+                            Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
+                                .foregroundColor(.primary)
                         }
                     }
-            )
+
+                    if let artistId = track.artistId,
+                       let artist = try? DatabaseManager.shared.read({ db in
+                           try Artist.fetchOne(db, key: artistId)
+                       }),
+                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
+                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
+                       }) {
+                        NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
+                            Label(Localized.showArtistPage, systemImage: "person.circle")
+                        }
+                    }
+
+                    Button(action: {
+                        showPlaylistDialog = true
+                    }) {
+                        Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
+                    }
+
+                    Button(action: {
+                        showDeleteConfirmation = true
+                    }) {
+                        Label(Localized.deleteFile, systemImage: "trash")
+                    }
+                    .foregroundColor(.red)
+
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundColor(.secondary)
+                        .frame(width: 30, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in
+                            isMenuInteracting = true
+                        }
+                        .onEnded { _ in
+                            // Reset after a short delay to ensure menu interaction is complete
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                isMenuInteracting = false
+                            }
+                        }
+                )
+            }
         }
         .frame(height: 80)
         .padding(.horizontal, 12)
@@ -951,8 +991,8 @@ struct TrackRowView: View {
                             
                             // Use DispatchQueue.main.async to access UI state safely
                             DispatchQueue.main.async {
-                                // Only animate if drag distance is still small after delay
-                                if !isPressed && !isMenuInteracting && currentDistance < 15 {
+                                // Only animate if drag distance is still small after delay and no buttons are being interacted with
+                                if !isPressed && !isMenuInteracting && !isDeleteButtonInteracting && currentDistance < 15 {
                                     isPressed = true
                                     
                                     // Auto-fade out after expansion completes
@@ -971,9 +1011,9 @@ struct TrackRowView: View {
                     gestureTimer?.invalidate()
                     dragStartLocation = .zero
                     
-                    // Only trigger tap if the drag distance is small (not a scroll gesture)
+                    // Only trigger tap if the drag distance is small (not a scroll gesture) and no buttons are being interacted with
                     let dragDistance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-                    if !isMenuInteracting && dragDistance < 10 {
+                    if !isMenuInteracting && !isDeleteButtonInteracting && dragDistance < 10 {
                         onTap()
                     }
                 }
@@ -1019,7 +1059,27 @@ struct TrackRowView: View {
             }
         }
     }
-    
+
+    private func removeFromPlaylist() {
+        guard let playlist = playlist, let playlistId = playlist.id else {
+            print("❌ No playlist or playlist ID available")
+            return
+        }
+
+        Task {
+            do {
+                try appCoordinator.removeFromPlaylist(playlistId: playlistId, trackStableId: track.stableId)
+                print("✅ Removed '\(track.title)' from playlist '\(playlist.title)'")
+
+                // Notify UI to refresh
+                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+
+            } catch {
+                print("❌ Failed to remove from playlist: \(error)")
+            }
+        }
+    }
+
 }
 
 struct WaveformView: View {

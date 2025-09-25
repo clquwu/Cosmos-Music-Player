@@ -35,6 +35,10 @@ struct Localized {
     static let cancel = "cancel".localized
     static let create = "create".localized
     static let done = "done".localized
+    static let edit = "edit".localized
+    static let editPlaylist = "edit_playlist".localized
+    static let save = "save".localized
+    static let enterNewName = "enter_new_name".localized
     static let managePlaylists = "manage_playlists".localized
     static let playlist = "playlist".localized
     static let createFirstPlaylist = "create_first_playlist".localized

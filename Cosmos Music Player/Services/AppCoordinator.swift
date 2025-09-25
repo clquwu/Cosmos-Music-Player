@@ -552,7 +552,22 @@ class AppCoordinator: ObservableObject {
         syncPlaylistsToCloud()
         return playlist
     }
-    
+
+    func createFolderPlaylist(title: String, folderPath: String) throws -> Playlist {
+        let playlist = try databaseManager.createFolderPlaylist(title: title, folderPath: folderPath)
+        syncPlaylistsToCloud()
+        return playlist
+    }
+
+    func syncPlaylistWithFolder(playlistId: Int64, trackStableIds: [String]) throws {
+        try databaseManager.syncPlaylistWithFolder(playlistId: playlistId, trackStableIds: trackStableIds)
+        syncPlaylistsToCloud()
+    }
+
+    func getFolderSyncedPlaylists() throws -> [Playlist] {
+        return try databaseManager.getFolderSyncedPlaylists()
+    }
+
     func isTrackInPlaylist(playlistId: Int64, trackStableId: String) throws -> Bool {
         return try databaseManager.isTrackInPlaylist(playlistId: playlistId, trackStableId: trackStableId)
     }
@@ -574,7 +589,12 @@ class AppCoordinator: ObservableObject {
         
         print("✅ Playlist '\(playlist.title)' deleted from database and cloud storage")
     }
-    
+
+    func renamePlaylist(playlistId: Int64, newTitle: String) throws {
+        try databaseManager.renamePlaylist(playlistId: playlistId, newTitle: newTitle)
+        print("✅ Playlist renamed to '\(newTitle)'")
+    }
+
     func updatePlaylistAccessed(playlistId: Int64) throws {
         try databaseManager.updatePlaylistAccessed(playlistId: playlistId)
     }

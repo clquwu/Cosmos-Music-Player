@@ -628,11 +628,13 @@ struct LikedSongsScreen: View {
 struct TrackListView: View {
     let tracks: [Track]
     let playlist: Playlist?
+    let isEditMode: Bool
     @EnvironmentObject private var appCoordinator: AppCoordinator
-    
-    init(tracks: [Track], playlist: Playlist? = nil) {
+
+    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false) {
         self.tracks = tracks
         self.playlist = playlist
+        self.isEditMode = isEditMode
     }
     
     var body: some View {
@@ -653,16 +655,21 @@ struct TrackListView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List(tracks, id: \.stableId) { track in
-                TrackRowView(track: track, onTap: {
-                    Task {
-                        // Update playlist access time if track is played from a playlist
-                        if let playlist = playlist, let playlistId = playlist.id {
-                            try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
-                            try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+                TrackRowView(
+                    track: track,
+                    onTap: {
+                        Task {
+                            // Update playlist access time if track is played from a playlist
+                            if let playlist = playlist, let playlistId = playlist.id {
+                                try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
+                                try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+                            }
+                            await appCoordinator.playTrack(track, queue: tracks)
                         }
-                        await appCoordinator.playTrack(track, queue: tracks)
-                    }
-                })
+                    },
+                    playlist: playlist,
+                    showDirectDeleteButton: playlist != nil && isEditMode
+                )
                 .background(
                     RoundedRectangle(cornerRadius: 12)
                         .fill(.ultraThinMaterial)

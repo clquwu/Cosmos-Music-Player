@@ -4,6 +4,12 @@ import SwiftUI
 struct PlaylistsScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var playlists: [Playlist] = []
+    @State private var isEditMode: Bool = false
+    @State private var playlistToEdit: Playlist?
+    @State private var playlistToDelete: Playlist?
+    @State private var showEditDialog = false
+    @State private var showDeleteConfirmation = false
+    @State private var editPlaylistName = ""
     
     var body: some View {
         ZStack {
@@ -33,12 +39,23 @@ struct PlaylistsScreen: View {
                             GridItem(.flexible(), spacing: 8)
                         ], spacing: 16) {
                             ForEach(playlists, id: \.id) { playlist in
-                                NavigationLink {
-                                    PlaylistDetailScreen(playlist: playlist)
-                                } label: {
-                                    PlaylistCardView(playlist: playlist, allTracks: getAllPlaylistTracks(playlist))
+                                if isEditMode {
+                                    PlaylistCardView(playlist: playlist, allTracks: getAllPlaylistTracks(playlist), isEditMode: true, onEdit: {
+                                        playlistToEdit = playlist
+                                        editPlaylistName = playlist.title
+                                        showEditDialog = true
+                                    }, onDelete: {
+                                        playlistToDelete = playlist
+                                        showDeleteConfirmation = true
+                                    })
+                                } else {
+                                    NavigationLink {
+                                        PlaylistDetailScreen(playlist: playlist)
+                                    } label: {
+                                        PlaylistCardView(playlist: playlist, allTracks: getAllPlaylistTracks(playlist))
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
                                 }
-                                .buttonStyle(PlainButtonStyle())
                             }
                         }
                         .padding(16)
@@ -48,6 +65,40 @@ struct PlaylistsScreen: View {
             }
             .navigationTitle(Localized.playlists)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(isEditMode ? Localized.done : Localized.edit) {
+                        withAnimation {
+                            isEditMode.toggle()
+                        }
+                    }
+                    .disabled(playlists.isEmpty)
+                }
+            }
+            .alert(Localized.editPlaylist, isPresented: $showEditDialog) {
+                TextField(Localized.playlistNamePlaceholder, text: $editPlaylistName)
+                Button(Localized.save) {
+                    if let playlist = playlistToEdit, !editPlaylistName.isEmpty {
+                        editPlaylist(playlist, newName: editPlaylistName)
+                    }
+                }
+                .disabled(editPlaylistName.isEmpty)
+                Button(Localized.cancel, role: .cancel) { }
+            } message: {
+                Text(Localized.enterNewName)
+            }
+            .alert(Localized.deletePlaylist, isPresented: $showDeleteConfirmation) {
+                Button(Localized.delete, role: .destructive) {
+                    if let playlist = playlistToDelete {
+                        deletePlaylist(playlist)
+                    }
+                }
+                Button(Localized.cancel, role: .cancel) { }
+            } message: {
+                if let playlist = playlistToDelete {
+                    Text(Localized.deletePlaylistConfirmation(playlist.title))
+                }
+            }
             .onAppear {
                 loadPlaylists()
             }
@@ -81,13 +132,47 @@ struct PlaylistsScreen: View {
             print("Failed to load playlists: \(error)")
         }
     }
+
+    private func editPlaylist(_ playlist: Playlist, newName: String) {
+        guard let playlistId = playlist.id else { return }
+        do {
+            try appCoordinator.renamePlaylist(playlistId: playlistId, newTitle: newName)
+            loadPlaylists()
+            playlistToEdit = nil
+            editPlaylistName = ""
+        } catch {
+            print("Failed to rename playlist: \(error)")
+        }
+    }
+
+    private func deletePlaylist(_ playlist: Playlist) {
+        guard let playlistId = playlist.id else { return }
+        do {
+            try appCoordinator.deletePlaylist(playlistId: playlistId)
+            loadPlaylists()
+            playlistToDelete = nil
+        } catch {
+            print("Failed to delete playlist: \(error)")
+        }
+    }
 }
 
 struct PlaylistCardView: View {
     let playlist: Playlist
     let allTracks: [Track]
+    let isEditMode: Bool
+    let onEdit: (() -> Void)?
+    let onDelete: (() -> Void)?
     @StateObject private var artworkManager = ArtworkManager.shared
     @State private var artworks: [UIImage] = []
+
+    init(playlist: Playlist, allTracks: [Track], isEditMode: Bool = false, onEdit: (() -> Void)? = nil, onDelete: (() -> Void)? = nil) {
+        self.playlist = playlist
+        self.allTracks = allTracks
+        self.isEditMode = isEditMode
+        self.onEdit = onEdit
+        self.onDelete = onDelete
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -96,7 +181,50 @@ struct PlaylistCardView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Color.gray.opacity(0.2))
                     .aspectRatio(1, contentMode: .fit)
+
+                // Edit mode overlay with buttons - always on top
+                if isEditMode {
+                    VStack {
+                        HStack {
+                            Button(action: {
+                                onEdit?()
+                            }) {
+                                Image(systemName: "pencil")
+                                    .font(.title2)
+                                    .foregroundColor(.black)
+                                    .frame(width: 36, height: 36)
+                                    .background(.ultraThinMaterial, in: Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(.black.opacity(0.3), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+
+                            Spacer()
+
+                            Button(action: {
+                                onDelete?()
+                            }) {
+                                Image(systemName: "trash")
+                                    .font(.title2)
+                                    .foregroundColor(.red)
+                                    .frame(width: 36, height: 36)
+                                    .background(.ultraThinMaterial, in: Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(.red.opacity(0.3), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                        Spacer()
+                    }
+                    .padding(8)
+                    .zIndex(1000)
+                }
                 
+                // Artwork content - same in both edit and normal mode
                 if allTracks.count >= 4 {
                     // 2x2 mashup for 4+ songs
                     GeometryReader { geometry in
@@ -183,15 +311,26 @@ struct PlaylistDetailScreen: View {
     let playlist: Playlist
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var tracks: [Track] = []
+    @State private var isEditMode: Bool = false
     
     var body: some View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .playlistDetail)
             
-            TrackListView(tracks: tracks, playlist: playlist)
+            TrackListView(tracks: tracks, playlist: playlist, isEditMode: isEditMode)
         }
         .navigationTitle(playlist.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(isEditMode ? Localized.done : Localized.edit) {
+                    withAnimation {
+                        isEditMode.toggle()
+                    }
+                }
+                .disabled(tracks.isEmpty)
+            }
+        }
         .onAppear {
             loadPlaylistTracks()
         }

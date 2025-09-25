@@ -43,7 +43,7 @@ class LibraryIndexer: NSObject, ObservableObject {
             metadataQuery.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
         }
         
-        metadataQuery.predicate = NSPredicate(format: "%K LIKE '*.flac' OR %K LIKE '*.mp3'", NSMetadataItemFSNameKey, NSMetadataItemFSNameKey)
+        metadataQuery.predicate = NSPredicate(format: "%K LIKE '*.flac' OR %K LIKE '*.mp3' OR %K LIKE '*.wav'", NSMetadataItemFSNameKey, NSMetadataItemFSNameKey, NSMetadataItemFSNameKey)
         
         NotificationCenter.default.addObserver(
             self,
@@ -299,6 +299,80 @@ class LibraryIndexer: NSObject, ObservableObject {
         
         isIndexing = false
         print("✅ Direct scan completed. Found \(tracksFound) tracks from both iCloud and local folders.")
+
+        // Process folder playlists after scan completion
+        await processFolderPlaylists(allMusicFiles: allMusicFiles)
+    }
+
+    private func processFolderPlaylists(allMusicFiles: [URL]) async {
+        print("📁 Processing folder playlists...")
+
+        // Group music files by their parent directory
+        var folderGroups: [String: [URL]] = [:]
+
+        for fileURL in allMusicFiles {
+            let parentFolder = fileURL.deletingLastPathComponent()
+            let folderPath = parentFolder.path
+
+            // Skip if it's directly in Documents or iCloud root
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.path
+            let iCloudMusicPath = stateManager.getMusicFolderURL()?.path
+
+            if folderPath == documentsPath || folderPath == iCloudMusicPath {
+                continue
+            }
+
+            if folderGroups[folderPath] == nil {
+                folderGroups[folderPath] = []
+            }
+            folderGroups[folderPath]?.append(fileURL)
+        }
+
+        print("📁 Found \(folderGroups.count) folders with music files")
+
+        for (folderPath, musicFiles) in folderGroups {
+            await processFolderPlaylist(folderPath: folderPath, musicFiles: musicFiles)
+        }
+
+        print("✅ Folder playlist processing completed")
+    }
+
+    private func processFolderPlaylist(folderPath: String, musicFiles: [URL]) async {
+        let folderURL = URL(fileURLWithPath: folderPath)
+        let folderName = folderURL.lastPathComponent
+
+        print("📂 Processing folder playlist for: \(folderName)")
+
+        do {
+            // Generate stable IDs for all music files in this folder
+            var trackStableIds: [String] = []
+
+            for musicFile in musicFiles {
+                let stableId = try generateStableId(for: musicFile)
+                trackStableIds.append(stableId)
+            }
+
+            print("🎵 Found \(trackStableIds.count) tracks in folder: \(folderName)")
+
+            // Check if a folder playlist already exists for this path
+            if let existingPlaylist = try databaseManager.getFolderPlaylist(forPath: folderPath) {
+                print("🔄 Syncing existing folder playlist: \(existingPlaylist.title)")
+
+                // Sync the existing playlist with current folder contents
+                try databaseManager.syncPlaylistWithFolder(playlistId: existingPlaylist.id!, trackStableIds: trackStableIds)
+                print("✅ Synced playlist '\(existingPlaylist.title)' with folder contents")
+            } else {
+                // Create new folder playlist
+                print("➕ Creating new folder playlist: \(folderName)")
+
+                let playlist = try databaseManager.createFolderPlaylist(title: folderName, folderPath: folderPath)
+                try databaseManager.syncPlaylistWithFolder(playlistId: playlist.id!, trackStableIds: trackStableIds)
+                print("✅ Created folder playlist '\(playlist.title)' with \(trackStableIds.count) tracks")
+            }
+
+        } catch {
+            print("❌ Failed to process folder playlist for \(folderName): \(error)")
+        }
     }
     
     private func scanLocalDocuments() async {
@@ -323,6 +397,9 @@ class LibraryIndexer: NSObject, ObservableObject {
                 isIndexing = false
                 print("Offline library scan completed. Found \(tracksFound) tracks.")
             }
+
+            // Process folder playlists after offline scan
+            await processFolderPlaylists(allMusicFiles: musicFiles)
         } catch {
             await MainActor.run {
                 isIndexing = false
@@ -357,7 +434,7 @@ class LibraryIndexer: NSObject, ObservableObject {
                         }
                         
                         let pathExtension = fileURL.pathExtension.lowercased()
-                        if pathExtension == "flac" || pathExtension == "mp3" {
+                        if pathExtension == "flac" || pathExtension == "mp3" || pathExtension == "wav" {
                             musicFiles.append(fileURL)
                         }
                     }
@@ -468,7 +545,7 @@ class LibraryIndexer: NSObject, ObservableObject {
     private func processMetadataItem(_ item: NSMetadataItem) async {
         guard let fileURL = item.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
         let ext = fileURL.pathExtension.lowercased()
-        guard ext == "flac" || ext == "mp3" else { return }
+        guard ext == "flac" || ext == "mp3" || ext == "wav" else { return }
         
         do {
             let stableId = try generateStableId(for: fileURL)
@@ -630,6 +707,10 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             print("📁 Found \(sharedFiles.count) shared audio file references")
 
+            // Group files by folder for playlist creation
+            var folderGroups: [String: [URL]] = [:]
+            var processedFiles: [URL] = []
+
             for fileInfo in sharedFiles {
                 guard let bookmarkData = fileInfo["bookmark"],
                       let filenameData = fileInfo["filename"],
@@ -664,10 +745,24 @@ class LibraryIndexer: NSObject, ObservableObject {
                     // Store the bookmark permanently for future access after app updates
                     await storeBookmarkPermanently(bookmarkData, for: url)
 
+                    // Group by folder path for playlist creation
+                    if let folderPathData = fileInfo["folderPath"],
+                       let folderPath = String(data: folderPathData, encoding: .utf8) {
+                        if folderGroups[folderPath] == nil {
+                            folderGroups[folderPath] = []
+                        }
+                        folderGroups[folderPath]?.append(url)
+                    }
+
+                    processedFiles.append(url)
+
                 } catch {
                     print("❌ Failed to resolve bookmark for \(filename): \(error)")
                 }
             }
+
+            // Create folder playlists for shared files
+            await processSharedFolderPlaylists(folderGroups: folderGroups)
 
             // Clear the shared files list after processing and storing bookmarks permanently
             try FileManager.default.removeItem(at: sharedDataURL)
@@ -676,6 +771,52 @@ class LibraryIndexer: NSObject, ObservableObject {
         } catch {
             print("❌ Failed to process shared audio files: \(error)")
         }
+    }
+
+    private func processSharedFolderPlaylists(folderGroups: [String: [URL]]) async {
+        guard !folderGroups.isEmpty else { return }
+
+        print("📁 Processing \(folderGroups.count) shared folder playlists...")
+
+        for (folderPath, musicFiles) in folderGroups {
+            let folderURL = URL(fileURLWithPath: folderPath)
+            let folderName = folderURL.lastPathComponent
+
+            print("📂 Processing shared folder playlist for: \(folderName)")
+
+            do {
+                // Generate stable IDs for all music files in this folder
+                var trackStableIds: [String] = []
+
+                for musicFile in musicFiles {
+                    let stableId = try generateStableId(for: musicFile)
+                    trackStableIds.append(stableId)
+                }
+
+                print("🎵 Found \(trackStableIds.count) tracks in shared folder: \(folderName)")
+
+                // Check if a folder playlist already exists for this path
+                if let existingPlaylist = try databaseManager.getFolderPlaylist(forPath: folderPath) {
+                    print("🔄 Syncing existing shared folder playlist: \(existingPlaylist.title)")
+
+                    // Sync the existing playlist with current folder contents
+                    try databaseManager.syncPlaylistWithFolder(playlistId: existingPlaylist.id!, trackStableIds: trackStableIds)
+                    print("✅ Synced shared playlist '\(existingPlaylist.title)' with folder contents")
+                } else {
+                    // Create new folder playlist for shared folder
+                    print("➕ Creating new shared folder playlist: \(folderName)")
+
+                    let playlist = try databaseManager.createFolderPlaylist(title: folderName, folderPath: folderPath)
+                    try databaseManager.syncPlaylistWithFolder(playlistId: playlist.id!, trackStableIds: trackStableIds)
+                    print("✅ Created shared folder playlist '\(playlist.title)' with \(trackStableIds.count) tracks")
+                }
+
+            } catch {
+                print("❌ Failed to process shared folder playlist for \(folderName): \(error)")
+            }
+        }
+
+        print("✅ Shared folder playlist processing completed")
     }
 
     private func processLegacySharedFiles(from sharedContainer: URL) async {
@@ -858,6 +999,8 @@ class AudioMetadataParser {
             return try await parseFlacMetadataSync(from: url)
         } else if ext == "mp3" {
             return try await parseMp3MetadataSync(from: url)
+        } else if ext == "wav" {
+            return try await parseWavMetadataSync(from: url)
         } else {
             throw AudioParseError.unsupportedFormat
         }
@@ -1269,6 +1412,115 @@ class AudioMetadataParser {
             durationMs: durationMs,
             sampleRate: sampleRate,
             bitDepth: nil, // MP3 is lossy, bit depth doesn't apply
+            channels: channels,
+            replaygainTrackGain: nil,
+            replaygainAlbumGain: nil,
+            replaygainTrackPeak: nil,
+            replaygainAlbumPeak: nil,
+            hasEmbeddedArt: hasEmbeddedArt
+        )
+    }
+
+    private static func parseWavMetadataSync(from url: URL) async throws -> AudioMetadata {
+        print("📖 Reading WAV metadata for: \(url.lastPathComponent)")
+
+        // For WAV files, use AVAudioFile to get format info and try AVAsset for metadata
+        var sampleRate: Int?
+        var channels: Int?
+        var bitDepth: Int?
+        var durationMs: Int?
+        var title: String?
+        var artist: String?
+        var album: String?
+        var albumArtist: String?
+        var trackNumber: Int?
+        var discNumber: Int?
+        var year: Int?
+        var hasEmbeddedArt = false
+
+        // Get audio format info
+        do {
+            let audioFile = try AVAudioFile(forReading: url)
+            let format = audioFile.processingFormat
+
+            sampleRate = Int(format.sampleRate)
+            channels = Int(format.channelCount)
+
+            // Calculate duration
+            let totalFrames = audioFile.length
+            durationMs = Int((Double(totalFrames) / format.sampleRate) * 1000)
+
+            // Try to get bit depth from format settings
+            if let settings = audioFile.fileFormat.settings[AVLinearPCMBitDepthKey] as? Int {
+                bitDepth = settings
+            }
+        } catch {
+            print("⚠️ Failed to read WAV audio format: \(error)")
+        }
+
+        // Try to get metadata from AVAsset (some WAV files may have ID3 tags or other metadata)
+        do {
+            let asset = AVURLAsset(url: url)
+            let commonMetadata = try await asset.load(.commonMetadata)
+
+            for item in commonMetadata {
+                switch item.commonKey {
+                case .commonKeyTitle:
+                    title = try? await item.load(.stringValue)
+                case .commonKeyArtist:
+                    artist = try? await item.load(.stringValue)
+                case .commonKeyAlbumName:
+                    album = try? await item.load(.stringValue)
+                case .commonKeyCreationDate:
+                    if let dateString = try? await item.load(.stringValue) {
+                        year = Int(String(dateString.prefix(4)))
+                    }
+                case .commonKeyArtwork:
+                    hasEmbeddedArt = true
+                default:
+                    break
+                }
+            }
+        } catch {
+            print("⚠️ Failed to read WAV metadata: \(error)")
+        }
+
+        // Fallback to filename parsing if no metadata found
+        if title == nil {
+            let fileName = url.deletingPathExtension().lastPathComponent
+            let components = fileName.components(separatedBy: " - ")
+
+            if components.count >= 2 {
+                artist = artist ?? components[0].trimmingCharacters(in: .whitespaces)
+                title = components[1].trimmingCharacters(in: .whitespaces)
+            } else {
+                title = fileName
+            }
+        }
+
+        // Default values for WAV
+        sampleRate = sampleRate ?? 44100
+        channels = channels ?? 2
+        bitDepth = bitDepth ?? 16
+
+        print("🎵 Final WAV metadata for \(url.lastPathComponent):")
+        print("   Title: \(title ?? "nil")")
+        print("   Artist: \(artist ?? "nil")")
+        print("   Sample Rate: \(sampleRate ?? 0) Hz")
+        print("   Channels: \(channels ?? 0)")
+        print("   Bit Depth: \(bitDepth ?? 0)")
+
+        return AudioMetadata(
+            title: title,
+            artist: artist,
+            album: album,
+            albumArtist: albumArtist,
+            trackNumber: trackNumber,
+            discNumber: discNumber,
+            year: year,
+            durationMs: durationMs,
+            sampleRate: sampleRate,
+            bitDepth: bitDepth,
             channels: channels,
             replaygainTrackGain: nil,
             replaygainAlbumGain: nil,
