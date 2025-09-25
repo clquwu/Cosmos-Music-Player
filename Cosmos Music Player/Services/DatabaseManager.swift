@@ -113,7 +113,43 @@ class DatabaseManager: @unchecked Sendable {
             
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_album ON track(album_id)")
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist ON track(artist_id)")
-            
+
+            // EQ Tables
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS eq_preset (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    is_built_in INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS eq_band (
+                    id INTEGER PRIMARY KEY,
+                    preset_id INTEGER NOT NULL REFERENCES eq_preset(id) ON DELETE CASCADE,
+                    frequency REAL NOT NULL,
+                    gain REAL NOT NULL DEFAULT 0.0,
+                    bandwidth REAL NOT NULL DEFAULT 0.5,
+                    band_index INTEGER NOT NULL
+                )
+            """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS eq_settings (
+                    id INTEGER PRIMARY KEY,
+                    is_enabled INTEGER DEFAULT 0,
+                    active_preset_id INTEGER REFERENCES eq_preset(id) ON DELETE SET NULL,
+                    global_gain REAL DEFAULT 0.0,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_eq_band_preset ON eq_band(preset_id)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_eq_band_index ON eq_band(band_index)")
+
             // Migration: Add last_played_at column if it doesn't exist
             do {
                 try db.execute(sql: """
@@ -653,5 +689,61 @@ class DatabaseManager: @unchecked Sendable {
                 .updateAll(db, Column("last_played_at").set(to: now))
         }
         print("🎵 Database: Updated \(updatedCount) playlist(s) last played time")
+    }
+
+    // MARK: - EQ Operations
+
+    func getAllEQPresets() async throws -> [EQPreset] {
+        return try read { db in
+            return try EQPreset.order(Column("name")).fetchAll(db)
+        }
+    }
+
+    func getEQPreset(id: Int64) async throws -> EQPreset? {
+        return try read { db in
+            return try EQPreset.filter(Column("id") == id).fetchOne(db)
+        }
+    }
+
+    func saveEQPreset(_ preset: EQPreset) async throws -> EQPreset {
+        return try write { db in
+            return try preset.insertAndFetch(db) ?? preset
+        }
+    }
+
+    func deleteEQPreset(_ preset: EQPreset) async throws {
+        _ = try write { db in
+            try preset.delete(db)
+        }
+    }
+
+    func getBands(for preset: EQPreset) async throws -> [EQBand] {
+        guard let presetId = preset.id else { return [] }
+        return try read { db in
+            return try EQBand
+                .filter(Column("preset_id") == presetId)
+                .order(Column("band_index"))
+                .fetchAll(db)
+        }
+    }
+
+    func saveEQBand(_ band: EQBand) async throws {
+        try write { db in
+            try band.save(db)
+        }
+    }
+
+    func getEQSettings() async throws -> EQSettings? {
+        return try read { db in
+            return try EQSettings.fetchOne(db)
+        }
+    }
+
+    func saveEQSettings(_ settings: EQSettings) async throws {
+        try write { db in
+            // Delete existing settings first (there should only be one row)
+            try EQSettings.deleteAll(db)
+            try settings.save(db)
+        }
     }
 }

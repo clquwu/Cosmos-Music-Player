@@ -69,6 +69,17 @@ struct SettingsView: View {
                 }
                 
                 
+                Section(Localized.equalizer) {
+                    NavigationLink(destination: EQSettingsView()) {
+                        HStack {
+                            Image(systemName: "slider.horizontal.3")
+                                .foregroundColor(.blue)
+                                .font(.system(size: 20))
+                            Text(Localized.graphicEqualizer)
+                        }
+                    }
+                }
+
                 Section(Localized.information) {
                     HStack {
                         Text(Localized.version)

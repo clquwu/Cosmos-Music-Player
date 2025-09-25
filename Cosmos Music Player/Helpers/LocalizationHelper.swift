@@ -206,4 +206,68 @@ struct Localized {
     static func songsCountOnly(_ count: Int) -> String {
         return "songs_count".localized(with: count)
     }
+
+    // MARK: - Equalizer strings
+    static let equalizer = "equalizer".localized
+    static let graphicEqualizer = "graphic_equalizer".localized
+    static let enableEqualizer = "enable_equalizer".localized
+    static let enableDisableEqDescription = "enable_disable_eq_description".localized
+    static let importedPresets = "imported_presets".localized
+    static let noPresetsImported = "no_presets_imported".localized
+    static let importGraphicEQDescription = "import_graphiceq_description".localized
+    static let importedGraphicEQ = "imported_graphiceq".localized
+    static let importGraphicEQFile = "import_graphiceq_file".localized
+    static let globalSettings = "global_settings".localized
+    static let globalGain = "global_gain".localized
+    static let globalGainDescription = "global_gain_description".localized
+    static let aboutGraphicEQFormat = "about_graphiceq_format".localized
+    static let importGraphicEQFormatDescription = "import_graphiceq_format_description".localized
+    static let frequencyGainPairDescription = "frequency_gain_pair_description".localized
+    static let eqExport = "export".localized
+    static let eqDelete = "delete".localized
+    static let eqCancel = "cancel".localized
+    static let eqDone = "done".localized
+
+    // GraphicEQ Import View
+    static let importGraphicEQ = "import_graphiceq".localized
+    static let presetName = "preset_name".localized
+    static let enterPresetName = "enter_preset_name".localized
+    static let importMethods = "import_methods".localized
+    static let importFromTxtFile = "import_from_txt_file".localized
+    static let pasteGraphicEQText = "paste_graphiceq_text".localized
+    static let eqError = "error".localized
+    static let formatInfo = "format_info".localized
+    static let expectedGraphicEQFormat = "expected_graphiceq_format".localized
+    static let frequencyGainPair = "frequency_gain_pair".localized
+
+    // Text Import View
+    static let pasteGraphicEQ = "paste_graphiceq".localized
+    static let pasteGraphicEQTextSection = "paste_graphiceq_text_section".localized
+    static let example = "example".localized
+    static let eqImport = "import".localized
+
+    // Error Messages
+    static func failedToImport(_ error: String) -> String {
+        return "failed_to_import".localized(with: error)
+    }
+
+    static func fileImportFailed(_ error: String) -> String {
+        return "file_import_failed".localized(with: error)
+    }
+
+    static let failedToExport = "failed_to_export".localized
+    static let failedToDelete = "failed_to_delete".localized
+
+    // EQ Band Information
+    static func bandCountInfo(used: Int, original: Int) -> String {
+        return "band_count_info".localized(with: used, original)
+    }
+
+    static func bandsReducedDescription(original: Int, reduced: Int) -> String {
+        return "bands_reduced_description".localized(with: original, reduced)
+    }
+
+    static func bandsLimitedWarning(original: Int, limited: Int) -> String {
+        return "bands_limited_warning".localized(with: original, limited)
+    }
 }

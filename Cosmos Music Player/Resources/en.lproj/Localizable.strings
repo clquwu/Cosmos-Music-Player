@@ -161,3 +161,53 @@
 "sync_one_track_deleted" = "1 song removed";
 "sync_multiple_tracks_deleted" = "%d songs removed";
 "sync_no_changes" = "Library is up to date";
+
+/* Equalizer strings */
+"equalizer" = "Equalizer";
+"graphic_equalizer" = "Graphic Equalizer";
+"enable_equalizer" = "Enable Equalizer";
+"enable_disable_eq_description" = "Enable or disable the graphic equalizer";
+"imported_presets" = "Imported Presets";
+"no_presets_imported" = "No presets imported";
+"import_graphiceq_description" = "Import GraphicEQ .txt files to get started";
+"imported_graphiceq" = "Imported GraphicEQ";
+"import_graphiceq_file" = "Import GraphicEQ File";
+"global_settings" = "Global Settings";
+"global_gain" = "Global Gain";
+"global_gain_description" = "Adjust the overall volume level after EQ processing";
+"about_graphiceq_format" = "About GraphicEQ Format";
+"import_graphiceq_format_description" = "Import GraphicEQ .txt files with the format:";
+"frequency_gain_pair_description" = "Each pair represents frequency (Hz) and gain (dB)";
+"delete" = "Delete";
+"export" = "Export";
+"cancel" = "Cancel";
+"done" = "Done";
+
+/* GraphicEQ Import View */
+"import_graphiceq" = "Import GraphicEQ";
+"preset_name" = "Preset Name";
+"enter_preset_name" = "Enter preset name";
+"import_methods" = "Import Methods";
+"import_from_txt_file" = "Import from .txt File";
+"paste_graphiceq_text" = "Paste GraphicEQ Text";
+"error" = "Error";
+"format_info" = "Format Info";
+"expected_graphiceq_format" = "Expected GraphicEQ format:";
+"frequency_gain_pair" = "Each pair: frequency (Hz) gain (dB)";
+
+/* Text Import View */
+"paste_graphiceq" = "Paste GraphicEQ";
+"paste_graphiceq_text_section" = "Paste GraphicEQ Text";
+"example" = "Example";
+"import" = "Import";
+
+/* Error Messages */
+"failed_to_import" = "Failed to import: %@";
+"file_import_failed" = "File import failed: %@";
+"failed_to_export" = "Failed to export preset";
+"failed_to_delete" = "Failed to delete preset";
+
+/* EQ Band Information */
+"band_count_info" = "%d bands (reduced from %d)";
+"bands_reduced_description" = "Your GraphicEQ has more bands than iOS supports. The system intelligently maps your %d bands to %d bands using frequency averaging.";
+"bands_limited_warning" = "⚠️ GraphicEQ reduced from %d to %d bands (iOS limit)";

@@ -121,14 +121,76 @@ struct PlaylistItem: Codable, FetchableRecord, PersistableRecord {
     var playlistId: Int64
     var position: Int
     var trackStableId: String
-    
+
     static let databaseTableName = "playlist_item"
-    
+
     nonisolated(unsafe) static let playlist = belongsTo(Playlist.self)
-    
+
     enum CodingKeys: String, CodingKey {
         case position
         case playlistId = "playlist_id"
         case trackStableId = "track_stable_id"
+    }
+}
+
+// MARK: - Graphic EQ Models
+
+struct EQPreset: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    var id: Int64?
+    var name: String
+    var isBuiltIn: Bool
+    var isActive: Bool
+    var createdAt: Int64
+    var updatedAt: Int64
+
+    static let databaseTableName = "eq_preset"
+
+    nonisolated(unsafe) static let bands = hasMany(EQBand.self)
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case isBuiltIn = "is_built_in"
+        case isActive = "is_active"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct EQBand: Codable, FetchableRecord, PersistableRecord {
+    var id: Int64?
+    var presetId: Int64
+    var frequency: Double
+    var gain: Double
+    var bandwidth: Double
+    var bandIndex: Int
+
+    static let databaseTableName = "eq_band"
+
+    nonisolated(unsafe) static let preset = belongsTo(EQPreset.self)
+
+    enum CodingKeys: String, CodingKey {
+        case id, frequency, gain, bandwidth
+        case presetId = "preset_id"
+        case bandIndex = "band_index"
+    }
+}
+
+struct EQSettings: Codable, FetchableRecord, PersistableRecord {
+    var id: Int64?
+    var isEnabled: Bool
+    var activePresetId: Int64?
+    var globalGain: Double
+    var updatedAt: Int64
+
+    static let databaseTableName = "eq_settings"
+
+    nonisolated(unsafe) static let activePreset = belongsTo(EQPreset.self, key: "activePresetId")
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case isEnabled = "is_enabled"
+        case activePresetId = "active_preset_id"
+        case globalGain = "global_gain"
+        case updatedAt = "updated_at"
     }
 }

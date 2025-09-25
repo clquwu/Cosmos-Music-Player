@@ -161,3 +161,53 @@
 "sync_one_track_deleted" = "1 musique supprimée";
 "sync_multiple_tracks_deleted" = "%d musiques supprimées";
 "sync_no_changes" = "Bibliothèque à jour";
+
+/* Equalizer strings */
+"equalizer" = "Égaliseur";
+"graphic_equalizer" = "Égaliseur Graphique";
+"enable_equalizer" = "Activer l'Égaliseur";
+"enable_disable_eq_description" = "Activer ou désactiver l'égaliseur graphique";
+"imported_presets" = "Préréglages Importés";
+"no_presets_imported" = "Aucun préréglage importé";
+"import_graphiceq_description" = "Importez des fichiers GraphicEQ .txt pour commencer";
+"imported_graphiceq" = "GraphicEQ Importé";
+"import_graphiceq_file" = "Importer un Fichier GraphicEQ";
+"global_settings" = "Réglages Globaux";
+"global_gain" = "Gain Global";
+"global_gain_description" = "Ajustez le niveau de volume global après traitement EQ";
+"about_graphiceq_format" = "À propos du Format GraphicEQ";
+"import_graphiceq_format_description" = "Importez des fichiers GraphicEQ .txt avec le format :";
+"frequency_gain_pair_description" = "Chaque paire représente la fréquence (Hz) et le gain (dB)";
+"delete" = "Supprimer";
+"export" = "Exporter";
+"cancel" = "Annuler";
+"done" = "Terminé";
+
+/* GraphicEQ Import View */
+"import_graphiceq" = "Importer GraphicEQ";
+"preset_name" = "Nom du Préréglage";
+"enter_preset_name" = "Entrer le nom du préréglage";
+"import_methods" = "Méthodes d'Importation";
+"import_from_txt_file" = "Importer depuis un Fichier .txt";
+"paste_graphiceq_text" = "Coller le Texte GraphicEQ";
+"error" = "Erreur";
+"format_info" = "Informations sur le Format";
+"expected_graphiceq_format" = "Format GraphicEQ attendu :";
+"frequency_gain_pair" = "Chaque paire : fréquence (Hz) gain (dB)";
+
+/* Text Import View */
+"paste_graphiceq" = "Coller GraphicEQ";
+"paste_graphiceq_text_section" = "Coller le Texte GraphicEQ";
+"example" = "Exemple";
+"import" = "Importer";
+
+/* Error Messages */
+"failed_to_import" = "Échec de l'importation : %@";
+"file_import_failed" = "Échec de l'importation du fichier : %@";
+"failed_to_export" = "Échec de l'exportation du préréglage";
+"failed_to_delete" = "Échec de la suppression du préréglage";
+
+/* EQ Band Information */
+"band_count_info" = "%d bandes (réduites de %d)";
+"bands_reduced_description" = "Votre GraphicEQ a plus de bandes qu'iOS ne supporte. Le système mappe intelligemment vos %d bandes vers %d bandes en utilisant la moyenne des fréquences.";
+"bands_limited_warning" = "⚠️ GraphicEQ réduit de %d à %d bandes (limite iOS)";
