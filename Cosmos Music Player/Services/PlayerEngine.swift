@@ -488,7 +488,7 @@ class PlayerEngine: NSObject, ObservableObject {
         cc.pauseCommand.addTarget { [weak self] _ in
             Task { @MainActor in
                 print("🎛️ Pause command from Control Center")
-                self?.pause()
+                self?.pause(fromControlCenter: true)
             }
             return .success
         }
@@ -521,7 +521,7 @@ class PlayerEngine: NSObject, ObservableObject {
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
             Task { @MainActor in
                 if self?.isPlaying == true {
-                    self?.pause()
+                    self?.pause(fromControlCenter: true)
                 } else {
                     self?.play()
                 }
@@ -960,34 +960,44 @@ class PlayerEngine: NSObject, ObservableObject {
         print("✅ Playback started and control center claimed")
     }
     
-    func pause() {
+    func pause(fromControlCenter: Bool = false) {
         // Capture current playback position before pausing
         if let audioFile = audioFile,
            let nodeTime = playerNode.lastRenderTime,
            let playerTime = playerNode.playerTime(forNodeTime: nodeTime) {
             let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
             let currentPosition = seekTimeOffset + nodePlaybackTime
-            
-            print("🔄 Pausing at position: \(currentPosition)s")
-            
+
+            print("🔄 Pausing at position: \(currentPosition)s (from Control Center: \(fromControlCenter))")
+
             // Store the exact pause position
             playbackTime = currentPosition
             seekTimeOffset = currentPosition
         }
-        
+
         // Use AVAudioEngine.pause() instead of playerNode.pause()
         audioEngine.pause()
-        
+
         // Update state
         isPlaying = false
         playbackState = .paused
         stopPlaybackTimer()
-        
+
         print("🔄 Paused audio engine - stored position: \(playbackTime)s")
-        
+
         // Update Now Playing info with enhanced approach
         updateNowPlayingInfoEnhanced()
-        
+
+        // Only start silent audio if paused from within the app, not from Control Center
+        // This prevents Control Center button state confusion
+        if !fromControlCenter {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                if self?.playbackState == .paused {
+                    self?.startSilentPlaybackForPause()
+                }
+            }
+        }
+
         // Save state when pausing
         savePlayerState()
     }
@@ -1098,6 +1108,44 @@ class PlayerEngine: NSObject, ObservableObject {
         print("✅ Seek completed")
     }
     
+    private func startSilentPlaybackForPause() {
+        // Create a very quiet, looping audio player to maintain background execution
+        guard pausedSilentPlayer == nil else {
+            if pausedSilentPlayer?.isPlaying == false {
+                pausedSilentPlayer?.play()
+            }
+            return
+        }
+        
+        do {
+            // Create a tiny silent buffer programmatically
+            let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4410)! // 0.1 seconds at 44.1kHz
+            buffer.frameLength = 4410
+            
+            // Buffer is already silent (zero-filled by default)
+            
+            // Write to temporary file
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("pause_silence.caf")
+            let audioFile = try AVAudioFile(forWriting: tempURL, settings: format.settings)
+            try audioFile.write(from: buffer)
+            
+            // Create player with very low volume
+            pausedSilentPlayer = try AVAudioPlayer(contentsOf: tempURL)
+            pausedSilentPlayer?.volume = 0.001  // Nearly silent
+            pausedSilentPlayer?.numberOfLoops = -1  // Loop indefinitely
+            pausedSilentPlayer?.prepareToPlay()
+            pausedSilentPlayer?.play()
+            
+            print("🔇 Started silent playback to maintain background execution during pause")
+            
+        } catch {
+            print("❌ Failed to create silent player for pause: \(error)")
+            // Fallback to the original method
+            maintainAudioSessionForBackground()
+        }
+    }
+    
     // MARK: - Audio Scheduling Helper
     
     private func scheduleSegment(from startFrame: AVAudioFramePosition, file: AVAudioFile) {
@@ -1142,44 +1190,6 @@ class PlayerEngine: NSObject, ObservableObject {
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
-        }
-    }
-    
-    private func startSilentPlaybackForPause() {
-        // Create a very quiet, looping audio player to maintain background execution
-        guard pausedSilentPlayer == nil else {
-            if pausedSilentPlayer?.isPlaying == false {
-                pausedSilentPlayer?.play()
-            }
-            return
-        }
-        
-        do {
-            // Create a tiny silent buffer programmatically
-            let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4410)! // 0.1 seconds at 44.1kHz
-            buffer.frameLength = 4410
-            
-            // Buffer is already silent (zero-filled by default)
-            
-            // Write to temporary file
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("pause_silence.caf")
-            let audioFile = try AVAudioFile(forWriting: tempURL, settings: format.settings)
-            try audioFile.write(from: buffer)
-            
-            // Create player with very low volume
-            pausedSilentPlayer = try AVAudioPlayer(contentsOf: tempURL)
-            pausedSilentPlayer?.volume = 0.001  // Nearly silent
-            pausedSilentPlayer?.numberOfLoops = -1  // Loop indefinitely
-            pausedSilentPlayer?.prepareToPlay()
-            pausedSilentPlayer?.play()
-            
-            print("🔇 Started silent playback to maintain background execution during pause")
-            
-        } catch {
-            print("❌ Failed to create silent player for pause: \(error)")
-            // Fallback to the original method
-            maintainAudioSessionForBackground()
         }
     }
     
