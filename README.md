@@ -8,13 +8,14 @@
 
 Cosmos Music Player is a high-quality music player that supports both iCloud Drive synchronization and local storage, giving users flexibility in how they manage their music. The app is built and designed for the iOS and Apple ecosystem.
 
-A premium FLAC, MP3, and WAV music player for iOS with advanced features including dual storage options (iCloud/local), playlist management, artist information integration, and multi-language support.
+A premium FLAC, MP3, and WAV music player for iOS with advanced features including dual storage options (iCloud/local), playlist management, artist information integration, graphic equalizer, and multi-language support.
 
 ## Features ✨
 
 ### 🎧 Audio Playback
 - **High-Quality Lossless Support**: Native support for lossless FLAC and WAV audio files, plus MP3
-- **Background Playback**: Continue listening while using other apps
+- **Graphic Equalizer**: Text-based GraphicEQ support for precise audio customization
+- **Custom EQ Settings**: Configure and save different GraphicEQ settings
 - **Siri Integration**: Voice control for music playback in English and French
 - **ReplayGain Support**: Automatic volume normalization for consistent listening experience
 - **Embedded Artwork**: Displays album art from FLAC, MP3, and WAV metadata
@@ -27,14 +28,6 @@ A premium FLAC, MP3, and WAV music player for iOS with advanced features includi
 - **Smart Library Indexing**: Automatic detection and indexing of music files from both storage locations
 - **Metadata Extraction**: Reads artist, album, title, and other metadata from FLAC, MP3, and WAV files
 - **Offline First**: Works completely offline with local files, no internet required
-- **File Organization**: Intelligent organization by artist and album regardless of storage location
-
-### 🎵 Playlists
-- **Custom Playlists**: Create and manage custom playlists
-- **Smart Sorting**: Playlists sorted by most recent activity
-- **Priority Display**: Shows playlists where songs are NOT present at the top when adding tracks
-- **Cross-Device Sync**: Playlists synchronized via iCloud
-- **Playlist Management**: Add, remove, and reorder tracks easily
 
 ### 👤 Artist Information
 - **Dual API Integration**: Combines Discogs and Spotify APIs for comprehensive artist data
@@ -84,7 +77,7 @@ A premium FLAC, MP3, and WAV music player for iOS with advanced features includi
 
 #### Services Layer
 - **AppCoordinator**: Main app coordinator managing all services and initialization
-- **PlayerEngine**: Advanced audio playback engine with background support
+- **PlayerEngine**: Advanced audio playback engine with background support and GraphicEQ processing
 - **DatabaseManager**: SQLite/GRDB-based local database with migrations
 - **StateManager**: iCloud state synchronization and local persistence
 - **LibraryIndexer**: Automatic music file discovery and indexing
@@ -242,6 +235,15 @@ You have two storage options:
 
 **Mixed Storage**: You can use both methods simultaneously - the app will find and index music from both locations!
 
+### Using the Graphic Equalizer
+1. **Access EQ**: Tap the equalizer icon in the now playing screen
+2. **Enter GraphicEQ Text**: Input your GraphicEQ settings in text format
+3. **Apply Settings**: Save your custom GraphicEQ configuration
+4. **Multiple Configurations**: Create and switch between different GraphicEQ settings
+5. **Toggle On/Off**: Enable or disable the equalizer without losing your settings
+
+GraphicEQ format allows you to define frequency-specific gain adjustments for precise audio control.
+
 ### Creating Playlists
 1. Tap the "+" button in the Playlists section
 2. Enter a playlist name
@@ -271,7 +273,7 @@ The app automatically uses your device's language setting. Currently supported:
 ### Swift Packages
 - **GRDB**: SQLite database management
 - **Foundation**: Core system framework
-- **AVFoundation**: Audio playback engine
+- **AVFoundation**: Audio playback engine with audio processing
 - **SwiftUI**: Modern UI framework
 - **Combine**: Reactive programming
 
@@ -287,6 +289,7 @@ Cosmos Music Player/
 ├── Services/           # Core business logic services
 │   ├── AppCoordinator.swift
 │   ├── PlayerEngine.swift
+│   ├── EqualizerManager.swift
 │   ├── DatabaseManager.swift
 │   ├── StateManager.swift
 │   ├── LibraryIndexer.swift
@@ -299,10 +302,12 @@ Cosmos Music Player/
 │   ├── Albums/
 │   ├── Playlists/
 │   ├── Player/
+│   ├── Equalizer/
 │   └── Utility/
 ├── Models/             # Data models
 │   ├── DatabaseModels.swift
 │   ├── StateModels.swift
+│   ├── EqualizerModels.swift
 │   └── SettingsModels.swift
 ├── Helpers/            # Utility classes
 │   ├── LocalizationHelper.swift
@@ -452,6 +457,15 @@ To add new music APIs:
 4. Add appropriate error handling and caching
 5. Update environment variable documentation
 
+### Audio Processing
+To enhance audio features:
+
+1. Extend `PlayerEngine.swift` for core audio functionality
+2. Update `EqualizerManager.swift` for EQ-related features
+3. Ensure real-time processing maintains audio quality
+4. Test with various audio formats and sample rates
+5. Document any new audio processing capabilities
+
 Thank you for contributing! 🚀
 
 ## Security & Privacy 🔒
@@ -479,6 +493,12 @@ Thank you for contributing! 🚀
 - Check internet connection
 - Verify API keys are correctly configured
 - Try the "Wrong artist?" feature for alternative sources
+
+**Equalizer not working:**
+- Ensure the equalizer is enabled (toggle on)
+- Check that audio output is not externally limited (headphone safety, volume limits)
+- Try resetting to a preset before applying custom settings
+- Restart playback if changes don't apply immediately
 
 **Playlist sync issues:**
 - Ensure iCloud Drive has sufficient storage
