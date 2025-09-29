@@ -55,6 +55,7 @@ class AppCoordinator: ObservableObject {
     @Published var initializationError: Error?
     @Published var isiCloudAvailable = false
     @Published var iCloudStatus: iCloudStatus = .offline
+
     @Published var showSyncAlert = false
     
     private var isInitialSyncCompleted = false

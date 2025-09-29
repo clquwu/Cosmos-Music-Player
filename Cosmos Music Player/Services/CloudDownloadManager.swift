@@ -137,7 +137,13 @@ class CloudDownloadManager: NSObject, ObservableObject {
     private func setupProgressQuery() {
         progressQuery = NSMetadataQuery()
         progressQuery?.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
-        progressQuery?.predicate = NSPredicate(format: "%K LIKE '*.flac' OR %K LIKE '*.mp3'", NSMetadataItemFSNameKey, NSMetadataItemFSNameKey)
+
+        // Support all audio formats for progress monitoring
+        let formats = ["*.flac", "*.mp3", "*.wav", "*.m4a", "*.aac", "*.opus", "*.ogg", "*.dsf", "*.dff"]
+        let formatPredicates = formats.map { format in
+            NSPredicate(format: "%K LIKE %@", NSMetadataItemFSNameKey, format)
+        }
+        progressQuery?.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: formatPredicates)
         
         // Add notification observers for progress updates
         NotificationCenter.default.addObserver(

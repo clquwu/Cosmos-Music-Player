@@ -100,9 +100,15 @@ struct Cosmos_Music_PlayerApp: App {
     
     private func handleDidEnterBackground() {
         print("🔍 DIAGNOSTIC - backgroundTimeRemaining:", UIApplication.shared.backgroundTimeRemaining)
-        
-        // Stop high-frequency timers when backgrounded
+
+        // Configure audio for background playback - critical for SFBAudioEngine stability
         Task { @MainActor in
+            // Optimize SFBAudioEngine for lock screen stability
+            if PlayerEngine.shared.isPlaying {
+                await optimizeSFBAudioForBackground()
+            }
+
+            // Stop high-frequency timers when backgrounded
             PlayerEngine.shared.stopPlaybackTimer()
         }
     }
@@ -110,10 +116,12 @@ struct Cosmos_Music_PlayerApp: App {
     private func handleWillEnterForeground() {
         // Restart timers when foregrounding
         Task { @MainActor in
+            // Restore audio configuration when returning to foreground
             if PlayerEngine.shared.isPlaying {
+                await optimizeSFBAudioForForeground()
                 PlayerEngine.shared.startPlaybackTimer()
             }
-            
+
             // Check for new shared files and refresh library
             await LibraryIndexer.shared.copyFilesFromSharedContainer()
             if !LibraryIndexer.shared.isIndexing {
@@ -181,6 +189,52 @@ struct Cosmos_Music_PlayerApp: App {
             }
         } catch {
             print("❌ Failed to create iCloud Drive placeholder: \(error)")
+        }
+    }
+
+    // MARK: - SFBAudioEngine Background Optimization
+
+    private func optimizeSFBAudioForBackground() async {
+        print("🔒 Optimizing SFBAudioEngine for background/lock screen")
+
+        // Increase buffer size significantly for background stability
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setPreferredIOBufferDuration(0.100) // 100ms buffer for lock screen
+            print("✅ Increased buffer to 100ms for lock screen stability")
+        } catch {
+            print("⚠️ Failed to increase buffer for background: \(error)")
+        }
+
+        // Simplified audio session for background
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [])
+            print("✅ Audio session optimized for background playback")
+        } catch {
+            print("⚠️ Failed to optimize audio session for background: \(error)")
+        }
+    }
+
+    private func optimizeSFBAudioForForeground() async {
+        print("🔓 Restoring SFBAudioEngine for foreground")
+
+        // Restore normal buffer size
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setPreferredIOBufferDuration(0.040) // Back to 40ms
+            print("✅ Restored buffer to 40ms for foreground")
+        } catch {
+            print("⚠️ Failed to restore buffer for foreground: \(error)")
+        }
+
+        // Restore full audio session options
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP])
+            print("✅ Audio session restored for foreground playback")
+        } catch {
+            print("⚠️ Failed to restore audio session for foreground: \(error)")
         }
     }
 }

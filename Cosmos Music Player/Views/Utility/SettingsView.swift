@@ -84,7 +84,7 @@ struct SettingsView: View {
                     HStack {
                         Text(Localized.version)
                         Spacer()
-                        Text("1.0.0")
+                        Text("1.0.2")
                             .foregroundColor(.secondary)
                     }
                     
@@ -96,8 +96,12 @@ struct SettingsView: View {
                     }
                     
                     Button(action: {
+                        print("🔗 GitHub repository button tapped")
                         if let url = URL(string: "https://github.com/clquwu/Cosmos-Music-Player") {
+                            print("🔗 Opening URL: \(url)")
                             UIApplication.shared.open(url)
+                        } else {
+                            print("❌ Invalid GitHub URL")
                         }
                     }) {
                         HStack {
@@ -108,7 +112,9 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .font(.system(size: 16))
                         }
+                        .contentShape(Rectangle()) // Make entire area tappable
                     }
+                    .buttonStyle(PlainButtonStyle()) // Remove default button styling that might interfere
                 }
             }
             .safeAreaInset(edge: .bottom) {

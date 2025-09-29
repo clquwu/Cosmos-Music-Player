@@ -54,6 +54,10 @@ class EQManager: ObservableObject {
     private var eqFrequencies: [Double] = []
     private var eqGains: [Double] = []
 
+    // Public getters for SFBAudioEngine integration
+    var currentEQFrequencies: [Double] { eqFrequencies }
+    var currentEQGains: [Double] { eqGains }
+
     private let databaseManager = DatabaseManager.shared
     private var audioEngine: AVAudioEngine?
     private var eqNode: AVAudioUnitEQ?
@@ -202,39 +206,44 @@ class EQManager: ObservableObject {
     }
 
     private func applyEQSettings() {
-        guard let eqNode = eqNode else { return }
-
+        let eqNode = self.eqNode
+        
         if !isEnabled || currentPreset == nil {
-            // Bypass EQ if disabled or no preset
-            eqNode.bands.forEach { $0.bypass = true }
-            eqNode.globalGain = 0.0  // Reset global gain when disabled
+            eqNode?.bands.forEach { $0.bypass = true }
+            eqNode?.globalGain = 0.0
+            
+            SFBAudioEngineManager.shared.updateEQSettings()
             print("🚫 EQ disabled - all bands bypassed")
             return
         }
-
-        guard let preset = currentPreset else { return }
-
+        
+        guard let preset = currentPreset else {
+            SFBAudioEngineManager.shared.updateEQSettings()
+            return
+        }
+        
         Task {
             do {
                 let bands = try await loadBands(for: preset)
                 let sortedBands = bands.sorted { $0.bandIndex < $1.bandIndex }
-
+                
                 await MainActor.run {
-                    // Update internal frequency and gain arrays
                     let newFrequencies = sortedBands.map { $0.frequency }
                     let newGains = sortedBands.map { $0.gain }
-
-                    // Always just reconfigure existing node - avoid recreation to prevent track skipping
+                    
                     self.eqFrequencies = newFrequencies
                     self.eqGains = newGains
-                    self.configureEQBands()
-
-                    print("✅ Reconfigured existing EQ node with \(newFrequencies.count) input bands")
+                    
+                    if self.eqNode != nil {
+                        self.configureEQBands()
+                        print("✅ Reconfigured existing EQ node with \(newFrequencies.count) input bands")
+                    } else {
+                        print("ℹ️ Stored \(newFrequencies.count) EQ bands for SFBAudioEngine")
+                    }
                 }
-
+                
                 applyGlobalGain()
                 print("✅ Applied EQ preset: \(preset.name)")
-
             } catch {
                 print("❌ Failed to apply EQ settings: \(error)")
             }
@@ -242,11 +251,10 @@ class EQManager: ObservableObject {
     }
 
     private func applyGlobalGain() {
-        guard let eqNode = eqNode else { return }
-
-        // Apply global gain to all bands
         let globalGainFloat = Float(globalGain)
-        eqNode.globalGain = globalGainFloat
+        eqNode?.globalGain = globalGainFloat
+        
+        SFBAudioEngineManager.shared.updateEQSettings()
     }
 
 

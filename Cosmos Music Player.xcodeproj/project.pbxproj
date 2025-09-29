@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		230D66372E894889007C642A /* SFBAudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 230D66362E894889007C642A /* SFBAudioEngine */; };
 		2312D61A2E6090E4007F756D /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2312D6192E6090E4007F756D /* GRDB */; };
 		23AF813F2E71E15D0005527C /* Share.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 23AF81352E71E15D0005527C /* Share.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		23C312DD2E78015500342F7C /* Intents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 23C312DC2E78015500342F7C /* Intents.framework */; };
@@ -110,6 +111,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2312D61A2E6090E4007F756D /* GRDB in Frameworks */,
+				230D66372E894889007C642A /* SFBAudioEngine in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -185,6 +187,7 @@
 			name = "Cosmos Music Player";
 			packageProductDependencies = (
 				2312D6192E6090E4007F756D /* GRDB */,
+				230D66362E894889007C642A /* SFBAudioEngine */,
 			);
 			productName = "Cosmos Music Player";
 			productReference = 2312D60C2E6090E2007F756D /* Cosmos Music Player.app */;
@@ -268,6 +271,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				2312D6182E6090E4007F756D /* XCRemoteSwiftPackageReference "GRDB" */,
+				230D66352E894889007C642A /* XCRemoteSwiftPackageReference "SFBAudioEngine" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 2312D60D2E6090E2007F756D /* Products */;
@@ -473,7 +477,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Cosmos Music Player/Cosmos Music Player.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -483,7 +487,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -503,7 +507,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Cosmos Music Player/Cosmos Music Player.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -513,7 +517,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -531,7 +535,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Share/Share.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Share/Info.plist;
@@ -542,7 +546,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.Share";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -557,7 +561,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Share/Share.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Share/Info.plist;
@@ -568,7 +572,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.Share";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -583,7 +587,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = SiriIntentsExtension/SiriIntentsExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SiriIntentsExtension/Info.plist;
@@ -594,7 +598,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.SiriIntentsExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -609,7 +613,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = SiriIntentsExtension/SiriIntentsExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SiriIntentsExtension/Info.plist;
@@ -620,7 +624,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.SiriIntentsExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -672,6 +676,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		230D66352E894889007C642A /* XCRemoteSwiftPackageReference "SFBAudioEngine" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sbooth/SFBAudioEngine";
+			requirement = {
+				kind = exactVersion;
+				version = 0.7.2;
+			};
+		};
 		2312D6182E6090E4007F756D /* XCRemoteSwiftPackageReference "GRDB" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/groue/GRDB.swift";
@@ -683,6 +695,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		230D66362E894889007C642A /* SFBAudioEngine */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 230D66352E894889007C642A /* XCRemoteSwiftPackageReference "SFBAudioEngine" */;
+			productName = SFBAudioEngine;
+		};
 		2312D6192E6090E4007F756D /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 2312D6182E6090E4007F756D /* XCRemoteSwiftPackageReference "GRDB" */;
