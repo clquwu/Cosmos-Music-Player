@@ -612,7 +612,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         print("✅ AudioMetadataParser completed for: \(url.lastPathComponent)")
         
         // Clean and normalize artist name to merge similar artists
-        let cleanedArtistName = cleanArtistName(metadata.artist ?? "Unknown Artist")
+        let cleanedArtistName = cleanArtistName(metadata.artist ?? Localized.unknownArtist)
         print("🎤 Creating artist with cleaned name: '\(cleanedArtistName)'")
         
         let artist = try databaseManager.upsertArtist(name: cleanedArtistName)
@@ -677,7 +677,7 @@ class LibraryIndexer: NSObject, ObservableObject {
             cleaned = String(cleaned[..<bracketStart]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
-        return cleaned.isEmpty ? "Unknown Artist" : cleaned
+        return cleaned.isEmpty ? Localized.unknownArtist : cleaned
     }
     
     func copyFilesFromSharedContainer() async {

@@ -21,5 +21,7 @@
 	<array>
 		<string>group.dev.clq.Cosmos-Music-Player</string>
 	</array>
+	<key>com.apple.developer.carplay-audio</key>
+	<true/>
 </dict>
 </plist>

@@ -249,11 +249,6 @@ class ShareViewController: SLComposeServiceViewController {
     }
 
     private func copyFileToSharedContainer(from sourceURL: URL) {
-        guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
-            print("Failed to get shared container URL")
-            return
-        }
-
         // Instead of copying, store the URL and bookmark data for the main app to process
         storeSharedURL(sourceURL)
     }

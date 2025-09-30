@@ -231,7 +231,7 @@ struct Cosmos_Music_PlayerApp: App {
         // Restore full audio session options
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP])
+            try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
             print("✅ Audio session restored for foreground playback")
         } catch {
             print("⚠️ Failed to restore audio session for foreground: \(error)")

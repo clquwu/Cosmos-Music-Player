@@ -699,7 +699,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             // For DSD DoP on iOS, ensure proper audio routing
             do {
                 try audioSession.setCategory(.playback, mode: .default,
-                                           options: [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+                                           options: [.allowBluetoothA2DP, .allowAirPlay])
                 print("✅ Audio session category set for DoP")
             } catch {
                 print("⚠️ Category setting failed (continuing): \(error)")
@@ -831,7 +831,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             // For DSD to PCM conversion, use appropriate sample rate
             print("🎵 Configuring audio session for DSD PCM conversion")
 
-            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP, .allowAirPlay])
 
             // Deactivate first
             try audioSession.setActive(false)
@@ -847,7 +847,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
         } else {
             // For non-DSD files, use standard configuration but still match decoder rate
-            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP])
+            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
 
             try audioSession.setActive(false)
             try audioSession.setPreferredSampleRate(decoderSampleRate)

@@ -517,9 +517,16 @@ class PlayerEngine: NSObject, ObservableObject {
         
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let self, let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+
+            // Perform seek synchronously for CarPlay
+            let positionTime = e.positionTime
+            print("🎯 CarPlay seek request to: \(positionTime)s")
+
             Task { @MainActor in
-                await self.seek(to: e.positionTime)
+                await self.seek(to: positionTime)
+                print("✅ Seek completed to: \(positionTime)s")
             }
+
             return .success
         }
         
@@ -542,6 +549,10 @@ class PlayerEngine: NSObject, ObservableObject {
         cc.previousTrackCommand.isEnabled = true
         cc.changePlaybackPositionCommand.isEnabled = true
         cc.togglePlayPauseCommand.isEnabled = true
+
+        // Enable seeking in CarPlay
+        cc.changePlaybackPositionCommand.isEnabled = true
+        print("✅ CarPlay seek command enabled")
     }
     
     
@@ -575,12 +586,12 @@ class PlayerEngine: NSObject, ObservableObject {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyPlaybackQueueCount: playbackQueue.count
         ]
-        
+
         // Add queue position
         if playbackQueue.indices.contains(currentIndex) {
             info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = currentIndex
         }
-        
+
         // Add metadata
         do {
             if let artistId = track.artistId,
@@ -589,47 +600,44 @@ class PlayerEngine: NSObject, ObservableObject {
                }) {
                 info[MPMediaItemPropertyArtist] = artist.name
             }
-            
-            if let albumId = track.albumId,
-               let album = try databaseManager.read({ db in
-                   try Album.fetchOne(db, key: albumId)
-               }) {
-                info[MPMediaItemPropertyAlbumTitle] = album.title
-            }
+
+            // Don't add album title to Now Playing info
         } catch {
             print("Failed to fetch metadata: \(error)")
         }
-        
+
         // Add track number
         if let trackNo = track.trackNo {
             info[MPMediaItemPropertyAlbumTrackNumber] = trackNo
         }
-        
+
         // Add cached artwork
         if let cachedArtwork = cachedArtwork, cachedArtworkTrackId == track.stableId {
             info[MPMediaItemPropertyArtwork] = cachedArtwork
+            print("🎨 Added cached artwork to Now Playing info for: \(track.title)")
+        } else {
+            print("⚠️ No cached artwork available for: \(track.title) (cached: \(cachedArtwork != nil), trackId match: \(cachedArtworkTrackId == track.stableId))")
         }
-        
+
         // Update with explicit synchronization
         DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // Update Now Playing Info
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-            
-            // Force Control Center button state update
-            let commandCenter = MPRemoteCommandCenter.shared()
-            if self?.isPlaying == true {
-                commandCenter.playCommand.isEnabled = false
-                commandCenter.pauseCommand.isEnabled = true
-            } else {
-                commandCenter.playCommand.isEnabled = true
-                commandCenter.pauseCommand.isEnabled = false
-            }
-            
-            print("🎛️ Enhanced Control Center update - playing: \(self?.isPlaying ?? false)")
+
+            // Trigger CarPlay Now Playing button update
+            MPNowPlayingInfoCenter.default().playbackState = self.isPlaying ? .playing : .paused
+
+            // Notify CarPlay delegate of state change
+            NotificationCenter.default.post(name: NSNotification.Name("PlayerStateChanged"), object: nil)
+
+            print("🎛️ Enhanced Control Center update - playing: \(self.isPlaying)")
             print("🎛️ Title: \(track.title), Time: \(currentTime)")
         }
         
-        // Load artwork asynchronously if needed
-        if track.hasEmbeddedArt && cachedArtworkTrackId != track.stableId {
+        // Load artwork asynchronously if needed (try regardless of hasEmbeddedArt flag)
+        if cachedArtworkTrackId != track.stableId {
             Task {
                 await loadAndCacheArtwork(track: track)
             }
@@ -642,7 +650,7 @@ class PlayerEngine: NSObject, ObservableObject {
         let s = AVAudioSession.sharedInstance()
         
         // For background audio, avoid mixWithOthers - be the primary audio app
-        let options: AVAudioSession.CategoryOptions = [.allowAirPlay, .allowBluetooth, .allowBluetoothA2DP]
+        let options: AVAudioSession.CategoryOptions = [.allowAirPlay, .allowBluetoothA2DP]
         
         try s.setCategory(.playback, mode: .default, options: options)
         
@@ -824,9 +832,6 @@ class PlayerEngine: NSObject, ObservableObject {
                                 let fileExtension = freshURL.pathExtension.lowercased()
                                 if fileExtension == "dsf" || fileExtension == "dff" {
                                     print("⚠️ DSD file rejected by SFBAudioEngine - may be due to sample rate or format incompatibility")
-
-                                    // Show user-friendly popup
-                                    let message = "This DSD file cannot be played with the current audio setup. If using internal speakers, high sample rates may not be supported. Try connecting a DAC for DoP support or convert to FLAC/WAV."
 
                                     let dsdError = NSError(domain: "PlayerEngine", code: 3001, userInfo: [
                                         NSLocalizedDescriptionKey: "DSD file not supported",
@@ -1364,7 +1369,7 @@ class PlayerEngine: NSObject, ObservableObject {
             
             // Don't change category if already correct - this prevents the error
             if session.category != .playback {
-                try session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetooth, .allowBluetoothA2DP])
+                try session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetoothA2DP])
             }
             
             // Only activate if not already active
@@ -1651,7 +1656,7 @@ class PlayerEngine: NSObject, ObservableObject {
             print("✅ Audio session deactivated to clear SFBAudioEngine settings")
 
             // Set standard category for native playback
-            try session.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP])
+            try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
             print("✅ Audio session category reset to standard playback")
 
             // Reset to standard sample rate and buffer for native AVAudioEngine
@@ -1908,14 +1913,17 @@ class PlayerEngine: NSObject, ObservableObject {
                    let originalImage = UIImage(data: data) {
                     
                     print("🎨 Found artwork in AVAsset metadata (size: \(Int(originalImage.size.width))x\(Int(originalImage.size.height)))")
-                    
+
                     // Crop to square if width is significantly larger than height
                     let processedImage = self.cropToSquareIfNeeded(image: originalImage)
-                    
-                    let artwork = MPMediaItemArtwork(boundsSize: processedImage.size) { size in
-                        return processedImage
+
+                    // Use large size for CarPlay - 1024x1024 recommended
+                    let targetSize = CGSize(width: 1024, height: 1024)
+                    let artwork = MPMediaItemArtwork(boundsSize: targetSize) { size in
+                        // Resize image to requested size
+                        return self.resizeImage(processedImage, to: size)
                     }
-                    
+
                     return artwork
                 }
             }
@@ -2162,35 +2170,42 @@ class PlayerEngine: NSObject, ObservableObject {
     private nonisolated func cropToSquareIfNeeded(image: UIImage) -> UIImage {
         let width = image.size.width
         let height = image.size.height
-        
+
         // If the image is already square or taller than wide, return as-is
         if width <= height {
             return image
         }
-        
+
         // If width is more than 20% larger than height, crop to square
         let aspectRatio = width / height
         if aspectRatio > 1.2 {
             print("🖼️ Cropping wide artwork (aspect ratio: \(String(format: "%.2f", aspectRatio))) to square")
-            
+
             // Calculate the square size (use height as the dimension)
             let squareSize = height
-            
+
             // Calculate the crop rect (center the crop horizontally)
             let xOffset = (width - squareSize) / 2
             let cropRect = CGRect(x: xOffset, y: 0, width: squareSize, height: squareSize)
-            
+
             // Perform the crop
             guard let cgImage = image.cgImage?.cropping(to: cropRect) else {
                 print("⚠️ Failed to crop image, returning original")
                 return image
             }
-            
+
             return UIImage(cgImage: cgImage, scale: image.scale, orientation: image.imageOrientation)
         }
-        
+
         // Return original if aspect ratio is acceptable
         return image
+    }
+
+    private nonisolated func resizeImage(_ image: UIImage, to size: CGSize) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 
     // Extract artwork from DSF file using ID3v2 APIC frames

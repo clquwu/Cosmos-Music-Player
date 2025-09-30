@@ -46,6 +46,7 @@
 "artists" = "Artistes";
 "albums" = "Albums";
 "search" = "Rechercher";
+"browse" = "Parcourir";
 "songs" = "Musiques";
 "processing" = "Traitement";
 "waiting" = "En attente";
@@ -153,6 +154,7 @@
 "browse_by_artist" = "Parcourir par artiste";
 "browse_by_album" = "Parcourir par album";
 "unknown_album" = "Album inconnu";
+"unknown_artist" = "Artiste inconnu";
 
 /* Sync result messages */
 "sync_no_new_tracks" = "Aucune nouvelle musique trouvée";

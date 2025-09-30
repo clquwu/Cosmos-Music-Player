@@ -161,7 +161,7 @@ struct AlbumDetailScreen: View {
            }) {
             return artist.name
         }
-        return "Unknown Artist"
+        return Localized.unknownArtist
     }
     
     var body: some View {

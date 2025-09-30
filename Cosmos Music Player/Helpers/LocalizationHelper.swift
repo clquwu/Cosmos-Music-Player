@@ -65,6 +65,7 @@ struct Localized {
     static let artists = "artists".localized
     static let albums = "albums".localized
     static let search = "search".localized
+    static let browse = "browse".localized
     static let songs = "songs".localized
     static let processing = "processing".localized
     static let waiting = "waiting".localized
@@ -165,6 +166,7 @@ struct Localized {
     static let browseByArtist = "browse_by_artist".localized
     static let browseByAlbum = "browse_by_album".localized
     static let unknownAlbum = "unknown_album".localized
+    static let unknownArtist = "unknown_artist".localized
     
     // MARK: - Dynamic strings with parameters
     static func songsCount(_ count: Int) -> String {

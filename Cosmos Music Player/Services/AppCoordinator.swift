@@ -502,7 +502,10 @@ class AppCoordinator: ObservableObject {
             try databaseManager.addToFavorites(trackStableId: trackStableId)
             print("❤️ Added to favorites: \(trackStableId)")
         }
-        
+
+        // Notify observers that favorites changed
+        NotificationCenter.default.post(name: NSNotification.Name("FavoritesChanged"), object: nil)
+
         // Verify the database operation worked
         let isNowLiked = try databaseManager.isFavorite(trackStableId: trackStableId)
         print("📊 Track is now liked after toggle: \(isNowLiked)")
