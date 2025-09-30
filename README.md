@@ -6,11 +6,19 @@
 
 ---
 
-Cosmos Music Player is a high-quality music player that supports both iCloud Drive synchronization and local storage, giving users flexibility in how they manage their music. The app is built and designed for the iOS and Apple ecosystem.
+Cosmos Music Player is a high-quality music player that supports both iCloud Drive synchronization and local storage, giving users flexibility in how they manage their music. The app is built and designed for the iOS and Apple ecosystem with full CarPlay integration.
 
-A premium FLAC, MP3, and WAV music player for iOS with advanced features including dual storage options (iCloud/local), playlist management, artist information integration, graphic equalizer, and multi-language support.
+A premium audiophile music player for iOS supporting FLAC, WAV, M4A, MP3, Opus, OGG, DSD, and DSF formats with advanced features including Apple CarPlay, DSD playback (DoP & PCM conversion), dual storage options (iCloud/local), playlist management, artist information integration, graphic equalizer, and multi-language support.
 
 ## Features ✨
+
+### 🚗 Apple CarPlay Integration
+- **Full CarPlay Support**: Native CarPlay interface for safe in-car music control
+- **Tab-Based Navigation**: Quick access to All Songs, Favorites, Playlists, and Browse sections
+- **Album Artwork Display**: High-quality artwork with aspect-fill cropping and placeholders
+- **Now Playing Interface**: Full player controls with play/pause, skip, and seek functionality
+- **Seamless Synchronization**: Real-time playback state sync between phone and CarPlay
+- **Multi-Language Support**: CarPlay interface fully localized in English and French
 
 ### 🎧 Audio Playback
 - **High-Quality Lossless Support**: Native support for lossless FLAC and WAV audio files, plus MP3
@@ -18,7 +26,7 @@ A premium FLAC, MP3, and WAV music player for iOS with advanced features includi
 - **Custom EQ Settings**: Configure and save different GraphicEQ settings
 - **Siri Integration**: Voice control for music playback in English and French
 - **ReplayGain Support**: Automatic volume normalization for consistent listening experience
-- **Embedded Artwork**: Displays album art from FLAC, MP3, and WAV metadata
+- **Embedded Artwork**: Displays album art
 - **Advanced Audio Engine**: Built with AVFoundation for optimal audio quality
 
 ### 📚 Music Library Management
@@ -26,7 +34,7 @@ A premium FLAC, MP3, and WAV music player for iOS with advanced features includi
 - **iCloud Drive Integration**: Automatic sync of music files across devices when using iCloud storage
 - **Local File Support**: Full support for music files stored locally in app's Documents folder
 - **Smart Library Indexing**: Automatic detection and indexing of music files from both storage locations
-- **Metadata Extraction**: Reads artist, album, title, and other metadata from FLAC, MP3, and WAV files
+- **Metadata Extraction**: Reads artist, album, title, and other metadata
 - **Offline First**: Works completely offline with local files, no internet required
 
 ### 👤 Artist Information
