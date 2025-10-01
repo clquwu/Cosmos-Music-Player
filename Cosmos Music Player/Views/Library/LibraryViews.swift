@@ -625,28 +625,67 @@ struct LikedSongsScreen: View {
     }
 }
 
+enum TrackSortOption: String, CaseIterable {
+    case dateNewest
+    case dateOldest
+    case nameAZ
+    case nameZA
+    case sizeLargest
+    case sizeSmallest
+
+    var localizedString: String {
+        switch self {
+        case .dateNewest: return Localized.sortDateNewest
+        case .dateOldest: return Localized.sortDateOldest
+        case .nameAZ: return Localized.sortNameAZ
+        case .nameZA: return Localized.sortNameZA
+        case .sizeLargest: return Localized.sortSizeLargest
+        case .sizeSmallest: return Localized.sortSizeSmallest
+        }
+    }
+}
+
 struct TrackListView: View {
     let tracks: [Track]
     let playlist: Playlist?
     let isEditMode: Bool
     @EnvironmentObject private var appCoordinator: AppCoordinator
+    @State private var sortOption: TrackSortOption = .dateNewest
+    @State private var showSortMenu = false
 
     init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false) {
         self.tracks = tracks
         self.playlist = playlist
         self.isEditMode = isEditMode
     }
-    
+
+    private var sortedTracks: [Track] {
+        switch sortOption {
+        case .dateNewest:
+            return tracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+        case .dateOldest:
+            return tracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+        case .nameAZ:
+            return tracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        case .nameZA:
+            return tracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+        case .sizeLargest:
+            return tracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
+        case .sizeSmallest:
+            return tracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
+        }
+    }
+
     var body: some View {
         if tracks.isEmpty {
             VStack(spacing: 16) {
                 Image(systemName: "music.note")
                     .font(.system(size: 40))
                     .foregroundColor(.secondary)
-                
+
                 Text(Localized.noSongsFound)
                     .font(.headline)
-                
+
                 Text(Localized.yourMusicWillAppearHere)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -654,7 +693,7 @@ struct TrackListView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(tracks, id: \.stableId) { track in
+            List(sortedTracks, id: \.stableId) { track in
                 TrackRowView(
                     track: track,
                     onTap: {
@@ -664,7 +703,7 @@ struct TrackListView: View {
                                 try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
                                 try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
                             }
-                            await appCoordinator.playTrack(track, queue: tracks)
+                            await appCoordinator.playTrack(track, queue: sortedTracks)
                         }
                     },
                     playlist: playlist,
@@ -685,6 +724,24 @@ struct TrackListView: View {
             .scrollContentBackground(.hidden)
             .safeAreaInset(edge: .bottom) {
                 Color.clear.frame(height: 100) // Space for mini player
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        ForEach(TrackSortOption.allCases, id: \.self) { option in
+                            Button(action: { sortOption = option }) {
+                                HStack {
+                                    Text(option.localizedString)
+                                    if sortOption == option {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                }
             }
         }
     }

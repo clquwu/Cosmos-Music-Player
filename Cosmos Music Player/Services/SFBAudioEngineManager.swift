@@ -21,6 +21,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     private var audioPlayer: AudioPlayer?
     private var currentTrack: SFBTrack?
     private var updateTimer: Timer?
+    private var eqAttachmentFailed = false
 
         nonisolated private func configureDefaultSFBBands(for equalizer: AVAudioUnitEQ) {
             let numberOfBands = equalizer.bands.count
@@ -83,11 +84,23 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     
     private func attachEqualizerToEngine(with format: AVAudioFormat?, retryCount: Int = 0) {
         guard let player = audioPlayer else { return }
-        
+
+        // Skip EQ if not enabled by user
+        guard eqManager.isEnabled else {
+            print("ℹ️ EQ not enabled by user - skipping attachment")
+            return
+        }
+
+        // Skip EQ if previous attachment failed (prevents repeated crashes)
+        if eqAttachmentFailed {
+            print("⚠️ EQ attachment previously failed - skipping to prevent crash")
+            return
+        }
+
         let maxRetries = 3
         let eqEnabled = eqManager.isEnabled
         let globalGain = Float(eqManager.globalGain)
-        
+
         guard formatSupportsSFBEQ(format) else {
             print("⚠️ SFBAudioEngine EQ not supported for format: \(format?.description ?? "nil")")
             player.withEngine { [weak self] engine in
@@ -99,16 +112,16 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             Task { @MainActor [weak self] in self?.sfbEqualizer = nil }
             return
         }
-        
+
         player.withEngine { [weak self] engine in
             guard let self else { return }
-            
+
             var equalizer = self.sfbEqualizer
-            
+
             if equalizer == nil {
                 equalizer = engine.attachedNodes.compactMap { $0 as? AVAudioUnitEQ }.first
             }
-            
+
             if equalizer == nil {
                 let newEQ = AVAudioUnitEQ(numberOfBands: 16)
                 newEQ.globalGain = globalGain
@@ -121,54 +134,80 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                 engine.attach(eq)
                 print("✅ Reattached existing SFBAudioEngine EQ node")
             }
-            
+
             guard let equalizer else { return }
-            
+
             let eqBox = AVAudioUnitEQBox(node: equalizer)
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.sfbEqualizer = eqBox.node
                 self.applySFBEQSettings()
             }
-            
+
             let eqConnectedToMain = engine.outputConnectionPoints(for: equalizer, outputBus: 0)
                 .contains(where: { $0.node === engine.mainMixerNode })
-            
+
             if eqConnectedToMain {
                 print("🎛️ SFBAudioEngine EQ already present in graph")
                 return
             }
-            
+
             if let connection = engine.inputConnectionPoint(for: engine.mainMixerNode, inputBus: 0),
                let upstreamNode = connection.node,
                upstreamNode !== equalizer {
                 let bus = connection.bus
                 let connectFormat = format ?? upstreamNode.outputFormat(forBus: bus)
                 engine.disconnectNodeInput(engine.mainMixerNode)
-                engine.connect(equalizer, to: engine.mainMixerNode, format: connectFormat)
-                engine.connect(upstreamNode, to: equalizer, format: connectFormat)
+
+                // Try to connect - if it fails, mark EQ as failed
+                do {
+                    try ObjCExceptionCatcher.tryCatch({
+                        engine.connect(equalizer, to: engine.mainMixerNode, format: connectFormat)
+                        engine.connect(upstreamNode, to: equalizer, format: connectFormat)
+                    })
+                } catch {
+                    print("❌ EQ connection failed in attachEqualizerToEngine: \(error.localizedDescription)")
+                    Task { @MainActor [weak self] in
+                        self?.eqAttachmentFailed = true
+                    }
+                    return
+                }
+
                 print("🔗 Inserted EQ between \(upstreamNode) and mainMixerNode")
                 return
             }
-            
+
             let fallbackNode = engine.attachedNodes.first(where: { node in
                 if node === equalizer || node === engine.mainMixerNode || node === engine.outputNode { return false }
                 let className = String(describing: type(of: node))
                 return className.contains("SFBAudioPlayerNode") || node is AVAudioPlayerNode
             })
-            
+
             if let sourceNode = fallbackNode {
                 let connectFormat = format ?? sourceNode.outputFormat(forBus: 0)
                 engine.disconnectNodeInput(engine.mainMixerNode)
                 engine.disconnectNodeOutput(sourceNode)
-                engine.connect(sourceNode, to: equalizer, format: connectFormat)
-                engine.connect(equalizer, to: engine.mainMixerNode, format: connectFormat)
+
+                // Try to connect - if it fails, mark EQ as failed
+                do {
+                    try ObjCExceptionCatcher.tryCatch({
+                        engine.connect(sourceNode, to: equalizer, format: connectFormat)
+                        engine.connect(equalizer, to: engine.mainMixerNode, format: connectFormat)
+                    })
+                } catch {
+                    print("❌ EQ connection failed (fallback): \(error.localizedDescription)")
+                    Task { @MainActor [weak self] in
+                        self?.eqAttachmentFailed = true
+                    }
+                    return
+                }
+
                 print("🔗 Inserted EQ between \(sourceNode) and mainMixerNode (fallback)")
                 return
             }
-            
+
             print("⚠️ Unable to locate upstream node for SFBAudioEngine EQ insertion")
-            
+
             if retryCount < maxRetries {
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 50_000_000)
@@ -195,13 +234,27 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
     private override init() {
         super.init()
-        setupAudioPlayer()
+        // Don't create AudioPlayer immediately - defer until first use
+        // This prevents CarPlay crashes where AVAudioEngine initialization fails
+        print("🔄 SFBAudioEngine Manager initialized")
     }
 
     private func setupAudioPlayer() {
+        guard audioPlayer == nil else { return }
+
+        // Try to create AudioPlayer - this may crash on CarPlay/restricted environments
+        // We can't catch Objective-C exceptions in Swift, so this is a last resort
+        // The lazy initialization at least prevents crash on app launch
         audioPlayer = AudioPlayer()
+
+        // Verify player was created successfully
+        guard audioPlayer != nil else {
+            print("⚠️ SFBAudioEngine AudioPlayer creation returned nil")
+            return
+        }
+
         audioPlayer?.delegate = self
-        print("🔄 SFBAudioEngine AudioPlayer initialized")
+        print("🔄 SFBAudioEngine AudioPlayer initialized successfully")
     }
 
     private func resetAudioPlayer() {
@@ -226,6 +279,16 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     func loadAndPlay(url: URL) async throws {
         print("🚀 SFBAudioEngine.loadAndPlay called for: \(url.lastPathComponent)")
 
+        // Ensure AudioPlayer is initialized (deferred from init for CarPlay compatibility)
+        setupAudioPlayer()
+
+        // If AudioPlayer failed to initialize, throw error to fall back to native playback
+        guard audioPlayer != nil else {
+            throw NSError(domain: "SFBAudioEngine", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "SFBAudioEngine unavailable - AudioPlayer initialization failed"
+            ])
+        }
+
         // Stop any current playback and cleanup
         audioPlayer?.stop()
         cleanupEqualizer()
@@ -241,22 +304,33 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         duration = track.duration
         print("📊 Track duration: \(duration) seconds")
 
-        // Check if we should use DoP for external audio devices
-        let hasExternalDAC = await checkForExternalDAC()
+        // Check user's DSD playback preference
+        let settings = DeleteSettings.load()
         let isDSDFile = url.pathExtension.lowercased() == "dsf" || url.pathExtension.lowercased() == "dff"
 
+        let enableDoP: Bool
         if isDSDFile {
-            print("🎵 DSD file detected, DAC present: \(hasExternalDAC)")
-            if hasExternalDAC {
-                print("🎵 Will attempt DoP encoding for external DAC")
-            } else {
-                print("🎵 Will use PCM conversion for internal audio")
+            switch settings.dsdPlaybackMode {
+            case .auto:
+                // Auto mode - detect DAC
+                enableDoP = await checkForExternalDAC()
+                print("🎵 DSD file detected, Auto mode: DAC present = \(enableDoP)")
+            case .pcm:
+                // Always use PCM conversion
+                enableDoP = false
+                print("🎵 DSD file detected, PCM mode: Will convert to PCM")
+            case .dop:
+                // Always use DoP
+                enableDoP = true
+                print("🎵 DSD file detected, DoP mode: Will use DoP encoding")
             }
+        } else {
+            enableDoP = false
         }
 
-        print("🔍 Getting decoder for: \(url.lastPathComponent), enableDoP: \(hasExternalDAC)")
+        print("🔍 Getting decoder for: \(url.lastPathComponent), enableDoP: \(enableDoP)")
 
-        guard let decoder = try track.decoder(enableDoP: hasExternalDAC) else {
+        guard let decoder = try track.decoder(enableDoP: enableDoP) else {
             print("❌ No decoder available for: \(url.lastPathComponent)")
             throw NSError(domain: "SFBAudioEngineManager", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Unsupported audio format"
@@ -324,7 +398,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         print("🔍 Using determined sample rate: \(actualSampleRate)Hz")
 
         do {
-            try configureAudioSessionForDecoder(decoder: decoder, isDSD: isDSDFile, enableDoP: hasExternalDAC)
+            try configureAudioSessionForDecoder(decoder: decoder, isDSD: isDSDFile, enableDoP: enableDoP)
         } catch {
             print("⚠️ Audio session configuration had warnings (ignoring): \(error)")
         }
@@ -341,10 +415,19 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         // Start playback with proper error handling
         print("🎵 Starting SFBAudioEngine playback...")
         do {
-            try audioPlayer?.play(decoder)
+            guard let player = audioPlayer else {
+                throw NSError(domain: "SFBAudioEngine", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "AudioPlayer not initialized"
+                ])
+            }
+            try player.play(decoder)
             isPlaying = true
             startUpdateTimer()
+
+            // Attach EQ if user enabled it (will be skipped if previously failed)
+            // Note: This is redundant as EQ is attached in delegate, but kept for safety
             attachEqualizerToEngine(with: decoder.processingFormat)
+
             print("✅ SFBAudioEngine playback started successfully")
         } catch {
             print("❌ Failed to start SFBAudioEngine playback: \(error)")
@@ -878,11 +961,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                 return true
             case .headphones:
                 // On iOS, many DACs appear as headphones when connected via Lightning/USB-C adapters
+                // IMPORTANT: Be very conservative here - only true DACs should return true
                 let portNameLower = output.portName.lowercased()
 
-                // EXCLUDE computers and CarPlay - these are NOT DACs
+                // EXCLUDE computers, CarPlay, and basic audio devices - these are NOT DACs
                 let excludedDevices = ["macbook", "imac", "mac mini", "mac pro", "mac studio",
-                                     "carplay", "car play", "android auto", "computer", "pc", "laptop"]
+                                     "carplay", "car play", "android auto", "computer", "pc", "laptop",
+                                     "earpods", "airpods", "headset", "earphones", "apple headphones",
+                                     "lightning to 3.5", "usb-c to 3.5"]
                 for excludedDevice in excludedDevices {
                     if portNameLower.contains(excludedDevice) {
                         print("🚫 Excluding non-DAC device: \(output.portName)")
@@ -890,11 +976,11 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     }
                 }
 
-                // Check for known DAC brands (dedicated audio equipment)
+                // Check for known DAC brands FIRST (dedicated audio equipment only)
                 let dacBrands = ["fosi", "topping", "ifi", "audioquest", "chord", "schiit", "jds", "fiio",
                                "denafrips", "ps audio", "mcintosh", "cambridge", "marantz", "denon",
-                               "yamaha", "sony", "sennheiser", "beyerdynamic", "focal", "hifiman", "audeze",
-                               "smsl", "aune", "gustard", "matrix", "burson", "lehmann", "benchmark"]
+                               "smsl", "aune", "gustard", "matrix", "burson", "lehmann", "benchmark",
+                               "mojo", "hugo", "questyle", "cayin", "astell", "kann", "dx"]
                 for brand in dacBrands {
                     if portNameLower.contains(brand) {
                         print("🎵 Found recognized DAC brand: \(output.portName)")
@@ -902,21 +988,18 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     }
                 }
 
-                // Check for explicit DAC keywords (be more specific)
-                let dacKeywords = ["dac", "amplifier", "amp", "dsd", "hi-res", "hires", "headphone amp"]
-                for keyword in dacKeywords {
-                    if portNameLower.contains(keyword) {
-                        print("🎵 Found DAC device by keyword: \(output.portName)")
-                        return true
-                    }
-                }
-
-                // Check for dedicated audio adapters (not generic computer connections)
-                if (portNameLower.contains("lightning") || portNameLower.contains("usb-c")) &&
-                   !portNameLower.contains("computer") && !portNameLower.contains("mac") {
-                    print("🎵 Found potential DAC via adapter: \(output.portName)")
+                // Check for EXPLICIT DAC keywords (very specific - requires "dac" or "dsd")
+                // Do NOT use generic terms like "amp" or "hi-res" as those appear in marketing names
+                if portNameLower.contains(" dac") || portNameLower.contains("dac ") ||
+                   portNameLower.contains("-dac") || portNameLower.contains("dac-") ||
+                   portNameLower.contains("dsd") || portNameLower.contains("headphone amplifier") {
+                    print("🎵 Found DAC device by explicit keyword: \(output.portName)")
                     return true
                 }
+
+                // For headphones port type, DEFAULT to false (no DAC)
+                // User should have a recognizable DAC brand or explicit DAC keyword
+                print("ℹ️ Headphones detected but no DAC indicators: \(output.portName)")
                 break
             case .lineOut:
                 print("🎵 Found line out (potential DAC): \(output.portName)")
@@ -964,45 +1047,12 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     nonisolated func audioPlayer(_ audioPlayer: AudioPlayer, reconfigureProcessingGraph engine: AVAudioEngine, with format: AVAudioFormat) -> AVAudioNode {
         print("🔄 SFBAudioEngine processing graph reconfiguration for format: \(format)")
         print("🔍 Engine state - isRunning: \(engine.isRunning), attachedNodes: \(engine.attachedNodes.count)")
-        
-        guard formatSupportsSFBEQ(format) else {
-            print("⚠️ SFBAudioEngine EQ not supported during reconfiguration (format: \(format))")
-            if let existing = engine.attachedNodes.compactMap({ $0 as? AVAudioUnitEQ }).first {
-                removeEqualizer(existing, from: engine)
-            }
-            Task { @MainActor [weak self] in
-                self?.sfbEqualizer = nil
-            }
-            return engine.mainMixerNode
-        }
-        
-        let equalizer: AVAudioUnitEQ
-        if let existing = engine.attachedNodes.compactMap({ $0 as? AVAudioUnitEQ }).first {
-            equalizer = existing
-            print("🎛️ Reusing existing SFBAudioEngine EQ node")
-        } else {
-            let newEQ = AVAudioUnitEQ(numberOfBands: 16)
-            newEQ.globalGain = 0.0
-            newEQ.bypass = false
-            configureDefaultSFBBands(for: newEQ)
-            engine.attach(newEQ)
-            equalizer = newEQ
-            print("🎛️ Created new SFBAudioEngine EQ during reconfiguration")
-        }
-        
-        engine.disconnectNodeOutput(equalizer)
-        engine.connect(equalizer, to: engine.mainMixerNode, format: format)
-        print("🔗 Connected EQ -> MainMixer during reconfiguration")
-        
-        let eqBox = AVAudioUnitEQBox(node: equalizer)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.sfbEqualizer = eqBox.node
-            self.applySFBEQSettings()
-            print("🎛️ Applied EQManager settings to SFBAudioEngine EQ")
-        }
-        
-        return equalizer
+
+        // We can't access MainActor properties from nonisolated context
+        // So we always skip EQ in this delegate method and rely on attachEqualizerToEngine instead
+        // This prevents crashes and keeps the delegate method simple
+        print("ℹ️ Skipping EQ in delegate - EQ will be attached via attachEqualizerToEngine if enabled")
+        return engine.mainMixerNode
     }
 
     // MARK: - Background/Foreground Optimization

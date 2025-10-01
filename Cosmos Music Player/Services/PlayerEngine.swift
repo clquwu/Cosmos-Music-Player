@@ -40,7 +40,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var playbackTimer: Timer?
 
     // SFBAudioEngine integration
-    private let sfbAudioManager = SFBAudioEngineManager.shared
+    private lazy var sfbAudioManager = SFBAudioEngineManager.shared
     private var usingSFBEngine = false
     // EQ integration
     let eqManager = EQManager.shared
@@ -812,6 +812,10 @@ class PlayerEngine: NSObject, ObservableObject {
                             print("✅ DSD file loaded successfully with native AVAudioFile fallback")
 
                         }
+                    } else {
+                        // For other SFBAudioEngine errors (like AudioPlayer init failure), rethrow
+                        print("❌ SFBAudioEngine failed and no fallback available for this file type")
+                        throw error
                     }
                 }
             } else {

@@ -69,7 +69,7 @@ struct SettingsView: View {
                 }
                 
                 
-                Section(Localized.equalizer) {
+                Section(Localized.audioSettings) {
                     NavigationLink(destination: EQSettingsView()) {
                         HStack {
                             Image(systemName: "slider.horizontal.3")
@@ -78,6 +78,35 @@ struct SettingsView: View {
                             Text(Localized.graphicEqualizer)
                         }
                     }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(Localized.dsdPlaybackMode)
+                            .font(.headline)
+
+                        Text(Localized.dsdPlaybackModeDescription)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Picker("", selection: $deleteSettings.dsdPlaybackMode) {
+                            ForEach(DSDPlaybackMode.allCases, id: \.self) { mode in
+                                VStack(alignment: .leading) {
+                                    Text(mode.displayName)
+                                        .font(.body)
+                                }
+                                .tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: deleteSettings.dsdPlaybackMode) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                        Text(deleteSettings.dsdPlaybackMode.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 4)
+                    }
+                    .padding(.vertical, 4)
                 }
 
                 Section(Localized.information) {

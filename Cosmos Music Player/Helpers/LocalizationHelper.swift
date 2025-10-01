@@ -272,4 +272,23 @@ struct Localized {
     static func bandsLimitedWarning(original: Int, limited: Int) -> String {
         return "bands_limited_warning".localized(with: original, limited)
     }
+
+    // MARK: - Audio Settings
+    static let audioSettings = "audio_settings".localized
+    static let dsdPlaybackMode = "dsd_playback_mode".localized
+    static let dsdPlaybackModeDescription = "dsd_playback_mode_description".localized
+    static let dsdModeAuto = "dsd_mode_auto".localized
+    static let dsdModePCM = "dsd_mode_pcm".localized
+    static let dsdModeDoP = "dsd_mode_dop".localized
+    static let dsdModeAutoDescription = "dsd_mode_auto_description".localized
+    static let dsdModePCMDescription = "dsd_mode_pcm_description".localized
+    static let dsdModeDoDescription = "dsd_mode_dop_description".localized
+
+    // MARK: - Sort Options
+    static let sortDateNewest = "sort_date_newest".localized
+    static let sortDateOldest = "sort_date_oldest".localized
+    static let sortNameAZ = "sort_name_az".localized
+    static let sortNameZA = "sort_name_za".localized
+    static let sortSizeLargest = "sort_size_largest".localized
+    static let sortSizeSmallest = "sort_size_smallest".localized
 }

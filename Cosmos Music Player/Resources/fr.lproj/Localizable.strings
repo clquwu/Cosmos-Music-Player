@@ -213,3 +213,22 @@
 "band_count_info" = "%d bandes (réduites de %d)";
 "bands_reduced_description" = "Votre GraphicEQ a plus de bandes qu'iOS ne supporte. Le système mappe intelligemment vos %d bandes vers %d bandes en utilisant la moyenne des fréquences.";
 "bands_limited_warning" = "⚠️ GraphicEQ réduit de %d à %d bandes (limite iOS)";
+
+/* Audio Settings */
+"audio_settings" = "Audio";
+"dsd_playback_mode" = "Mode de Lecture DSD";
+"dsd_playback_mode_description" = "Choisissez comment les fichiers audio DSD (DSF/DFF) sont lus";
+"dsd_mode_auto" = "Auto (Détection DAC)";
+"dsd_mode_pcm" = "Conversion PCM";
+"dsd_mode_dop" = "DoP (DSD sur PCM)";
+"dsd_mode_auto_description" = "Détecte automatiquement le DAC externe et utilise DoP si disponible, sinon convertit en PCM";
+"dsd_mode_pcm_description" = "Toujours convertir DSD en PCM pour la lecture (compatible avec tous les appareils)";
+"dsd_mode_dop_description" = "Toujours utiliser l'encodage DoP (nécessite un DAC externe qui supporte DSD)";
+
+/* Sort Options */
+"sort_date_newest" = "Date d'ajout (Plus récent)";
+"sort_date_oldest" = "Date d'ajout (Plus ancien)";
+"sort_name_az" = "Nom (A-Z)";
+"sort_name_za" = "Nom (Z-A)";
+"sort_size_largest" = "Taille (Plus grand)";
+"sort_size_smallest" = "Taille (Plus petit)";
