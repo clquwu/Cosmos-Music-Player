@@ -9,6 +9,7 @@ import Foundation
 import AVFoundation
 import AudioToolbox
 import SFBAudioEngine
+import UIKit
 
 private struct AVAudioUnitEQBox: @unchecked Sendable {
     let node: AVAudioUnitEQ
@@ -232,19 +233,69 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
 
+    // CarPlay environment detection
+    @Published var isCarPlayEnvironment = false
+
     private override init() {
         super.init()
-        // Don't create AudioPlayer immediately - defer until first use
-        // This prevents CarPlay crashes where AVAudioEngine initialization fails
-        print("🔄 SFBAudioEngine Manager initialized")
+        isCarPlayEnvironment = Self.detectCarPlay()
+        print("🔄 SFBAudioEngine Manager initialized - CarPlay: \(isCarPlayEnvironment)")
+    }
+
+    /// Detects if the app is running in a CarPlay environment
+    private static func detectCarPlay() -> Bool {
+        // Check if CarPlay scene is active
+        if #available(iOS 13.0, *) {
+            for scene in UIApplication.shared.connectedScenes {
+                // Check for CarPlay scene role using string comparison
+                if scene.session.role.rawValue == "CPTemplateApplicationSceneSessionRole" {
+                    print("🚗 CarPlay scene detected: \(scene)")
+                    return true
+                }
+            }
+        }
+
+        // Additional check: CarPlay audio routes
+        let audioSession = AVAudioSession.sharedInstance()
+        let currentRoute = audioSession.currentRoute
+        print("🎧 Current audio route: \(currentRoute.outputs.map { "\($0.portName) (\($0.portType))" }.joined(separator: ", "))")
+
+        for output in currentRoute.outputs {
+            if output.portType == .carAudio {
+                print("🚗 CarPlay audio route detected: \(output.portName)")
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /// Re-check CarPlay status (call when audio route changes)
+    func updateCarPlayStatus() {
+        let wasCarPlay = isCarPlayEnvironment
+        isCarPlayEnvironment = Self.detectCarPlay()
+
+        if wasCarPlay != isCarPlayEnvironment {
+            if isCarPlayEnvironment {
+                print("🚗 Switched to CarPlay - stopping SFBAudioEngine")
+                stop()
+                audioPlayer = nil
+            } else {
+                print("📱 Switched from CarPlay - SFBAudioEngine available again")
+            }
+        }
     }
 
     private func setupAudioPlayer() {
         guard audioPlayer == nil else { return }
 
-        // Try to create AudioPlayer - this may crash on CarPlay/restricted environments
-        // We can't catch Objective-C exceptions in Swift, so this is a last resort
-        // The lazy initialization at least prevents crash on app launch
+        // Don't initialize SFBAudioEngine in CarPlay environment
+        if isCarPlayEnvironment {
+            print("🚗 Skipping SFBAudioEngine setup - running in CarPlay")
+            return
+        }
+
+        // Try to create AudioPlayer
         audioPlayer = AudioPlayer()
 
         // Verify player was created successfully
@@ -278,6 +329,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
     func loadAndPlay(url: URL) async throws {
         print("🚀 SFBAudioEngine.loadAndPlay called for: \(url.lastPathComponent)")
+
+        // Don't use SFBAudioEngine in CarPlay environment
+        if isCarPlayEnvironment {
+            print("🚗 CarPlay detected - refusing to load with SFBAudioEngine")
+            throw NSError(domain: "SFBAudioEngine", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "SFBAudioEngine unavailable in CarPlay - using native playback"
+            ])
+        }
 
         // Ensure AudioPlayer is initialized (deferred from init for CarPlay compatibility)
         setupAudioPlayer()

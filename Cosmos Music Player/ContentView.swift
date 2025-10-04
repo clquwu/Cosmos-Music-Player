@@ -61,7 +61,19 @@ struct ContentView: View {
     
     @Sendable private func refreshLibrary() async {
         do {
-            tracks = try appCoordinator.getAllTracks()
+            let allTracks = try appCoordinator.getAllTracks()
+
+            // Filter out incompatible formats when connected to CarPlay
+            if SFBAudioEngineManager.shared.isCarPlayEnvironment {
+                tracks = allTracks.filter { track in
+                    let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+                    let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+                    return !incompatibleFormats.contains(ext)
+                }
+                print("🚗 CarPlay: Filtered \(allTracks.count - tracks.count) incompatible tracks")
+            } else {
+                tracks = allTracks
+            }
         } catch {
             print("Failed to refresh library: \(error)")
         }

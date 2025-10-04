@@ -11,8 +11,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
                                  didConnect interfaceController: CPInterfaceController) {
         self.interfaceController = interfaceController
 
-        // Fetch all tracks
-        self.allTracks = (try? AppCoordinator.shared.getAllTracks()) ?? []
+        // Fetch all tracks and filter incompatible formats for CarPlay
+        let allFetchedTracks = (try? AppCoordinator.shared.getAllTracks()) ?? []
+        self.allTracks = allFetchedTracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+            return !incompatibleFormats.contains(ext)
+        }
+
+        // Update SFBAudioEngine CarPlay status
+        SFBAudioEngineManager.shared.updateCarPlayStatus()
 
         // Create tab bar template with top tabs
         let allSongsTemplate = createAllSongsTab(tracks: allTracks)
@@ -46,17 +54,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Add artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    // Set placeholder image
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
+            // Image loading disabled - causes crashes on real CarPlay hardware
+            // when images haven't been preprocessed
 
             item.handler = { _, completion in
                 Task {
@@ -90,17 +89,8 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Add artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    // Set placeholder image
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
+            // Image loading disabled - causes crashes on real CarPlay hardware
+            // when images haven't been preprocessed
 
             item.handler = { _, completion in
                 Task {
@@ -192,6 +182,12 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                  didDisconnect interfaceController: CPInterfaceController) {
         self.interfaceController = nil
+
+        // Update SFBAudioEngineManager's CarPlay status
+        print("🚗 CarPlay disconnected")
+        Task { @MainActor in
+            SFBAudioEngineManager.shared.updateCarPlayStatus()
+        }
     }
 
     // MARK: - Navigation Methods
@@ -271,25 +267,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         // Get playlist tracks using the same logic as PlaylistDetailScreen
         let playlistItems = (try? AppCoordinator.shared.databaseManager.getPlaylistItems(playlistId: playlistId)) ?? []
         let allTracks = (try? AppCoordinator.shared.getAllTracks()) ?? []
-        let tracks = playlistItems.compactMap { item in
+        let allPlaylistTracks = playlistItems.compactMap { item in
             allTracks.first { $0.stableId == item.trackStableId }
+        }
+
+        // Filter out incompatible formats for CarPlay
+        let tracks = allPlaylistTracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+            return !incompatibleFormats.contains(ext)
         }
 
         let songItems: [CPListItem] = tracks.map { track in
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Add artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    // Set placeholder image
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
+            // Image loading disabled - causes crashes on real CarPlay hardware
+            // when images haven't been preprocessed
 
             item.handler = { _, completion in
                 Task {
@@ -324,25 +318,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     }
 
     private func showArtistDetail(artist: Artist, tracks: [Track]) {
-        let songItems: [CPListItem] = tracks.map { track in
+        // Filter out incompatible formats for CarPlay
+        let filteredTracks = tracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+            return !incompatibleFormats.contains(ext)
+        }
+
+        let songItems: [CPListItem] = filteredTracks.map { track in
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Add artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    // Set placeholder image
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
+            // Image loading disabled - causes crashes on real CarPlay hardware
+            // when images haven't been preprocessed
 
             item.handler = { _, completion in
                 Task {
-                    await AppCoordinator.shared.playTrack(track, queue: tracks)
+                    await AppCoordinator.shared.playTrack(track, queue: filteredTracks)
                 }
                 completion()
             }
@@ -374,25 +366,23 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     }
 
     private func showAlbumDetail(album: Album, tracks: [Track]) {
-        let songItems: [CPListItem] = tracks.map { track in
+        // Filter out incompatible formats for CarPlay
+        let filteredTracks = tracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+            return !incompatibleFormats.contains(ext)
+        }
+
+        let songItems: [CPListItem] = filteredTracks.map { track in
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Add artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    // Set placeholder image
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
+            // Image loading disabled - causes crashes on real CarPlay hardware
+            // when images haven't been preprocessed
 
             item.handler = { _, completion in
                 Task {
-                    await AppCoordinator.shared.playTrack(track, queue: tracks)
+                    await AppCoordinator.shared.playTrack(track, queue: filteredTracks)
                 }
                 completion()
             }

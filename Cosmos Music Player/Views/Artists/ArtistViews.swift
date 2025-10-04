@@ -168,7 +168,18 @@ struct ArtistDetailScreen: View {
     }
     
     private var artistTracks: [Track] {
-        allTracks.filter { $0.artistId == artist.id }
+        let tracks = allTracks.filter { $0.artistId == artist.id }
+
+        // Filter out incompatible formats when connected to CarPlay
+        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
+            return tracks.filter { track in
+                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+                return !incompatibleFormats.contains(ext)
+            }
+        }
+
+        return tracks
     }
     
     private var artistAlbums: [Album] {

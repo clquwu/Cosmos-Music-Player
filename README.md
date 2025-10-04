@@ -26,7 +26,7 @@ A premium audiophile music player for iOS supporting FLAC, WAV, M4A, MP3, Opus, 
 - **Custom EQ Settings**: Configure and save different GraphicEQ settings
 - **Siri Integration**: Voice control for music playback in English and French
 - **ReplayGain Support**: Automatic volume normalization for consistent listening experience
-- **Embedded Artwork**: Displays album art
+- **Embedded Artwork**: Displays album art from FLAC, MP3, and WAV metadata
 - **Advanced Audio Engine**: Built with AVFoundation for optimal audio quality
 
 ### 📚 Music Library Management
@@ -34,7 +34,7 @@ A premium audiophile music player for iOS supporting FLAC, WAV, M4A, MP3, Opus, 
 - **iCloud Drive Integration**: Automatic sync of music files across devices when using iCloud storage
 - **Local File Support**: Full support for music files stored locally in app's Documents folder
 - **Smart Library Indexing**: Automatic detection and indexing of music files from both storage locations
-- **Metadata Extraction**: Reads artist, album, title, and other metadata
+- **Metadata Extraction**: Reads artist, album, title, and other metadata from FLAC, MP3, and WAV files
 - **Offline First**: Works completely offline with local files, no internet required
 
 ### 👤 Artist Information

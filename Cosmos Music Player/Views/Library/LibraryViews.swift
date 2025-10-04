@@ -660,19 +660,31 @@ struct TrackListView: View {
     }
 
     private var sortedTracks: [Track] {
+        // Filter out incompatible formats when connected to CarPlay
+        let filteredTracks: [Track]
+        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
+            filteredTracks = tracks.filter { track in
+                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+                return !incompatibleFormats.contains(ext)
+            }
+        } else {
+            filteredTracks = tracks
+        }
+
         switch sortOption {
         case .dateNewest:
-            return tracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+            return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
         case .dateOldest:
-            return tracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+            return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
         case .nameAZ:
-            return tracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
+            return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
         case .nameZA:
-            return tracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+            return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
         case .sizeLargest:
-            return tracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
+            return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
         case .sizeSmallest:
-            return tracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
+            return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
         }
     }
 

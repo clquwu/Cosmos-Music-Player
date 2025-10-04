@@ -225,25 +225,56 @@ class PlayerEngine: NSObject, ObservableObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
             return
         }
-        
+
         switch type {
         case .began:
             print("🚫 Audio session interruption began - pausing playback")
+            // Save current playback position before interruption
+            let savedPosition = playbackTime
+            let wasPlaying = isPlaying
+
             if isPlaying {
                 pause()
             }
-            // Stop audio engine during interruption
-            audioEngine.stop()
+
+            // IMPORTANT: Don't stop the audio engine during interruption
+            // Stopping it can invalidate the audioFile and cause position loss
+            // The system will handle the interruption, we just need to pause
+            print("⏸️ Keeping audio engine in paused state during interruption")
+
+            // Restore the saved position (pause() may have updated it)
+            playbackTime = savedPosition
+            print("💾 Saved playback position: \(savedPosition)s (was playing: \(wasPlaying))")
+
         case .ended:
-            print("✅ Audio session interruption ended - restarting audio engine")
-            // Restart audio engine after interruption
-            do {
-                try audioEngine.start()
-                print("✅ Audio engine restarted after interruption")
-            } catch {
-                print("❌ Failed to restart audio engine: \(error)")
+            print("✅ Audio session interruption ended")
+            print("💾 Will restore to position: \(playbackTime)s when playback resumes")
+
+            // Check if we should resume playback
+            let shouldResume: Bool
+            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                shouldResume = options.contains(.shouldResume)
+                print("🔍 Interruption options: shouldResume = \(shouldResume)")
+            } else {
+                shouldResume = false
+                print("🔍 No interruption options - will not auto-resume")
             }
-            // Don't auto-resume - let user decide when to resume
+
+            // Only auto-resume if the system tells us to (e.g., after a Siri interruption)
+            // Don't auto-resume for user-initiated interruptions (like audio messages)
+            if shouldResume && playbackState == .paused {
+                print("▶️ Auto-resuming playback after interruption")
+                play()
+            } else {
+                print("⏸️ Not auto-resuming - user must manually resume")
+
+                // Ensure playback state is correct but keep position saved
+                isPlaying = false
+                playbackState = .paused
+                updateNowPlayingInfoEnhanced()
+            }
+
         @unknown default:
             break
         }
@@ -255,7 +286,10 @@ class PlayerEngine: NSObject, ObservableObject {
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
             return
         }
-        
+
+        // Update CarPlay status when route changes
+        sfbAudioManager.updateCarPlayStatus()
+
         switch reason {
         case .oldDeviceUnavailable:
             // Headphones were unplugged or similar
@@ -940,7 +974,23 @@ class PlayerEngine: NSObject, ObservableObject {
         // If no audio file is loaded but we have a current track, load it first
         if audioFile == nil && currentTrack != nil && !isLoadingTrack {
             Task {
-                await ensurePlayerStateRestored()
+                // If state was already restored but audioFile is nil (e.g., after interruption),
+                // we need to reload the current track with preserved position
+                if hasRestoredState {
+                    print("🔄 Reloading track after interruption, preserving position: \(playbackTime)s")
+                    let savedPosition = playbackTime
+                    await loadTrack(currentTrack!, preservePlaybackTime: true)
+
+                    // Restore position after reload
+                    if savedPosition > 0 {
+                        await seek(to: savedPosition)
+                        print("✅ Restored position after reload: \(savedPosition)s")
+                    }
+                } else {
+                    // First-time state restoration
+                    await ensurePlayerStateRestored()
+                }
+
                 // After loading, try to play again
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     self.play()
@@ -973,32 +1023,43 @@ class PlayerEngine: NSObject, ObservableObject {
         
         if playbackState == .paused {
             print("▶️ Resuming from pause at position: \(playbackTime)s")
-            
+
             // When resuming from pause, we need to re-schedule audio from the correct position
             // instead of just continuing the engine, because the timing may have drifted
             cancelPendingCompletions()
             playerNode.stop()
-            
+
             // Re-schedule from the stored pause position
             // Note: audioFile is already unwrapped from the guard statement above
-            
+
+            // CRITICAL: Update seekTimeOffset to match the resume position
+            // This ensures time calculation (seekTimeOffset + nodePlaybackTime) is correct
+            seekTimeOffset = playbackTime
+
             let framePosition = AVAudioFramePosition(playbackTime * audioFile.processingFormat.sampleRate)
             scheduleSegment(from: framePosition, file: audioFile)
-            
+
             do {
-                try audioEngine.start()
+                // Only start the engine if it's not already running
+                if !audioEngine.isRunning {
+                    try audioEngine.start()
+                    print("✅ Started audio engine for resume")
+                } else {
+                    print("✅ Audio engine already running, continuing")
+                }
+
                 playerNode.play()
                 isPlaying = true
                 playbackState = .playing
                 startPlaybackTimer()
-                
+
                 // End paused state monitoring and start regular playing monitoring
                 stopSilentPlaybackForPause()
                 endBackgroundMonitoring()
                 startBackgroundMonitoring()
-                
+
                 print("✅ Resumed playback from position: \(playbackTime)s")
-                
+
                 // Update Now Playing info with enhanced approach
                 updateNowPlayingInfoEnhanced()
                 return
