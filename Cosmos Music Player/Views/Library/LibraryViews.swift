@@ -185,14 +185,17 @@ struct LibraryView: View {
                 }
             }
 
-            // Store bookmark using the file path as key
-            bookmarks[url.path] = bookmarkData
+            // Generate stableId for this file
+            let stableId = try libraryIndexer.generateStableId(for: url)
+
+            // Store bookmark using stableId as key (survives file moves)
+            bookmarks[stableId] = bookmarkData
 
             // Save updated bookmarks
             let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
             try plistData.write(to: bookmarksURL)
 
-            print("Stored bookmark for external file: \(url.lastPathComponent)")
+            print("Stored bookmark for external file: \(url.lastPathComponent) with stableId: \(stableId)")
         } catch {
             print("Failed to store bookmark data: \(error)")
         }

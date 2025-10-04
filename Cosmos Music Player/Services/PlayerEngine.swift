@@ -59,6 +59,9 @@ class PlayerEngine: NSObject, ObservableObject {
     // Artwork caching
     private var cachedArtwork: MPMediaItemArtwork?
     private var cachedArtworkTrackId: String?
+
+    // Security-scoped resource tracking for external files
+    private var currentSecurityScopedURL: URL?
     
     private let databaseManager = DatabaseManager.shared
     private let cloudDownloadManager = CloudDownloadManager.shared
@@ -786,10 +789,39 @@ class PlayerEngine: NSObject, ObservableObject {
         playbackState = .loading
         
         // Volume control already set up in init
-        
+
         do {
-            let url = URL(fileURLWithPath: track.path)
-            
+            // Stop accessing previous security-scoped resource if any
+            if let previousURL = currentSecurityScopedURL {
+                previousURL.stopAccessingSecurityScopedResource()
+                currentSecurityScopedURL = nil
+                print("🔓 Stopped accessing previous security-scoped resource")
+            }
+
+            // Check if this is an external file with a bookmark (file may have moved)
+            var url: URL
+            var needsSecurityScope = false
+
+            if let resolvedURL = await LibraryIndexer.shared.resolveBookmarkForTrack(track) {
+                // Bookmark found and resolved - use the current location
+                print("📍 Using resolved bookmark location: \(resolvedURL.path)")
+                url = resolvedURL
+                needsSecurityScope = true
+
+                // Start accessing security-scoped resource for external files
+                guard url.startAccessingSecurityScopedResource() else {
+                    print("❌ Failed to start accessing security-scoped resource")
+                    throw PlayerError.fileNotFound
+                }
+
+                // Store URL to stop access later
+                currentSecurityScopedURL = url
+                print("🔐 Started accessing security-scoped resource for external file")
+            } else {
+                // No bookmark - use path from database
+                url = URL(fileURLWithPath: track.path)
+            }
+
             try await cloudDownloadManager.ensureLocal(url)
             
             // Remove file protection to prevent background stalls
@@ -1209,6 +1241,13 @@ class PlayerEngine: NSObject, ObservableObject {
         isPlaying = false
         playbackState = .stopped
         playbackTime = 0
+
+        // Stop accessing security-scoped resource if any
+        if let securedURL = currentSecurityScopedURL {
+            securedURL.stopAccessingSecurityScopedResource()
+            currentSecurityScopedURL = nil
+            print("🔓 Stopped accessing security-scoped resource on stop")
+        }
         stopPlaybackTimer()
         
         // Stop all background monitoring and silent playback
@@ -1233,6 +1272,13 @@ class PlayerEngine: NSObject, ObservableObject {
     
     private func cleanupCurrentPlayback(resetTime: Bool = false) async {
         print("🧹 Cleaning up current playback")
+
+        // Stop accessing security-scoped resource if any
+        if let securedURL = currentSecurityScopedURL {
+            securedURL.stopAccessingSecurityScopedResource()
+            currentSecurityScopedURL = nil
+            print("🔓 Stopped accessing security-scoped resource during cleanup")
+        }
 
         // Stop timer first
         stopPlaybackTimer()

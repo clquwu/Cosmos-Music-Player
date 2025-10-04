@@ -59,7 +59,7 @@ class FileCleanupManager: ObservableObject {
                     }
                 } else {
                     // For external files (from share/document picker), check if still accessible
-                    let isAccessible = await checkExternalFileAccessibility(trackURL)
+                    let isAccessible = await checkExternalFileAccessibility(trackURL, stableId: track.stableId)
                     print("🧹   External file accessible: \(isAccessible)")
 
                     if isAccessible {
@@ -101,7 +101,7 @@ class FileCleanupManager: ObservableObject {
     }
     
 
-    private func checkExternalFileAccessibility(_ fileURL: URL) async -> Bool {
+    private func checkExternalFileAccessibility(_ fileURL: URL, stableId: String) async -> Bool {
         // First check if file exists at the path
         if FileManager.default.fileExists(atPath: fileURL.path) {
             // File exists at original path, try to access it
@@ -117,26 +117,29 @@ class FileCleanupManager: ObservableObject {
 
         // File doesn't exist at original path, check if we have bookmark data for it
         print("🧹     External file doesn't exist at original path, checking bookmark data")
-        return await checkBookmarkAccessibility(for: fileURL)
+        return await checkBookmarkAccessibility(for: fileURL, stableId: stableId)
     }
 
-    private func checkBookmarkAccessibility(for fileURL: URL) async -> Bool {
-        // Check document picker bookmarks
-        if let resolvedURL = await resolveDocumentPickerBookmark(for: fileURL.path) {
-            // If the resolved path is different from original, consider the file as moved (should be removed)
+    private func checkBookmarkAccessibility(for fileURL: URL, stableId: String) async -> Bool {
+        // Check document picker bookmarks (now using stableId as key)
+        if let resolvedURL = await resolveDocumentPickerBookmark(for: stableId) {
+            // Bookmark found! Check if file is still accessible
             if resolvedURL.path != fileURL.path {
-                print("🧹     File has been moved from \(fileURL.path) to \(resolvedURL.path) - will remove from library")
-                return false
+                print("🧹     File has been moved from \(fileURL.path) to \(resolvedURL.path) - bookmark is tracking it ✅")
             }
-            return await testFileAccessibility(resolvedURL)
+
+            // Test if the resolved location is accessible
+            let isAccessible = await testFileAccessibility(resolvedURL)
+            if isAccessible {
+                print("🧹     External file is accessible via bookmark ✅")
+            }
+            return isAccessible
         }
 
-        // Check share extension bookmarks
-        if let resolvedURL = await resolveShareExtensionBookmark(for: fileURL.path) {
-            // If the resolved path is different from original, consider the file as moved (should be removed)
+        // Check share extension bookmarks (legacy - should be migrated)
+        if let resolvedURL = await resolveShareExtensionBookmark(for: stableId) {
             if resolvedURL.path != fileURL.path {
-                print("🧹     File has been moved from \(fileURL.path) to \(resolvedURL.path) - will remove from library")
-                return false
+                print("🧹     File has been moved from \(fileURL.path) to \(resolvedURL.path) - bookmark is tracking it ✅")
             }
             return await testFileAccessibility(resolvedURL)
         }
@@ -145,7 +148,7 @@ class FileCleanupManager: ObservableObject {
         return false
     }
 
-    private func resolveDocumentPickerBookmark(for filePath: String) async -> URL? {
+    private func resolveDocumentPickerBookmark(for stableId: String) async -> URL? {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
 
@@ -157,8 +160,8 @@ class FileCleanupManager: ObservableObject {
         do {
             let data = try Data(contentsOf: bookmarksURL)
             guard let bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data],
-                  let bookmarkData = bookmarks[filePath] else {
-                print("🧹     No bookmark found for file path: \(filePath)")
+                  let bookmarkData = bookmarks[stableId] else {
+                print("🧹     No bookmark found for stableId: \(stableId)")
                 return nil
             }
 
@@ -166,14 +169,12 @@ class FileCleanupManager: ObservableObject {
             let resolvedURL = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
 
             if isStale {
-                print("🧹     Document picker bookmark is STALE for: \(filePath)")
-                print("🧹     Original path: \(filePath)")
+                print("🧹     Document picker bookmark is STALE for stableId: \(stableId)")
                 print("🧹     Resolved path: \(resolvedURL.path)")
                 return nil
             }
 
-            print("🧹     Document picker bookmark resolved successfully")
-            print("🧹     Original path: \(filePath)")
+            print("🧹     Document picker bookmark resolved successfully for stableId: \(stableId)")
             print("🧹     Resolved path: \(resolvedURL.path)")
             return resolvedURL
         } catch {
@@ -182,57 +183,11 @@ class FileCleanupManager: ObservableObject {
         }
     }
 
-    private func resolveShareExtensionBookmark(for filePath: String) async -> URL? {
-        guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
-            print("🧹     No shared container available")
-            return nil
-        }
-
-        let sharedDataURL = sharedContainer.appendingPathComponent("SharedAudioFiles.plist")
-
-        guard FileManager.default.fileExists(atPath: sharedDataURL.path) else {
-            print("🧹     No share extension bookmarks file found")
-            return nil
-        }
-
-        do {
-            let data = try Data(contentsOf: sharedDataURL)
-            guard let sharedFiles = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [[String: Data]] else {
-                print("🧹     Invalid share extension bookmarks format")
-                return nil
-            }
-
-            // Look for matching file by original path
-            for fileInfo in sharedFiles {
-                if let urlData = fileInfo["url"],
-                   let urlString = String(data: urlData, encoding: .utf8),
-                   let originalURL = URL(string: urlString),
-                   originalURL.path == filePath,
-                   let bookmarkData = fileInfo["bookmark"] {
-
-                    var isStale = false
-                    let resolvedURL = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
-
-                    if isStale {
-                        print("🧹     Share extension bookmark is STALE for: \(filePath)")
-                        print("🧹     Original path: \(filePath)")
-                        print("🧹     Resolved path: \(resolvedURL.path)")
-                        return nil
-                    }
-
-                    print("🧹     Share extension bookmark resolved successfully")
-                    print("🧹     Original path: \(filePath)")
-                    print("🧹     Resolved path: \(resolvedURL.path)")
-                    return resolvedURL
-                }
-            }
-
-            print("🧹     No share extension bookmark found for file path: \(filePath)")
-            return nil
-        } catch {
-            print("🧹     Failed to resolve share extension bookmark: \(error)")
-            return nil
-        }
+    private func resolveShareExtensionBookmark(for stableId: String) async -> URL? {
+        // Share extension bookmarks are now migrated to the main bookmark storage
+        // This function is kept for backward compatibility but should not be needed
+        print("🧹     Share extension bookmarks have been migrated to main storage")
+        return nil
     }
 
     private func testFileAccessibility(_ fileURL: URL) async -> Bool {
