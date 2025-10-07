@@ -253,7 +253,8 @@ struct PlaylistCardView: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+
             // Text info
             VStack(alignment: .leading, spacing: 2) {
                 Text(playlist.title)
@@ -312,31 +313,28 @@ struct PlaylistDetailScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var tracks: [Track] = []
     @State private var isEditMode: Bool = false
-    
+
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .playlistDetail)
-            
-            TrackListView(tracks: tracks, playlist: playlist, isEditMode: isEditMode)
-        }
-        .navigationTitle(playlist.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button(isEditMode ? Localized.done : Localized.edit) {
-                    withAnimation {
-                        isEditMode.toggle()
+        TrackListView(tracks: tracks, playlist: playlist, isEditMode: isEditMode)
+            .background(ScreenSpecificBackgroundView(screen: .playlistDetail))
+            .navigationTitle(playlist.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(isEditMode ? Localized.done : Localized.edit) {
+                        withAnimation {
+                            isEditMode.toggle()
+                        }
                     }
+                    .disabled(tracks.isEmpty)
                 }
-                .disabled(tracks.isEmpty)
             }
-        }
-        .onAppear {
-            loadPlaylistTracks()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
-            loadPlaylistTracks()
-        }
+            .onAppear {
+                loadPlaylistTracks()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+                loadPlaylistTracks()
+            }
     }
     
     private func loadPlaylistTracks() {

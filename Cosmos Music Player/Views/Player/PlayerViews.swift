@@ -975,49 +975,11 @@ struct TrackRowView: View {
             Text(Localized.deleteFileConfirmation(track.title))
         }
         .contentShape(Rectangle())
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    // Cancel any existing timer
-                    gestureTimer?.invalidate()
-                    
-                    // Store initial location on first change
-                    if dragStartLocation == .zero {
-                        dragStartLocation = value.startLocation
-                        
-                        // Set a timer to trigger animation only if gesture remains small
-                        gestureTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { _ in
-                            let currentDistance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-                            
-                            // Use DispatchQueue.main.async to access UI state safely
-                            DispatchQueue.main.async {
-                                // Only animate if drag distance is still small after delay and no buttons are being interacted with
-                                if !isPressed && !isMenuInteracting && !isDeleteButtonInteracting && currentDistance < 15 {
-                                    isPressed = true
-                                    
-                                    // Auto-fade out after expansion completes
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-                                        withAnimation(.easeOut(duration: 0.08)) {
-                                            isPressed = false
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                .onEnded { value in
-                    // Cancel timer and reset drag tracking
-                    gestureTimer?.invalidate()
-                    dragStartLocation = .zero
-                    
-                    // Only trigger tap if the drag distance is small (not a scroll gesture) and no buttons are being interacted with
-                    let dragDistance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-                    if !isMenuInteracting && !isDeleteButtonInteracting && dragDistance < 10 {
-                        onTap()
-                    }
-                }
-        )
+        .onTapGesture {
+            if !isMenuInteracting && !isDeleteButtonInteracting {
+                onTap()
+            }
+        }
         .onAppear {
             isFavorite = (try? appCoordinator.isFavorite(trackStableId: track.stableId)) ?? false
             loadArtwork()

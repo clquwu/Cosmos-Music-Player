@@ -24,7 +24,7 @@ class LibraryIndexer: NSObject, ObservableObject {
     @Published var tracksFound = 0
     @Published var currentlyProcessing: String = ""
     @Published var queuedFiles: [String] = []
-    
+
     private let metadataQuery = NSMetadataQuery()
     private let databaseManager = DatabaseManager.shared
     private let stateManager = StateManager.shared
@@ -68,14 +68,14 @@ class LibraryIndexer: NSObject, ObservableObject {
     
     func start() {
         guard !isIndexing else { return }
-        
+
         // Attempt recovery from offline mode when manually syncing
         CloudDownloadManager.shared.attemptRecovery()
-        
+
         isIndexing = true
         indexingProgress = 0.0
         tracksFound = 0
-        
+
         // Copy any new files from share extension first
         Task {
             await copyFilesFromSharedContainer()
@@ -117,11 +117,11 @@ class LibraryIndexer: NSObject, ObservableObject {
     
     func startOfflineMode() {
         guard !isIndexing else { return }
-        
+
         isIndexing = true
         indexingProgress = 0.0
         tracksFound = 0
-        
+
         Task {
             await scanLocalDocuments()
         }
@@ -160,6 +160,9 @@ class LibraryIndexer: NSObject, ObservableObject {
             print("💾 Inserting external track into database: \(track.title)")
             try databaseManager.upsertTrack(track)
             print("✅ External track inserted into database: \(track.title)")
+
+            // Pre-cache artwork for instant loading later
+            await ArtworkManager.shared.cacheArtwork(for: track)
 
             await MainActor.run {
                 tracksFound += 1
@@ -490,7 +493,8 @@ class LibraryIndexer: NSObject, ObservableObject {
             print("🆔 Generating stable ID for: \(fileURL.lastPathComponent)")
             let stableId = try generateStableId(for: fileURL)
             print("🆔 Generated stable ID: \(stableId)")
-            
+
+            // Check if track already exists in database
             if try databaseManager.getTrack(byStableId: stableId) != nil {
                 print("⏭️ Track already exists in database: \(fileURL.lastPathComponent)")
                 return
@@ -499,11 +503,14 @@ class LibraryIndexer: NSObject, ObservableObject {
             print("🎶 Parsing audio file: \(fileURL.lastPathComponent)")
             let track = try await parseAudioFile(at: fileURL, stableId: stableId)
             print("✅ Audio file parsed successfully: \(track.title)")
-            
+
             print("💾 Inserting track into database: \(track.title)")
             try databaseManager.upsertTrack(track)
             print("✅ Track inserted into database: \(track.title)")
-            
+
+            // Pre-cache artwork for instant loading later
+            await ArtworkManager.shared.cacheArtwork(for: track)
+
             await MainActor.run {
                 tracksFound += 1
                 print("📢 Posting TrackFound notification for: \(track.title)")
@@ -552,20 +559,24 @@ class LibraryIndexer: NSObject, ObservableObject {
     private func processMetadataItem(_ item: NSMetadataItem) async {
         guard let fileURL = item.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
         let ext = fileURL.pathExtension.lowercased()
-        guard ext == "flac" || ext == "mp3" || ext == "wav" else { return }
-        
+        let supportedFormats = ["flac", "mp3", "wav", "m4a", "aac", "opus", "ogg", "dsf", "dff"]
+        guard supportedFormats.contains(ext) else { return }
+
         do {
             let stableId = try generateStableId(for: fileURL)
-            
+
             if try databaseManager.getTrack(byStableId: stableId) != nil {
                 return
             }
-            
+
             try await CloudDownloadManager.shared.ensureLocal(fileURL)
-            
+
             let track = try await parseAudioFile(at: fileURL, stableId: stableId)
             try databaseManager.upsertTrack(track)
-            
+
+            // Pre-cache artwork for instant loading later
+            await ArtworkManager.shared.cacheArtwork(for: track)
+
             await MainActor.run {
                 tracksFound += 1
                 // Notify UI immediately that a new track was found

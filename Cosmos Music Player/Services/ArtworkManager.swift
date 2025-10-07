@@ -8,41 +8,241 @@
 import Foundation
 import UIKit
 import AVFoundation
+import CryptoKit
 
 @MainActor
 class ArtworkManager: ObservableObject {
     static let shared = ArtworkManager()
-    
-    private var cache: [String: UIImage] = [:]
-    
-    private init() {}
+
+    // Memory cache for quick access
+    private var memoryCache: [String: UIImage] = [:]
+
+    // Persistent disk cache directory
+    private let diskCacheURL: URL
+
+    // Mapping file URL (maps track.stableId -> artwork hash)
+    private let mappingFileURL: URL
+
+    // In-memory mapping cache
+    private var artworkMapping: [String: String] = [:]
+
+    private init() {
+        // Create artwork cache directory
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        diskCacheURL = documentsURL.appendingPathComponent("ArtworkCache", isDirectory: true)
+        mappingFileURL = documentsURL.appendingPathComponent("ArtworkMapping.plist")
+
+        // Create directory if needed
+        try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
+
+        // Load mapping
+        loadMapping()
+
+        print("📁 ArtworkManager initialized - Disk cache: \(diskCacheURL.path)")
+    }
+
+    private func loadMapping() {
+        guard FileManager.default.fileExists(atPath: mappingFileURL.path) else {
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: mappingFileURL)
+            if let mapping = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: String] {
+                artworkMapping = mapping
+                print("📊 Loaded artwork mapping: \(artworkMapping.count) entries")
+            }
+        } catch {
+            print("⚠️ Failed to load artwork mapping: \(error)")
+        }
+    }
+
+    private func saveMapping() {
+        do {
+            let data = try PropertyListSerialization.data(fromPropertyList: artworkMapping, format: .xml, options: 0)
+            try data.write(to: mappingFileURL, options: .atomic)
+        } catch {
+            print("⚠️ Failed to save artwork mapping: \(error)")
+        }
+    }
 
     func clearCache() {
-        cache.removeAll()
-        print("🗑️ ArtworkManager cache cleared")
+        memoryCache.removeAll()
+        print("🗑️ ArtworkManager memory cache cleared")
+    }
+
+    func clearDiskCache() {
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: nil)
+            for file in files {
+                try FileManager.default.removeItem(at: file)
+            }
+            memoryCache.removeAll()
+            artworkMapping.removeAll()
+            saveMapping()
+            print("🗑️ Cleared \(files.count) artwork files from disk cache")
+        } catch {
+            print("❌ Failed to clear disk cache: \(error)")
+        }
     }
 
     func forceRefreshArtwork(for track: Track) async -> UIImage? {
-        // Remove from cache to force re-extraction
-        cache.removeValue(forKey: track.stableId)
+        // Remove from memory cache and mapping to force re-extraction
+        memoryCache.removeValue(forKey: track.stableId)
+
+        // Note: We don't delete the actual artwork file as other tracks might use it
+        // Just remove the mapping for this track
+        artworkMapping.removeValue(forKey: track.stableId)
+        saveMapping()
+
         print("🔄 Force refreshing artwork for: \(track.title)")
         return await getArtwork(for: track)
     }
 
+    /// Pre-process and cache artwork during library indexing (background operation)
+    func cacheArtwork(for track: Track) async {
+        // Skip if already mapped (already has cached artwork)
+        if artworkMapping[track.stableId] != nil {
+            return
+        }
+
+        print("💾 Pre-caching artwork for: \(track.title)")
+
+        // Extract artwork from audio file
+        if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
+            // Save to disk cache (will deduplicate automatically)
+            await saveToDiskCache(image: image, stableId: track.stableId)
+        }
+    }
+
     func getArtwork(for track: Track) async -> UIImage? {
-        // Check cache first
-        if let cachedImage = cache[track.stableId] {
+        // 1. Check memory cache first (fastest)
+        if let cachedImage = memoryCache[track.stableId] {
             return cachedImage
         }
-        
-        // Try to extract artwork (runs on background thread)
+
+        // 2. Check disk cache (fast)
+        if let diskImage = await loadFromDiskCache(stableId: track.stableId) {
+            // Store in memory cache for next time
+            memoryCache[track.stableId] = diskImage
+            return diskImage
+        }
+
+        // 3. Extract from audio file and cache (slow - should be rare after indexing)
         if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
-            // Store in cache (we're on MainActor)
-            cache[track.stableId] = image
+            // Store in both caches
+            memoryCache[track.stableId] = image
+            await saveToDiskCache(image: image, stableId: track.stableId)
             return image
         }
-        
+
         return nil
+    }
+
+    // MARK: - Disk Cache Management
+
+    private nonisolated func loadFromDiskCache(stableId: String) async -> UIImage? {
+        // Get artwork hash from mapping
+        guard let artworkHash = await getArtworkHash(for: stableId) else {
+            return nil
+        }
+
+        let diskFile = diskCacheURL.appendingPathComponent("\(artworkHash).jpg")
+
+        guard FileManager.default.fileExists(atPath: diskFile.path) else {
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: diskFile)
+            if let image = UIImage(data: data) {
+                return image
+            }
+        } catch {
+            print("❌ Failed to load artwork from disk: \(error)")
+        }
+
+        return nil
+    }
+
+    private func getArtworkHash(for stableId: String) async -> String? {
+        return artworkMapping[stableId]
+    }
+
+    private nonisolated func saveToDiskCache(image: UIImage, stableId: String) async {
+        // Compress to JPEG at 85% quality for faster loading and smaller size
+        guard let imageData = image.jpegData(compressionQuality: 0.85) else {
+            print("❌ Failed to compress artwork to JPEG")
+            return
+        }
+
+        // Compute hash of artwork data to deduplicate
+        let artworkHash = SHA256.hash(data: imageData)
+        let hashString = artworkHash.compactMap { String(format: "%02x", $0) }.joined()
+
+        let diskFile = diskCacheURL.appendingPathComponent("\(hashString).jpg")
+
+        // Check if artwork already exists
+        if FileManager.default.fileExists(atPath: diskFile.path) {
+            // Artwork already cached, just update mapping
+            await updateMapping(stableId: stableId, artworkHash: hashString)
+            print("♻️ Reused existing artwork: \(hashString).jpg for track \(stableId)")
+            return
+        }
+
+        // Save new artwork file
+        do {
+            try imageData.write(to: diskFile, options: .atomic)
+            await updateMapping(stableId: stableId, artworkHash: hashString)
+            print("💾 Saved artwork to disk cache: \(hashString).jpg (\(imageData.count / 1024) KB)")
+        } catch {
+            print("❌ Failed to save artwork to disk: \(error)")
+        }
+    }
+
+    private func updateMapping(stableId: String, artworkHash: String) async {
+        artworkMapping[stableId] = artworkHash
+        saveMapping()
+    }
+
+    /// Clean up artwork files for tracks that no longer exist
+    func cleanupOrphanedArtwork(validStableIds: Set<String>) async {
+        // First, clean up mapping entries for deleted tracks
+        var removedMappings = 0
+        for stableId in artworkMapping.keys {
+            if !validStableIds.contains(stableId) {
+                artworkMapping.removeValue(forKey: stableId)
+                removedMappings += 1
+            }
+        }
+
+        if removedMappings > 0 {
+            saveMapping()
+            print("🗑️ Removed \(removedMappings) orphaned mapping entries")
+        }
+
+        // Build set of artwork hashes still in use
+        let usedHashes = Set(artworkMapping.values)
+
+        // Clean up artwork files that are no longer referenced
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: nil)
+            var removedCount = 0
+
+            for fileURL in files {
+                let artworkHash = fileURL.deletingPathExtension().lastPathComponent
+                if !usedHashes.contains(artworkHash) {
+                    try FileManager.default.removeItem(at: fileURL)
+                    removedCount += 1
+                }
+            }
+
+            if removedCount > 0 {
+                print("🗑️ Cleaned up \(removedCount) unused artwork files")
+            }
+        } catch {
+            print("❌ Failed to cleanup orphaned artwork: \(error)")
+        }
     }
     
     private nonisolated func extractArtwork(from url: URL) async -> UIImage? {

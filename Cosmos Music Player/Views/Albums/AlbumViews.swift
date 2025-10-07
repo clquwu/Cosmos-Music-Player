@@ -162,7 +162,15 @@ struct AlbumDetailScreen: View {
         }
 
         return filteredTracks.sorted {
-            ($0.trackNo ?? 0) < ($1.trackNo ?? 0)
+            // Sort by disc number first, then track number
+            let disc0 = $0.discNo ?? 1
+            let disc1 = $1.discNo ?? 1
+
+            if disc0 != disc1 {
+                return disc0 < disc1
+            }
+
+            return ($0.trackNo ?? 0) < ($1.trackNo ?? 0)
         }
     }
     

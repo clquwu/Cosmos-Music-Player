@@ -54,8 +54,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Image loading disabled - causes crashes on real CarPlay hardware
-            // when images haven't been preprocessed
+            // Load cached artwork asynchronously
+            Task { @MainActor in
+                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
+                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
+                    item.setImage(resizedImage)
+                } else {
+                    let placeholder = createPlaceholderImage()
+                    item.setImage(placeholder)
+                }
+            }
 
             item.handler = { _, completion in
                 Task {
@@ -89,8 +97,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Image loading disabled - causes crashes on real CarPlay hardware
-            // when images haven't been preprocessed
+            // Load cached artwork asynchronously
+            Task { @MainActor in
+                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
+                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
+                    item.setImage(resizedImage)
+                } else {
+                    let placeholder = createPlaceholderImage()
+                    item.setImage(placeholder)
+                }
+            }
 
             item.handler = { _, completion in
                 Task {
@@ -282,8 +298,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Image loading disabled - causes crashes on real CarPlay hardware
-            // when images haven't been preprocessed
+            // Load cached artwork asynchronously
+            Task { @MainActor in
+                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
+                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
+                    item.setImage(resizedImage)
+                } else {
+                    let placeholder = createPlaceholderImage()
+                    item.setImage(placeholder)
+                }
+            }
 
             item.handler = { _, completion in
                 Task {
@@ -329,8 +353,16 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Image loading disabled - causes crashes on real CarPlay hardware
-            // when images haven't been preprocessed
+            // Load cached artwork asynchronously
+            Task { @MainActor in
+                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
+                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
+                    item.setImage(resizedImage)
+                } else {
+                    let placeholder = createPlaceholderImage()
+                    item.setImage(placeholder)
+                }
+            }
 
             item.handler = { _, completion in
                 Task {
@@ -373,16 +405,36 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             return !incompatibleFormats.contains(ext)
         }
 
-        let songItems: [CPListItem] = filteredTracks.map { track in
+        // Sort by disc number first, then track number
+        let sortedTracks = filteredTracks.sorted {
+            let disc0 = $0.discNo ?? 1
+            let disc1 = $1.discNo ?? 1
+
+            if disc0 != disc1 {
+                return disc0 < disc1
+            }
+
+            return ($0.trackNo ?? 0) < ($1.trackNo ?? 0)
+        }
+
+        let songItems: [CPListItem] = sortedTracks.map { track in
             let artistName = getArtistName(for: track)
             let item = CPListItem(text: track.title, detailText: artistName)
 
-            // Image loading disabled - causes crashes on real CarPlay hardware
-            // when images haven't been preprocessed
+            // Load cached artwork asynchronously
+            Task { @MainActor in
+                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
+                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
+                    item.setImage(resizedImage)
+                } else {
+                    let placeholder = createPlaceholderImage()
+                    item.setImage(placeholder)
+                }
+            }
 
             item.handler = { _, completion in
                 Task {
-                    await AppCoordinator.shared.playTrack(track, queue: filteredTracks)
+                    await AppCoordinator.shared.playTrack(track, queue: sortedTracks)
                 }
                 completion()
             }

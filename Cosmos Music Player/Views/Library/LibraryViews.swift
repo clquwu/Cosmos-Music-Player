@@ -585,15 +585,12 @@ struct LibrarySectionRowView: View {
 
 struct AllSongsScreen: View {
     let tracks: [Track]
-    
+
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .allSongs)
-            
-            TrackListView(tracks: tracks)
-        }
-        .navigationTitle(Localized.allSongs)
-        .navigationBarTitleDisplayMode(.inline)
+        TrackListView(tracks: tracks)
+            .background(ScreenSpecificBackgroundView(screen: .allSongs))
+            .navigationTitle(Localized.allSongs)
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -601,17 +598,14 @@ struct LikedSongsScreen: View {
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var likedTracks: [Track] = []
-    
+
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .likedSongs)
-            
-            TrackListView(tracks: likedTracks)
-        }
-        .navigationTitle(Localized.likedSongs)
-        .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            loadLikedTracks()
+        TrackListView(tracks: likedTracks)
+            .background(ScreenSpecificBackgroundView(screen: .likedSongs))
+            .navigationTitle(Localized.likedSongs)
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                loadLikedTracks()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
             loadLikedTracks()
@@ -737,9 +731,7 @@ struct TrackListView: View {
             }
             .listStyle(PlainListStyle())
             .scrollContentBackground(.hidden)
-            .safeAreaInset(edge: .bottom) {
-                Color.clear.frame(height: 100) // Space for mini player
-            }
+            .contentMargins(.bottom, 100, for: .scrollContent)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {

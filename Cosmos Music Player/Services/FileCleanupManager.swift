@@ -54,8 +54,38 @@ class FileCleanupManager: ObservableObject {
                     if fileExists {
                         print("🧹 ✅ Internal file exists (keeping): \(trackURL.lastPathComponent)")
                     } else {
-                        print("🧹   Internal file doesn't exist - will auto-clean from database")
-                        nonExistentFiles.append(trackURL)
+                        // Check if this is a local Documents file with an old container path
+                        if trackURL.path.contains("/Documents/") && !trackURL.path.contains(iCloudFolderURL.path) {
+                            // Try to find the file in the current Documents directory
+                            let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                            let filename = trackURL.lastPathComponent
+                            let newURL = documentsURL.appendingPathComponent(filename)
+
+                            if FileManager.default.fileExists(atPath: newURL.path) {
+                                print("🧹   Found file in current Documents folder, updating path...")
+                                print("🧹   Old path: \(trackURL.path)")
+                                print("🧹   New path: \(newURL.path)")
+
+                                // Update the track's path in the database
+                                do {
+                                    try databaseManager.write { db in
+                                        var updatedTrack = track
+                                        updatedTrack.path = newURL.path
+                                        try updatedTrack.update(db)
+                                    }
+                                    print("🧹 ✅ Updated path for: \(filename)")
+                                } catch {
+                                    print("🧹 ❌ Failed to update path: \(error)")
+                                    nonExistentFiles.append(trackURL)
+                                }
+                            } else {
+                                print("🧹   Internal file doesn't exist - will auto-clean from database")
+                                nonExistentFiles.append(trackURL)
+                            }
+                        } else {
+                            print("🧹   Internal file doesn't exist - will auto-clean from database")
+                            nonExistentFiles.append(trackURL)
+                        }
                     }
                 } else {
                     // For external files (from share/document picker), check if still accessible
@@ -79,10 +109,13 @@ class FileCleanupManager: ObservableObject {
                     do {
                         let stableId = generateStableId(for: fileURL)
                         print("🧹 Auto-cleaning database entry for non-existent file: \(fileURL.lastPathComponent)")
-                        
+
                         if let track = try databaseManager.getTrack(byStableId: stableId) {
                             print("🧹 Auto-removing track from database: \(track.title)")
                             try databaseManager.deleteTrack(byStableId: stableId)
+
+                            // Delete cached artwork for this track
+                            await deleteArtworkCache(for: stableId)
                         }
                     } catch {
                         print("🧹 Error auto-cleaning file \(fileURL.lastPathComponent): \(error)")
@@ -251,6 +284,15 @@ class FileCleanupManager: ObservableObject {
         let filename = url.lastPathComponent
         let digest = SHA256.hash(data: filename.data(using: .utf8) ?? Data())
         return digest.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Artwork Cache Cleanup
+
+    private func deleteArtworkCache(for stableId: String) async {
+        // Note: We don't delete the actual artwork file as other tracks might use it
+        // The artwork manager will clean up unused files during cleanupOrphanedArtwork
+        // Just notify that we're removing this track's artwork reference
+        print("🧹 Removed artwork reference for: \(stableId)")
     }
 }
 
