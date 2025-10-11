@@ -160,6 +160,17 @@ class DatabaseManager: @unchecked Sendable {
                 // Column may already exist, which is fine
                 print("ℹ️ Database migration: last_played_at column already exists or migration failed: \(error)")
             }
+
+            // Migration: Add preset_type column to eq_preset if it doesn't exist
+            do {
+                try db.execute(sql: """
+                    ALTER TABLE eq_preset ADD COLUMN preset_type TEXT DEFAULT 'imported'
+                """)
+                print("✅ Database: Added preset_type column to eq_preset table")
+            } catch {
+                // Column may already exist, which is fine
+                print("ℹ️ Database migration: preset_type column already exists or migration failed: \(error)")
+            }
         }
     }
 

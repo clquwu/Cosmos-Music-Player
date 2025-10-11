@@ -1069,36 +1069,35 @@ class PlayerEngine: NSObject, ObservableObject {
             seekTimeOffset = playbackTime
 
             let framePosition = AVAudioFramePosition(playbackTime * audioFile.processingFormat.sampleRate)
-            scheduleSegment(from: framePosition, file: audioFile)
 
+            // IMPORTANT: Ensure audio engine is running BEFORE scheduling
             do {
-                // Only start the engine if it's not already running
                 if !audioEngine.isRunning {
                     try audioEngine.start()
-                    print("✅ Started audio engine for resume")
-                } else {
-                    print("✅ Audio engine already running, continuing")
+                    print("✅ Started audio engine before scheduling (resume)")
                 }
-
-                playerNode.play()
-                isPlaying = true
-                playbackState = .playing
-                startPlaybackTimer()
-
-                // End paused state monitoring and start regular playing monitoring
-                stopSilentPlaybackForPause()
-                endBackgroundMonitoring()
-                startBackgroundMonitoring()
-
-                print("✅ Resumed playback from position: \(playbackTime)s")
-
-                // Update Now Playing info with enhanced approach
-                updateNowPlayingInfoEnhanced()
-                return
             } catch {
                 print("❌ Failed to start audio engine when resuming: \(error)")
                 return
             }
+
+            scheduleSegment(from: framePosition, file: audioFile)
+
+            playerNode.play()
+            isPlaying = true
+            playbackState = .playing
+            startPlaybackTimer()
+
+            // End paused state monitoring and start regular playing monitoring
+            stopSilentPlaybackForPause()
+            endBackgroundMonitoring()
+            startBackgroundMonitoring()
+
+            print("✅ Resumed playback from position: \(playbackTime)s")
+
+            // Update Now Playing info with enhanced approach
+            updateNowPlayingInfoEnhanced()
+            return
         }
         
         cancelPendingCompletions()
@@ -1343,13 +1342,24 @@ class PlayerEngine: NSObject, ObservableObject {
         }
         
         print("🔍 Seeking to: \(time)s (frame: \(framePosition))")
-        
+
         // Ensure audio engine is set up before seeking with file's format
         ensureAudioEngineSetup(with: audioFile.processingFormat)
-        
+
+        // Ensure audio engine is running before scheduling
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                print("✅ Started audio engine before scheduling (seek)")
+            } catch {
+                print("❌ Failed to start audio engine during seek: \(error)")
+                return
+            }
+        }
+
         cancelPendingCompletions()
         playerNode.stop()
-        
+
         scheduleSegment(from: framePosition, file: audioFile)
         
         // Update seek offset and playback time
@@ -1415,22 +1425,51 @@ class PlayerEngine: NSObject, ObservableObject {
 
 
     // MARK: - Audio Scheduling Helper
-    
+
     private func scheduleSegment(from startFrame: AVAudioFramePosition, file: AVAudioFile) {
+        // Safety check: Ensure audio engine is running
+        guard audioEngine.isRunning else {
+            print("❌ Cannot schedule segment: audio engine is not running")
+            return
+        }
+
+        // Validate startFrame is within bounds
+        guard startFrame >= 0 && startFrame < file.length else {
+            print("❌ Invalid startFrame: \(startFrame), file length: \(file.length)")
+            return
+        }
+
         let remaining = file.length - startFrame
-        guard remaining > 0 else { return }
-        
-        // Schedule WITHOUT any completion handler
-        playerNode.scheduleSegment(
-            file,
-            startingFrame: startFrame,
-            frameCount: AVAudioFrameCount(remaining),
-            at: nil,
-            completionHandler: nil
-        )
-        
-        // Start background monitoring when we schedule a segment
-        startBackgroundMonitoring()
+        guard remaining > 0 else {
+            print("❌ No remaining frames to schedule: startFrame=\(startFrame), length=\(file.length)")
+            return
+        }
+
+        // Validate that frameCount doesn't overflow AVAudioFrameCount
+        guard remaining <= AVAudioFrameCount.max else {
+            print("❌ Remaining frames exceed AVAudioFrameCount.max: \(remaining)")
+            return
+        }
+
+        // Schedule segment with error handling
+        do {
+            // Schedule WITHOUT any completion handler
+            playerNode.scheduleSegment(
+                file,
+                startingFrame: startFrame,
+                frameCount: AVAudioFrameCount(remaining),
+                at: nil,
+                completionHandler: nil
+            )
+
+            print("✅ Successfully scheduled segment: startFrame=\(startFrame), frameCount=\(remaining)")
+
+            // Start background monitoring when we schedule a segment
+            startBackgroundMonitoring()
+        } catch {
+            print("❌ Failed to schedule audio segment: \(error)")
+            print("❌ Details - startFrame: \(startFrame), remaining: \(remaining), file length: \(file.length)")
+        }
     }
     
     private func startBackgroundMonitoring() {

@@ -58,7 +58,7 @@ class EQManager: ObservableObject {
     var currentEQFrequencies: [Double] { eqFrequencies }
     var currentEQGains: [Double] { eqGains }
 
-    private let databaseManager = DatabaseManager.shared
+    let databaseManager = DatabaseManager.shared
     private var audioEngine: AVAudioEngine?
     private var eqNode: AVAudioUnitEQ?
 
@@ -274,13 +274,20 @@ class EQManager: ObservableObject {
         }
     }
 
-    func createPreset(name: String, frequencies: [Double], gains: [Double]) async throws -> EQPreset {
+    // Standard 16-band frequencies (ISO standard)
+    static let manual16BandFrequencies: [Double] = [
+        31.25, 62.5, 125, 250, 500, 1000, 2000, 4000, 8000, 16000,
+        32, 64, 128, 256, 512, 1024
+    ].sorted()
+
+    func createPreset(name: String, frequencies: [Double], gains: [Double], type: EQPresetType = .imported) async throws -> EQPreset {
         let currentTime = Int64(Date().timeIntervalSince1970)
 
         let preset = EQPreset(
             name: name,
             isBuiltIn: false,
             isActive: false,
+            presetType: type,
             createdAt: currentTime,
             updatedAt: currentTime
         )
@@ -325,23 +332,27 @@ class EQManager: ObservableObject {
     func updatePresetGains(_ preset: EQPreset, frequencies: [Double], gains: [Double]) async throws {
         let currentTime = Int64(Date().timeIntervalSince1970)
 
-        // Update preset timestamp
-        var updatedPreset = preset
-        updatedPreset.updatedAt = currentTime
-        _ = try await databaseManager.saveEQPreset(updatedPreset)
+        try await databaseManager.write { db in
+            // Update preset timestamp
+            var updatedPreset = preset
+            updatedPreset.updatedAt = currentTime
+            try updatedPreset.update(db)
 
-        // Clear existing bands and create new ones
-        // Note: This is a simplified approach. In a production app, you might want to update existing bands instead
-        let bandCount = min(frequencies.count, gains.count)
-        for index in 0..<bandCount {
-            let band = EQBand(
-                presetId: preset.id!,
-                frequency: frequencies[index],
-                gain: gains[index],
-                bandwidth: 1.0,
-                bandIndex: index
-            )
-            try await databaseManager.saveEQBand(band)
+            // Delete existing bands for this preset
+            try db.execute(sql: "DELETE FROM eq_band WHERE preset_id = ?", arguments: [preset.id!])
+
+            // Insert new bands
+            let bandCount = min(frequencies.count, gains.count)
+            for index in 0..<bandCount {
+                var band = EQBand(
+                    presetId: preset.id!,
+                    frequency: frequencies[index],
+                    gain: gains[index],
+                    bandwidth: 1.0,
+                    bandIndex: index
+                )
+                try band.insert(db)
+            }
         }
 
         // If this is the current preset, apply changes immediately
@@ -426,6 +437,14 @@ class EQManager: ObservableObject {
         return graphicEQString
     }
 
+    func createManual16BandPreset(name: String) async throws -> EQPreset {
+        // Create a flat 16-band preset with 0dB gain
+        let frequencies = EQManager.manual16BandFrequencies
+        let gains = Array(repeating: 0.0, count: 16)
+
+        return try await createPreset(name: name, frequencies: frequencies, gains: gains, type: .manual)
+    }
+
     func importGraphicEQPreset(from content: String, name: String) async throws -> EQPreset {
         // Parse GraphicEQ format
         let (frequencies, gains) = try parseGraphicEQString(content)
@@ -435,7 +454,7 @@ class EQManager: ObservableObject {
             throw EQError.invalidImportData
         }
 
-        return try await createPreset(name: name, frequencies: frequencies, gains: gains)
+        return try await createPreset(name: name, frequencies: frequencies, gains: gains, type: .imported)
     }
 
     private func parseGraphicEQString(_ content: String) throws -> ([Double], [Double]) {

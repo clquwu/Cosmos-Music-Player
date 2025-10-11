@@ -1439,10 +1439,19 @@ struct MusicFilePicker: UIViewControllerRepresentable {
         picker.allowsMultipleSelection = true
         picker.modalPresentationStyle = .formSheet
 
+        // Store reference to prevent premature deallocation
+        context.coordinator.picker = picker
+
         return picker
     }
 
     func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ uiViewController: UIDocumentPickerViewController, coordinator: Coordinator) {
+        // Clean up to prevent DocumentManager crash
+        uiViewController.delegate = nil
+        coordinator.picker = nil
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onFilesPicked: onFilesPicked)
@@ -1450,17 +1459,27 @@ struct MusicFilePicker: UIViewControllerRepresentable {
 
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         let onFilesPicked: ([URL]) -> Void
+        weak var picker: UIDocumentPickerViewController?
 
         init(onFilesPicked: @escaping ([URL]) -> Void) {
             self.onFilesPicked = onFilesPicked
+            super.init()
+        }
+
+        deinit {
+            // Ensure delegate is cleared on deallocation
+            picker?.delegate = nil
         }
 
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             onFilesPicked(urls)
+            // Clean up delegate to prevent DocumentManager issues
+            controller.delegate = nil
         }
 
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            // User cancelled, do nothing
+            // User cancelled, clean up delegate
+            controller.delegate = nil
         }
     }
 }

@@ -169,11 +169,27 @@
 "graphic_equalizer" = "Égaliseur Graphique";
 "enable_equalizer" = "Activer l'Égaliseur";
 "enable_disable_eq_description" = "Activer ou désactiver l'égaliseur graphique";
+
+/* Manual EQ Presets */
+"manual_eq_presets" = "Préréglages Manuels 16 Bandes";
+"no_manual_presets_created" = "Aucun préréglage manuel créé";
+"create_manual_eq_description" = "Créez un préréglage d'égaliseur 16 bandes personnalisé avec des curseurs ajustables";
+"create_manual_16band_eq" = "Créer un EQ Manuel 16 Bandes";
+"manual_16band_eq" = "EQ Manuel 16 Bandes";
+"manual_16band_description" = "Crée un égaliseur 16 bandes avec des fréquences ISO standard que vous pouvez ajuster manuellement";
+"adjust_bands_after_creation" = "Vous pourrez ajuster toutes les bandes de fréquence après la création";
+"frequency_bands" = "Bandes de Fréquence";
+"edit_equalizer" = "Modifier l'Égaliseur";
+"reset_to_flat" = "Réinitialiser à Plat";
+
+/* Imported GraphicEQ Presets */
 "imported_presets" = "Préréglages Importés";
 "no_presets_imported" = "Aucun préréglage importé";
 "import_graphiceq_description" = "Importez des fichiers GraphicEQ .txt pour commencer";
 "imported_graphiceq" = "GraphicEQ Importé";
 "import_graphiceq_file" = "Importer un Fichier GraphicEQ";
+
+/* General EQ Settings */
 "global_settings" = "Réglages Globaux";
 "global_gain" = "Gain Global";
 "global_gain_description" = "Ajustez le niveau de volume global après traitement EQ";
@@ -182,8 +198,12 @@
 "frequency_gain_pair_description" = "Chaque paire représente la fréquence (Hz) et le gain (dB)";
 "delete" = "Supprimer";
 "export" = "Exporter";
+"edit" = "Modifier";
 "cancel" = "Annuler";
 "done" = "Terminé";
+"save" = "Enregistrer";
+"create" = "Créer";
+"preset_info" = "Infos du Préréglage";
 
 /* GraphicEQ Import View */
 "import_graphiceq" = "Importer GraphicEQ";
@@ -206,6 +226,7 @@
 /* Error Messages */
 "failed_to_import" = "Échec de l'importation : %@";
 "file_import_failed" = "Échec de l'importation du fichier : %@";
+"failed_to_create" = "Échec de la création : %@";
 "failed_to_export" = "Échec de l'exportation du préréglage";
 "failed_to_delete" = "Échec de la suppression du préréglage";
 

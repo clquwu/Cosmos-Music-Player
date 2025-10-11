@@ -169,11 +169,27 @@
 "graphic_equalizer" = "Graphic Equalizer";
 "enable_equalizer" = "Enable Equalizer";
 "enable_disable_eq_description" = "Enable or disable the graphic equalizer";
+
+/* Manual EQ Presets */
+"manual_eq_presets" = "Manual 16-Band Presets";
+"no_manual_presets_created" = "No manual presets created";
+"create_manual_eq_description" = "Create a custom 16-band equalizer preset with adjustable sliders";
+"create_manual_16band_eq" = "Create Manual 16-Band EQ";
+"manual_16band_eq" = "Manual 16-Band EQ";
+"manual_16band_description" = "Creates a 16-band equalizer with standard ISO frequencies that you can adjust manually";
+"adjust_bands_after_creation" = "You'll be able to adjust all frequency bands after creation";
+"frequency_bands" = "Frequency Bands";
+"edit_equalizer" = "Edit Equalizer";
+"reset_to_flat" = "Reset to Flat";
+
+/* Imported GraphicEQ Presets */
 "imported_presets" = "Imported Presets";
 "no_presets_imported" = "No presets imported";
 "import_graphiceq_description" = "Import GraphicEQ .txt files to get started";
 "imported_graphiceq" = "Imported GraphicEQ";
 "import_graphiceq_file" = "Import GraphicEQ File";
+
+/* General EQ Settings */
 "global_settings" = "Global Settings";
 "global_gain" = "Global Gain";
 "global_gain_description" = "Adjust the overall volume level after EQ processing";
@@ -182,8 +198,12 @@
 "frequency_gain_pair_description" = "Each pair represents frequency (Hz) and gain (dB)";
 "delete" = "Delete";
 "export" = "Export";
+"edit" = "Edit";
 "cancel" = "Cancel";
 "done" = "Done";
+"save" = "Save";
+"create" = "Create";
+"preset_info" = "Preset Info";
 
 /* GraphicEQ Import View */
 "import_graphiceq" = "Import GraphicEQ";
@@ -206,6 +226,7 @@
 /* Error Messages */
 "failed_to_import" = "Failed to import: %@";
 "file_import_failed" = "File import failed: %@";
+"failed_to_create" = "Failed to create: %@";
 "failed_to_export" = "Failed to export preset";
 "failed_to_delete" = "Failed to delete preset";
 

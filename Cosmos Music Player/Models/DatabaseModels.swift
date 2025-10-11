@@ -135,11 +135,17 @@ struct PlaylistItem: Codable, FetchableRecord, PersistableRecord {
 
 // MARK: - Graphic EQ Models
 
+enum EQPresetType: String, Codable {
+    case imported = "imported"    // Imported GraphicEQ with variable bands
+    case manual = "manual"        // Manual 16-band EQ
+}
+
 struct EQPreset: Codable, FetchableRecord, PersistableRecord, Identifiable {
     var id: Int64?
     var name: String
     var isBuiltIn: Bool
     var isActive: Bool
+    var presetType: EQPresetType
     var createdAt: Int64
     var updatedAt: Int64
 
@@ -151,6 +157,7 @@ struct EQPreset: Codable, FetchableRecord, PersistableRecord, Identifiable {
         case id, name
         case isBuiltIn = "is_built_in"
         case isActive = "is_active"
+        case presetType = "preset_type"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }

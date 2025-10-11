@@ -214,11 +214,27 @@ struct Localized {
     static let graphicEqualizer = "graphic_equalizer".localized
     static let enableEqualizer = "enable_equalizer".localized
     static let enableDisableEqDescription = "enable_disable_eq_description".localized
+
+    // Manual EQ Presets
+    static let manualEQPresets = "manual_eq_presets".localized
+    static let noManualPresetsCreated = "no_manual_presets_created".localized
+    static let createManualEQDescription = "create_manual_eq_description".localized
+    static let createManual16BandEQ = "create_manual_16band_eq".localized
+    static let manual16BandEQ = "manual_16band_eq".localized
+    static let manual16BandDescription = "manual_16band_description".localized
+    static let adjustBandsAfterCreation = "adjust_bands_after_creation".localized
+    static let frequencyBands = "frequency_bands".localized
+    static let editEqualizer = "edit_equalizer".localized
+    static let resetToFlat = "reset_to_flat".localized
+
+    // Imported GraphicEQ Presets
     static let importedPresets = "imported_presets".localized
     static let noPresetsImported = "no_presets_imported".localized
     static let importGraphicEQDescription = "import_graphiceq_description".localized
     static let importedGraphicEQ = "imported_graphiceq".localized
     static let importGraphicEQFile = "import_graphiceq_file".localized
+
+    // General EQ Settings
     static let globalSettings = "global_settings".localized
     static let globalGain = "global_gain".localized
     static let globalGainDescription = "global_gain_description".localized
@@ -227,8 +243,12 @@ struct Localized {
     static let frequencyGainPairDescription = "frequency_gain_pair_description".localized
     static let eqExport = "export".localized
     static let eqDelete = "delete".localized
+    static let eqEdit = "edit".localized
     static let eqCancel = "cancel".localized
     static let eqDone = "done".localized
+    static let eqSave = "save".localized
+    static let eqCreate = "create".localized
+    static let presetInfo = "preset_info".localized
 
     // GraphicEQ Import View
     static let importGraphicEQ = "import_graphiceq".localized
@@ -255,6 +275,10 @@ struct Localized {
 
     static func fileImportFailed(_ error: String) -> String {
         return "file_import_failed".localized(with: error)
+    }
+
+    static func failedToCreate(_ error: String) -> String {
+        return "failed_to_create".localized(with: error)
     }
 
     static let failedToExport = "failed_to_export".localized
