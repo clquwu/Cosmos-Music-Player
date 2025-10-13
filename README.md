@@ -550,11 +550,9 @@ DISCOGS_CONSUMER_SECRET=your_discogs_consumer_secret
 - Create a new application
 - Copy Consumer Key and Consumer Secret to your `.env` file
 
-## Appendix 📋
-
-We use Spotify and Discogs to fetch artist details. We are not related to either of their services in any financial way - we just want to offer you the best experience possible.
-
-The logo was created by **Zerrotic** (zerrotic on Discord).
+### Credits 🎨
+- **Logo Design**: Created by **Zerrotic** (zerrotic on Discord)
+- **App Store Screenshots**: Designed by **[MrVedakkaN](https://www.linkedin.com/in/vimalothomas/)** / (mrvedakkan on Discord)
 
 ## Authors 👥
 
