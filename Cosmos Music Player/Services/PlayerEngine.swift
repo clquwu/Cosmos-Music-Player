@@ -1102,20 +1102,31 @@ class PlayerEngine: NSObject, ObservableObject {
         
         cancelPendingCompletions()
         playerNode.stop()
-        
+
         print("🔊 Audio format - Sample Rate: \(audioFile.processingFormat.sampleRate), Channels: \(audioFile.processingFormat.channelCount)")
         print("🔊 Audio file length: \(audioFile.length) frames")
-        
+
         // Check if the file length is reasonable
         guard audioFile.length > 0 && audioFile.length < 1_000_000_000 else {
             print("❌ Invalid audio file length: \(audioFile.length)")
             return
         }
-        
+
+        // IMPORTANT: Ensure audio engine is running BEFORE scheduling
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                print("✅ Audio engine started before scheduling")
+            } catch {
+                print("❌ Failed to start audio engine: \(error)")
+                return
+            }
+        }
+
         // Preserve current seek offset and playback time when resuming
         let currentPosition = playbackTime
         let startFrame = AVAudioFramePosition(currentPosition * audioFile.processingFormat.sampleRate)
-        
+
         // Schedule appropriate segment based on current position
         if startFrame > 0 && startFrame < audioFile.length {
             // Continue from current position
@@ -1138,19 +1149,8 @@ class PlayerEngine: NSObject, ObservableObject {
                 print("✅ Starting playback from beginning")
             }
         }
-        
+
         print("✅ Audio segment scheduled successfully")
-        
-        // Ensure audio engine is running before playing
-        if !audioEngine.isRunning {
-            do {
-                try audioEngine.start()
-                print("✅ Audio engine started before playback")
-            } catch {
-                print("❌ Failed to start audio engine: \(error)")
-                return
-            }
-        }
         
         // Set up audio session notifications only when needed
         ensureAudioSessionNotificationsSetup()
