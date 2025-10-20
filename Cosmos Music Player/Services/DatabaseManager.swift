@@ -20,7 +20,14 @@ class DatabaseManager: @unchecked Sendable {
     private func setupDatabase() {
         do {
             let databaseURL = try getDatabaseURL()
-            dbWriter = try DatabaseQueue(path: databaseURL.path)
+            // Use DatabasePool instead of DatabaseQueue to support concurrent reads
+            // This is essential for CarPlay and other multi-threaded scenarios
+            var configuration = Configuration()
+            configuration.prepareDatabase { db in
+                // Enable foreign key constraints
+                try db.execute(sql: "PRAGMA foreign_keys = ON")
+            }
+            dbWriter = try DatabasePool(path: databaseURL.path, configuration: configuration)
             try createTables()
             try migrateDatabaseIfNeeded()
         } catch {

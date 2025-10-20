@@ -74,54 +74,110 @@ class AppCoordinator: ObservableObject {
     }
     
     func initialize() async {
+        print("🚀 AppCoordinator.initialize() started")
+
         // Check iCloud status
         let status = await checkiCloudStatus()
         iCloudStatus = status
-        
+
         // Notify CloudDownloadManager about status change
         NotificationCenter.default.post(name: NSNotification.Name("iCloudAuthStatusChanged"), object: nil)
-        
+
+        // Check if we should auto-scan based on last scan date
+        var settings = DeleteSettings.load()
+        print("📅 Current lastLibraryScanDate: \(settings.lastLibraryScanDate?.description ?? "nil")")
+        let shouldAutoScan = shouldPerformAutoScan(lastScanDate: settings.lastLibraryScanDate)
+
+        if shouldAutoScan {
+            print("🔄 App launched after long time - starting automatic library scan")
+        } else {
+            print("⏭️ Recent app launch - skipping automatic scan (use manual sync button)")
+        }
+
         switch status {
         case .available:
             isiCloudAvailable = true
             await forceiCloudFolderCreation()
             await syncFavorites()
-            await startLibraryIndexing()
+
+            // Only auto-scan if it's been a while or never scanned
+            if shouldAutoScan {
+                await startLibraryIndexing()
+                settings.lastLibraryScanDate = Date()
+                settings.save()
+            }
             print("App initialized with iCloud sync")
-            
+
         case .notSignedIn:
             isiCloudAvailable = false
             initializationError = AppCoordinatorError.iCloudNotSignedIn
             // Still initialize in local mode for functionality
-            await startOfflineLibraryIndexing()
+            if shouldAutoScan {
+                await startOfflineLibraryIndexing()
+                settings.lastLibraryScanDate = Date()
+                settings.save()
+            }
             print("App initialized in local mode - iCloud not signed in")
-            
+
         case .containerUnavailable, .error(_):
             isiCloudAvailable = false
             initializationError = AppCoordinatorError.iCloudContainerInaccessible
             // Still initialize in local mode for functionality
-            await startOfflineLibraryIndexing()
+            if shouldAutoScan {
+                await startOfflineLibraryIndexing()
+                settings.lastLibraryScanDate = Date()
+                settings.save()
+            }
             print("App initialized in local mode - iCloud container unavailable")
-            
+
         case .authenticationRequired:
             isiCloudAvailable = false
             showSyncAlert = true
-            await startOfflineLibraryIndexing()
+            if shouldAutoScan {
+                await startOfflineLibraryIndexing()
+                settings.lastLibraryScanDate = Date()
+                settings.save()
+            }
             print("App initialized in local mode - iCloud authentication required")
-            
+
         case .offline:
             isiCloudAvailable = false
             // No error - this is true offline mode
-            await startOfflineLibraryIndexing()
+            if shouldAutoScan {
+                await startOfflineLibraryIndexing()
+                settings.lastLibraryScanDate = Date()
+                settings.save()
+            }
             print("App initialized in offline mode")
         }
-        
+
         // Restore UI state only to show user what was playing without interrupting other apps
         Task {
             await playerEngine.restoreUIStateOnly()
         }
-        
+
         isInitialized = true
+    }
+
+    private func shouldPerformAutoScan(lastScanDate: Date?) -> Bool {
+        // If never scanned before, definitely scan
+        guard let lastScanDate = lastScanDate else {
+            print("🆕 Never scanned before - will perform scan")
+            return true
+        }
+
+        // Check if it's been more than 1 hour since last scan
+        // This prevents scanning when app was just backgrounded/resumed
+        let hoursSinceLastScan = Date().timeIntervalSince(lastScanDate) / 3600
+        let shouldScan = hoursSinceLastScan >= 1.0
+
+        if shouldScan {
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - will scan")
+        } else {
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - skipping")
+        }
+
+        return shouldScan
     }
     
     private func checkiCloudStatus() async -> iCloudStatus {

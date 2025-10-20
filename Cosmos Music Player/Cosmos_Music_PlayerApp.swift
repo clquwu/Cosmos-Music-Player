@@ -124,10 +124,38 @@ struct Cosmos_Music_PlayerApp: App {
 
             // Check for new shared files and refresh library
             await LibraryIndexer.shared.copyFilesFromSharedContainer()
+
+            // Only auto-scan if it's been a long time since last scan
             if !LibraryIndexer.shared.isIndexing {
-                LibraryIndexer.shared.start()
+                let settings = DeleteSettings.load()
+                if shouldPerformAutoScan(lastScanDate: settings.lastLibraryScanDate) {
+                    print("🔄 Foreground: Starting library scan (been a while since last scan)")
+                    LibraryIndexer.shared.start()
+                } else {
+                    print("⏭️ Foreground: Skipping auto-scan (use manual sync button)")
+                }
             }
         }
+    }
+
+    private func shouldPerformAutoScan(lastScanDate: Date?) -> Bool {
+        // If never scanned before, definitely scan
+        guard let lastScanDate = lastScanDate else {
+            print("🆕 Never scanned before - will perform scan")
+            return true
+        }
+
+        // Check if it's been more than 1 hour since last scan
+        let hoursSinceLastScan = Date().timeIntervalSince(lastScanDate) / 3600
+        let shouldScan = hoursSinceLastScan >= 1.0
+
+        if shouldScan {
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - will scan")
+        } else {
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - skipping")
+        }
+
+        return shouldScan
     }
     
     private func handleWillResignActive() {
@@ -144,14 +172,14 @@ struct Cosmos_Music_PlayerApp: App {
     
     private func handleOpenURL(_ url: URL) {
         print("🔗 Received URL: \(url.absoluteString)")
-        
+
         guard url.scheme == "cosmos-music" else {
             print("❌ Unknown URL scheme: \(url.scheme ?? "nil")")
             return
         }
-        
+
         if url.host == "refresh" {
-            print("📁 URL triggered library refresh")
+            print("📁 URL triggered library refresh - this is a manual refresh so always scan")
             Task { @MainActor in
                 await LibraryIndexer.shared.copyFilesFromSharedContainer()
                 if !LibraryIndexer.shared.isIndexing {

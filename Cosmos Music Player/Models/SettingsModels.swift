@@ -57,6 +57,7 @@ struct DeleteSettings: Codable {
     var backgroundColorChoice: BackgroundColor = .violet
     var forceDarkMode: Bool = false
     var dsdPlaybackMode: DSDPlaybackMode = .pcm
+    var lastLibraryScanDate: Date? = nil
 
     static func load() -> DeleteSettings {
         guard let data = UserDefaults.standard.data(forKey: "DeleteSettings"),
