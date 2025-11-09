@@ -113,7 +113,7 @@ struct SettingsView: View {
                     HStack {
                         Text(Localized.version)
                         Spacer()
-                        Text("1.0.2")
+                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown")
                             .foregroundColor(.secondary)
                     }
                     

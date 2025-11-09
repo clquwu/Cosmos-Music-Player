@@ -315,4 +315,8 @@ struct Localized {
     static let sortNameZA = "sort_name_za".localized
     static let sortSizeLargest = "sort_size_largest".localized
     static let sortSizeSmallest = "sort_size_smallest".localized
+
+    // MARK: - Queue Actions
+    static let playNext = "play_next".localized
+    static let addToQueue = "add_to_queue".localized
 }

@@ -294,21 +294,42 @@ class DatabaseManager: @unchecked Sendable {
     }
     
     private func areSimilarTitles(_ title1: String, _ title2: String) -> Bool {
-        let clean1 = title1.lowercased().replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
-        let clean2 = title2.lowercased().replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
-        
-        // If they're identical after removing all non-alphanumeric characters, consider them the same
+        // Use folding to handle diacritics while preserving all Unicode characters
+        let clean1 = title1.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+            .components(separatedBy: .punctuationCharacters).joined()
+            .components(separatedBy: .whitespaces).joined()
+        let clean2 = title2.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+            .components(separatedBy: .punctuationCharacters).joined()
+            .components(separatedBy: .whitespaces).joined()
+
+        // If they're identical after removing punctuation and whitespace, consider them the same
         if clean1 == clean2 {
             return true
         }
-        
+
+        // Only check substring matching if the strings are both non-empty and share the same script
+        // This prevents Thai albums from matching English albums
+        guard !clean1.isEmpty && !clean2.isEmpty else {
+            return false
+        }
+
+        // Check if both strings use similar character sets (prevent cross-script matching)
+        let hasLatin1 = clean1.rangeOfCharacter(from: .letters) != nil && clean1.rangeOfCharacter(from: CharacterSet(charactersIn: "a"..."z")) != nil
+        let hasLatin2 = clean2.rangeOfCharacter(from: .letters) != nil && clean2.rangeOfCharacter(from: CharacterSet(charactersIn: "a"..."z")) != nil
+
+        // Only allow substring matching if both are Latin or both are non-Latin
+        if hasLatin1 != hasLatin2 {
+            return false
+        }
+
         // Check if one is a substring of the other (for cases like "Album" vs "Album - Extended")
         if clean1.contains(clean2) || clean2.contains(clean1) {
             let lengthDiff = abs(clean1.count - clean2.count)
-            // Only consider similar if the difference is small
-            return lengthDiff <= 10
+            // Only consider similar if the difference is small (less than 30% difference)
+            let maxLength = max(clean1.count, clean2.count)
+            return lengthDiff <= max(3, maxLength / 3)
         }
-        
+
         return false
     }
     

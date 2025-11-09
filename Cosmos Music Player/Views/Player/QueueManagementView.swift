@@ -53,7 +53,7 @@ struct QueueManagementView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List {
-                            ForEach(Array(playerEngine.playbackQueue.enumerated()), id: \.element.stableId) { index, track in
+                            ForEach(Array(playerEngine.playbackQueue.enumerated()), id: \.offset) { index, track in
                                 QueueTrackRow(
                                     track: track,
                                     index: index,

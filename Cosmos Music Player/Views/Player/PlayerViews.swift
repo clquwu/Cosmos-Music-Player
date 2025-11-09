@@ -123,15 +123,19 @@ struct PlayerView: View {
                                     }
                                 }
                                 .offset(x: dragOffset)
-                                .animation(.easeOut(duration: 0.3), value: dragOffset)
+                                .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
+                                .onTapGesture {
+                                    // Minimize player when tapping artwork
+                                    NotificationCenter.default.post(name: NSNotification.Name("MinimizePlayer"), object: nil)
+                                }
                                 
                                 // Previous track image (only visible when swiping right)
-                                if dragOffset > 0, previousArtwork != nil {
+                                if previousArtwork != nil {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 12)
                                             .fill(Color.gray.opacity(0.1))
                                             .frame(width: artworkSize, height: artworkSize)
-                                        
+
                                         if let artwork = previousArtwork {
                                             Image(uiImage: artwork)
                                                 .resizable()
@@ -145,16 +149,16 @@ struct PlayerView: View {
                                         }
                                     }
                                     .offset(x: dragOffset - geometry.size.width) // Position from left screen edge
-                                    .animation(.easeOut(duration: 0.3), value: dragOffset)
+                                    .opacity(dragOffset > 0 ? 1 : 0)
                                 }
-                                
+
                                 // Next track image (only visible when swiping left)
-                                if dragOffset < 0, nextArtwork != nil {
+                                if nextArtwork != nil {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 12)
                                             .fill(Color.gray.opacity(0.1))
                                             .frame(width: artworkSize, height: artworkSize)
-                                        
+
                                         if let artwork = nextArtwork {
                                             Image(uiImage: artwork)
                                                 .resizable()
@@ -168,7 +172,7 @@ struct PlayerView: View {
                                         }
                                     }
                                     .offset(x: dragOffset + geometry.size.width) // Position from right screen edge
-                                    .animation(.easeOut(duration: 0.3), value: dragOffset)
+                                    .opacity(dragOffset < 0 ? 1 : 0)
                                 }
                             }
                             .frame(width: geometry.size.width, height: artworkSize)
@@ -185,40 +189,49 @@ struct PlayerView: View {
                                 }
                                 .onEnded { value in
                                     let threshold: CGFloat = 80
-                                    
-                                    if value.translation.width > threshold {
+                                    let velocity = value.predictedEndTranslation.width - value.translation.width
+
+                                    if value.translation.width > threshold || velocity > 500 {
                                         // Swipe right - previous track
                                         isAnimating = true
-                                        withAnimation(.easeInOut(duration: 0.3)) {
-                                            dragOffset = UIScreen.main.bounds.width // Move to right edge
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                            dragOffset = UIScreen.main.bounds.width
                                         }
-                                        
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                                             Task {
                                                 await playerEngine.previousTrack()
                                             }
-                                            dragOffset = 0
-                                            isAnimating = false
+                                            withAnimation(.spring(response: 0.25, dampingFraction: 1)) {
+                                                dragOffset = 0
+                                            }
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                isAnimating = false
+                                            }
                                         }
-                                        
-                                    } else if value.translation.width < -threshold {
+
+                                    } else if value.translation.width < -threshold || velocity < -500 {
                                         // Swipe left - next track
                                         isAnimating = true
-                                        withAnimation(.easeInOut(duration: 0.3)) {
-                                            dragOffset = -UIScreen.main.bounds.width // Move to left edge
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                            dragOffset = -UIScreen.main.bounds.width
                                         }
-                                        
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                                             Task {
                                                 await playerEngine.nextTrack()
                                             }
-                                            dragOffset = 0
-                                            isAnimating = false
+                                            withAnimation(.spring(response: 0.25, dampingFraction: 1)) {
+                                                dragOffset = 0
+                                            }
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                isAnimating = false
+                                            }
                                         }
-                                        
+
                                     } else {
-                                        // Return to center
-                                        withAnimation(.easeOut(duration: 0.2)) {
+                                        // Return to center with spring
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                             dragOffset = 0
                                         }
                                     }
@@ -758,6 +771,13 @@ struct MiniPlayerView: View {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
                         isExpanded = false
                         dragOffset = 0 // Reset drag offset immediately
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MinimizePlayer"))) { _ in
+                    // Minimize the player when artwork is tapped
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                        isExpanded = false
+                        dragOffset = 0
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in

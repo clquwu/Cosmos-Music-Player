@@ -647,13 +647,23 @@ struct TrackListView: View {
     let playlist: Playlist?
     let isEditMode: Bool
     @EnvironmentObject private var appCoordinator: AppCoordinator
+    @StateObject private var playerEngine = PlayerEngine.shared
     @State private var sortOption: TrackSortOption = .dateNewest
     @State private var showSortMenu = false
+    @State private var recentlyActedTracks: Set<String> = []
 
     init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false) {
         self.tracks = tracks
         self.playlist = playlist
         self.isEditMode = isEditMode
+    }
+
+    private func markAsActed(_ trackId: String) {
+        recentlyActedTracks.insert(trackId)
+        // Remove after 1 second so user can swipe again if needed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            recentlyActedTracks.remove(trackId)
+        }
     }
 
     private var sortedTracks: [Track] {
@@ -718,6 +728,28 @@ struct TrackListView: View {
                     playlist: playlist,
                     showDirectDeleteButton: playlist != nil && isEditMode
                 )
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    if !recentlyActedTracks.contains(track.stableId) {
+                        Button {
+                            playerEngine.insertNext(track)
+                            markAsActed(track.stableId)
+                        } label: {
+                            Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward")
+                        }
+                        .tint(DeleteSettings.load().backgroundColorChoice.color)
+                    }
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    if !recentlyActedTracks.contains(track.stableId) {
+                        Button {
+                            playerEngine.addToQueue(track)
+                            markAsActed(track.stableId)
+                        } label: {
+                            Label(Localized.addToQueue, systemImage: "text.append")
+                        }
+                        .tint(.blue)
+                    }
+                }
                 .background(
                     RoundedRectangle(cornerRadius: 12)
                         .fill(.ultraThinMaterial)

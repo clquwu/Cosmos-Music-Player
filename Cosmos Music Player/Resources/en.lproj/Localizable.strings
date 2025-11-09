@@ -253,3 +253,7 @@
 "sort_name_za" = "Name (Z-A)";
 "sort_size_largest" = "Size (Largest)";
 "sort_size_smallest" = "Size (Smallest)";
+
+/* Queue Actions */
+"play_next" = "Play Next";
+"add_to_queue" = "Add to Queue";
