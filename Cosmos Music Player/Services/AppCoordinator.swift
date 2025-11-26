@@ -606,7 +606,12 @@ class AppCoordinator: ObservableObject {
         try databaseManager.removeFromPlaylist(playlistId: playlistId, trackStableId: trackStableId)
         syncPlaylistsToCloud()
     }
-    
+
+    func reorderPlaylistItems(playlistId: Int64, from sourceIndex: Int, to destinationIndex: Int) throws {
+        try databaseManager.reorderPlaylistItems(playlistId: playlistId, from: sourceIndex, to: destinationIndex)
+        syncPlaylistsToCloud()
+    }
+
     func createPlaylist(title: String) throws -> Playlist {
         let playlist = try databaseManager.createPlaylist(title: title)
         syncPlaylistsToCloud()

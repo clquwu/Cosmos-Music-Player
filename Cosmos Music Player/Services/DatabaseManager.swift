@@ -617,7 +617,42 @@ class DatabaseManager: @unchecked Sendable {
                 .deleteAll(db)
         }
     }
-    
+
+    func reorderPlaylistItems(playlistId: Int64, from sourceIndex: Int, to destinationIndex: Int) throws {
+        print("🔄 Database: Reordering playlist items from \(sourceIndex) to \(destinationIndex)")
+        try write { db in
+            // Get all playlist items ordered by position
+            let items = try PlaylistItem
+                .filter(Column("playlist_id") == playlistId)
+                .order(Column("position"))
+                .fetchAll(db)
+
+            guard sourceIndex >= 0 && sourceIndex < items.count &&
+                  destinationIndex >= 0 && destinationIndex < items.count else {
+                print("❌ Invalid indices for reordering")
+                return
+            }
+
+            // Remove the item from the source position
+            var mutableItems = items
+            let movedItem = mutableItems.remove(at: sourceIndex)
+
+            // Insert at the destination position
+            mutableItems.insert(movedItem, at: destinationIndex)
+
+            // Update all positions in the database
+            for (index, item) in mutableItems.enumerated() {
+                _ = try PlaylistItem
+                    .filter(Column("playlist_id") == playlistId &&
+                           Column("track_stable_id") == item.trackStableId &&
+                           Column("position") == item.position)
+                    .updateAll(db, Column("position").set(to: index))
+            }
+
+            print("✅ Successfully reordered playlist items")
+        }
+    }
+
     func getPlaylistItems(playlistId: Int64) throws -> [PlaylistItem] {
         return try read { db in
             return try PlaylistItem

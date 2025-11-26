@@ -1,4 +1,5 @@
 import SwiftUI
+import GRDB
 
 
 struct PlaylistsScreen: View {
@@ -313,42 +314,563 @@ struct PlaylistDetailScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var tracks: [Track] = []
     @State private var isEditMode: Bool = false
+    @State private var artworks: [UIImage] = []
+    @State private var settings = DeleteSettings.load()
+    @State private var sortOption: TrackSortOption = .dateNewest
+    @State private var showSortMenu = false
+    @State private var recentlyActedTracks: Set<String> = []
+    @StateObject private var artworkManager = ArtworkManager.shared
+
+    private var playerEngine: PlayerEngine {
+        appCoordinator.playerEngine
+    }
+
+    private func markAsActed(_ trackId: String) {
+        recentlyActedTracks.insert(trackId)
+        // Remove after 1 second so user can swipe again if needed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            recentlyActedTracks.remove(trackId)
+        }
+    }
+
+    private var sortedTracks: [Track] {
+        // Filter out incompatible formats when connected to CarPlay
+        let filteredTracks: [Track]
+        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
+            filteredTracks = tracks.filter { track in
+                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+                return !incompatibleFormats.contains(ext)
+            }
+        } else {
+            filteredTracks = tracks
+        }
+
+        switch sortOption {
+        case .dateNewest:
+            return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+        case .dateOldest:
+            return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+        case .nameAZ:
+            return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        case .nameZA:
+            return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+        case .sizeLargest:
+            return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
+        case .sizeSmallest:
+            return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
+        }
+    }
 
     var body: some View {
-        TrackListView(tracks: tracks, playlist: playlist, isEditMode: isEditMode)
-            .background(ScreenSpecificBackgroundView(screen: .playlistDetail))
-            .navigationTitle(playlist.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(isEditMode ? Localized.done : Localized.edit) {
-                        withAnimation {
-                            isEditMode.toggle()
+        ZStack {
+            ScreenSpecificBackgroundView(screen: .playlistDetail)
+
+            List {
+                // Header section with artwork and buttons
+                Section {
+                    VStack(spacing: 16) {
+                        // Four-song grid artwork
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color.gray.opacity(0.2))
+                                .frame(width: 250, height: 250)
+
+                            if tracks.count >= 4 {
+                                // 2x2 mashup for 4+ songs
+                                VStack(spacing: 2) {
+                                    HStack(spacing: 2) {
+                                        artworkView(at: 0, size: 124)
+                                        artworkView(at: 1, size: 124)
+                                    }
+                                    HStack(spacing: 2) {
+                                        artworkView(at: 2, size: 124)
+                                        artworkView(at: 3, size: 124)
+                                    }
+                                }
+                                .frame(width: 250, height: 250)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                            } else if !tracks.isEmpty {
+                                // Single artwork for 1-3 songs
+                                artworkView(at: 0, size: 250)
+                            } else {
+                                // Default icon for empty playlist
+                                Image(systemName: "music.note.list")
+                                    .font(.system(size: 50))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                        VStack(spacing: 8) {
+                            Text(playlist.title)
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .multilineTextAlignment(.center)
+
+                            Text(Localized.songsCount(tracks.count))
+                                .font(.title3)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+
+                        // Play and Shuffle buttons
+                        HStack(spacing: 12) {
+                            Button {
+                                if let first = sortedTracks.first {
+                                    Task {
+                                        await playerEngine.playTrack(first, queue: sortedTracks)
+                                    }
+                                }
+                            } label: {
+                                HStack {
+                                    Image(systemName: "play.fill")
+                                    Text(Localized.play)
+                                }
+                                .font(.title3.weight(.semibold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
+                                .background(settings.backgroundColorChoice.color)
+                                .cornerRadius(28)
+                            }
+                            .disabled(tracks.isEmpty)
+
+                            Button {
+                                guard !sortedTracks.isEmpty else { return }
+                                let shuffled = sortedTracks.shuffled()
+                                Task {
+                                    await playerEngine.playTrack(shuffled[0], queue: shuffled)
+                                }
+                            } label: {
+                                HStack {
+                                    Image(systemName: "shuffle")
+                                    Text(Localized.shuffle)
+                                }
+                                .font(.title3.weight(.semibold))
+                                .foregroundColor(settings.backgroundColorChoice.color)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
+                                .background(settings.backgroundColorChoice.color.opacity(0.1))
+                                .cornerRadius(28)
+                            }
+                            .disabled(tracks.isEmpty)
                         }
                     }
-                    .disabled(tracks.isEmpty)
+                    .padding(.vertical)
+                }
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets())
+
+                // Track list section
+                if !sortedTracks.isEmpty {
+                    Section {
+                        ForEach(Array(sortedTracks.enumerated()), id: \.offset) { index, track in
+                            PlaylistTrackRowView(
+                                track: track,
+                                trackNumber: index + 1,
+                                playlist: playlist,
+                                isEditMode: isEditMode,
+                                onTap: {
+                                    Task {
+                                        guard let playlistId = playlist.id else { return }
+                                        try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
+                                        try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+                                        await playerEngine.playTrack(track, queue: sortedTracks)
+                                    }
+                                }
+                            )
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                if !recentlyActedTracks.contains(track.stableId) {
+                                    Button {
+                                        playerEngine.insertNext(track)
+                                        markAsActed(track.stableId)
+                                    } label: {
+                                        Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward")
+                                    }
+                                    .tint(settings.backgroundColorChoice.color)
+                                }
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                if !recentlyActedTracks.contains(track.stableId) {
+                                    Button {
+                                        playerEngine.addToQueue(track)
+                                        markAsActed(track.stableId)
+                                    } label: {
+                                        Label(Localized.addToQueue, systemImage: "text.append")
+                                    }
+                                    .tint(.blue)
+                                }
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(index < sortedTracks.count - 1 ? .visible : .hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        }
+                        .onMove { source, destination in
+                            guard let playlistId = playlist.id else { return }
+                            do {
+                                // Calculate actual destination index
+                                let sourceIndex = source.first ?? 0
+                                let destinationIndex = sourceIndex < destination ? destination - 1 : destination
+
+                                try appCoordinator.reorderPlaylistItems(
+                                    playlistId: playlistId,
+                                    from: sourceIndex,
+                                    to: destinationIndex
+                                )
+
+                                // Reload tracks from database to reflect new order
+                                loadPlaylistTracks()
+                            } catch {
+                                print("Failed to reorder tracks: \(error)")
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text(Localized.songs)
+                                .font(.title3.weight(.bold))
+                                .foregroundColor(.primary)
+                            Spacer()
+
+                            // Sort menu button
+                            Menu {
+                                ForEach(TrackSortOption.allCases, id: \.self) { option in
+                                    Button(action: {
+                                        sortOption = option
+                                        saveSortPreference()
+                                    }) {
+                                        HStack {
+                                            Text(option.localizedString)
+                                            if sortOption == option {
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .foregroundColor(settings.backgroundColorChoice.color)
+                            }
+                        }
+                        .textCase(nil)
+                        .padding(.horizontal, 16)
+                    }
+                } else {
+                    Section {
+                        VStack(spacing: 16) {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 40))
+                                .foregroundColor(.secondary)
+
+                            Text(Localized.noSongsFound)
+                                .font(.headline)
+
+                            Text(Localized.yourMusicWillAppearHere)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                    }
                 }
             }
-            .onAppear {
-                loadPlaylistTracks()
+            .listStyle(PlainListStyle())
+            .scrollContentBackground(.hidden)
+            .environment(\.editMode, .constant(isEditMode ? .active : .inactive))
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(isEditMode ? Localized.done : Localized.edit) {
+                    withAnimation {
+                        isEditMode.toggle()
+                    }
+                }
+                .disabled(tracks.isEmpty)
             }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
-                loadPlaylistTracks()
-            }
+        }
+        .onAppear {
+            loadPlaylistTracks()
+            loadSortPreference()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            loadPlaylistTracks()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
+            settings = DeleteSettings.load()
+        }
     }
-    
+
+    @ViewBuilder
+    private func artworkView(at index: Int, size: CGFloat) -> some View {
+        if index < artworks.count {
+            Image(uiImage: artworks[index])
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size, height: size)
+                .clipped()
+        } else if index < tracks.count {
+            RoundedRectangle(cornerRadius: 0)
+                .fill(Color.gray.opacity(0.3))
+                .frame(width: size, height: size)
+                .overlay(
+                    Image(systemName: "music.note")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: size/4))
+                )
+        }
+    }
+
     private func loadPlaylistTracks() {
         guard let playlistId = playlist.id else { return }
-        
+
         do {
             let playlistItems = try appCoordinator.databaseManager.getPlaylistItems(playlistId: playlistId)
             let allTracks = try appCoordinator.getAllTracks()
-            
+
             tracks = playlistItems.compactMap { item in
                 allTracks.first { $0.stableId == item.trackStableId }
             }
+
+            // Load artworks for the first 4 tracks
+            Task {
+                await loadArtworks()
+            }
         } catch {
             print("Failed to load playlist tracks: \(error)")
+        }
+    }
+
+    private func loadArtworks() async {
+        var loadedArtworks: [UIImage] = []
+        let tracksToLoad = Array(tracks.prefix(4))
+
+        for track in tracksToLoad {
+            if let artwork = await artworkManager.getArtwork(for: track) {
+                loadedArtworks.append(artwork)
+            }
+        }
+
+        await MainActor.run {
+            artworks = loadedArtworks
+        }
+    }
+
+    private func loadSortPreference() {
+        guard let playlistId = playlist.id else { return }
+        let key = "sortPreference_playlist_\(playlistId)"
+        if let savedRawValue = UserDefaults.standard.string(forKey: key),
+           let saved = TrackSortOption(rawValue: savedRawValue) {
+            sortOption = saved
+        }
+    }
+
+    private func saveSortPreference() {
+        guard let playlistId = playlist.id else { return }
+        let key = "sortPreference_playlist_\(playlistId)"
+        UserDefaults.standard.set(sortOption.rawValue, forKey: key)
+    }
+}
+
+struct PlaylistTrackRowView: View {
+    let track: Track
+    let trackNumber: Int
+    let playlist: Playlist?
+    let isEditMode: Bool
+    let onTap: () -> Void
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @State private var isFavorite = false
+    @State private var showPlaylistDialog = false
+    @State private var showDeleteConfirmation = false
+    @State private var deleteSettings = DeleteSettings.load()
+
+    var body: some View {
+        Button(action: {
+            if !isEditMode {
+                onTap()
+            }
+        }) {
+            HStack(spacing: 8) {
+                // Track number
+                Text("\(trackNumber)")
+                    .font(.body)
+                    .fontWeight(.medium)
+                    .foregroundColor(.secondary)
+                    .frame(width: 20, alignment: .leading)
+
+                // Track info
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(track.title)
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .multilineTextAlignment(.leading)
+
+                    HStack(spacing: 0) {
+                        if let artistId = track.artistId,
+                           let artist = try? DatabaseManager.shared.read({ db in
+                               try Artist.fetchOne(db, key: artistId)
+                           }) {
+                            Text(artist.name)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            if track.durationMs != nil {
+                                Text(" • ")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        if let duration = track.durationMs {
+                            Text(formatDuration(duration))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                // Show delete button in edit mode, otherwise menu
+                if isEditMode, let playlist = playlist {
+                    Button(action: {
+                        removeFromPlaylist()
+                    }) {
+                        Image(systemName: "trash")
+                            .font(.title3)
+                            .foregroundColor(.red)
+                            .frame(width: 36, height: 36)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(.red.opacity(0.3), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                } else {
+                    Menu {
+                        Button(action: {
+                            do {
+                                try appCoordinator.toggleFavorite(trackStableId: track.stableId)
+                                isFavorite.toggle()
+                            } catch {
+                                print("Failed to toggle favorite: \(error)")
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: isFavorite ? "heart.slash" : "heart")
+                                    .foregroundColor(isFavorite ? .red : .primary)
+                                Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
+                                    .foregroundColor(.primary)
+                            }
+                        }
+
+                        if let artistId = track.artistId,
+                           let artist = try? DatabaseManager.shared.read({ db in
+                               try Artist.fetchOne(db, key: artistId)
+                           }),
+                           let allArtistTracks = try? DatabaseManager.shared.read({ db in
+                               try Track.filter(Column("artist_id") == artistId).fetchAll(db)
+                           }) {
+                            NavigationLink(destination: ArtistDetailScreenWrapper(artistName: artist.name, allTracks: allArtistTracks)) {
+                                Label(Localized.showArtistPage, systemImage: "person.circle")
+                            }
+                        }
+
+                        Button(action: {
+                            showPlaylistDialog = true
+                        }) {
+                            Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
+                        }
+
+                        Button(action: {
+                            showDeleteConfirmation = true
+                        }) {
+                            Label(Localized.deleteFile, systemImage: "trash")
+                        }
+                        .foregroundColor(.red)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .foregroundColor(.secondary)
+                            .frame(width: 24, height: 30)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onAppear {
+            checkFavoriteStatus()
+        }
+        .sheet(isPresented: $showPlaylistDialog) {
+            PlaylistSelectionView(track: track)
+                .accentColor(deleteSettings.backgroundColorChoice.color)
+        }
+        .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
+            Button("Delete", role: .destructive) {
+                deleteFile()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(Localized.deleteFileConfirmation(track.title))
+        }
+    }
+
+    private func checkFavoriteStatus() {
+        do {
+            isFavorite = try DatabaseManager.shared.isFavorite(trackStableId: track.stableId)
+        } catch {
+            print("Failed to check favorite status: \(error)")
+        }
+    }
+
+    private func formatDuration(_ milliseconds: Int) -> String {
+        let seconds = milliseconds / 1000
+        let minutes = seconds / 60
+        let remainingSeconds = seconds % 60
+        return String(format: "%d:%02d", minutes, remainingSeconds)
+    }
+
+    private func deleteFile() {
+        Task {
+            do {
+                let url = URL(fileURLWithPath: track.path)
+                try FileManager.default.removeItem(at: url)
+                print("🗑️ Deleted file from storage: \(track.title)")
+                try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                print("✅ Database deletion completed successfully")
+                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+            } catch {
+                print("❌ Failed to delete file: \(error)")
+            }
+        }
+    }
+
+    private func removeFromPlaylist() {
+        guard let playlist = playlist, let playlistId = playlist.id else {
+            print("❌ No playlist or playlist ID available")
+            return
+        }
+
+        Task {
+            do {
+                try appCoordinator.removeFromPlaylist(playlistId: playlistId, trackStableId: track.stableId)
+                print("✅ Removed '\(track.title)' from playlist '\(playlist.title)'")
+                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+            } catch {
+                print("❌ Failed to remove from playlist: \(error)")
+            }
         }
     }
 }

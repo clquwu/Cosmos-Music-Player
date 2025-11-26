@@ -585,12 +585,36 @@ struct LibrarySectionRowView: View {
 
 struct AllSongsScreen: View {
     let tracks: [Track]
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @State private var settings = DeleteSettings.load()
 
     var body: some View {
-        TrackListView(tracks: tracks)
+        TrackListView(tracks: tracks, listIdentifier: "all_songs")
             .background(ScreenSpecificBackgroundView(screen: .allSongs))
             .navigationTitle(Localized.allSongs)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        shuffleAllSongs()
+                    } label: {
+                        Image(systemName: "shuffle")
+                            .foregroundColor(settings.backgroundColorChoice.color)
+                    }
+                    .disabled(tracks.isEmpty)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+                settings = DeleteSettings.load()
+            }
+    }
+
+    private func shuffleAllSongs() {
+        guard !tracks.isEmpty else { return }
+        let shuffled = tracks.shuffled()
+        Task {
+            await appCoordinator.playTrack(shuffled[0], queue: shuffled)
+        }
     }
 }
 
@@ -598,20 +622,43 @@ struct LikedSongsScreen: View {
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var likedTracks: [Track] = []
+    @State private var settings = DeleteSettings.load()
 
     var body: some View {
-        TrackListView(tracks: likedTracks)
+        TrackListView(tracks: likedTracks, listIdentifier: "liked_songs")
             .background(ScreenSpecificBackgroundView(screen: .likedSongs))
             .navigationTitle(Localized.likedSongs)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        shuffleLikedSongs()
+                    } label: {
+                        Image(systemName: "shuffle")
+                            .foregroundColor(settings.backgroundColorChoice.color)
+                    }
+                    .disabled(likedTracks.isEmpty)
+                }
+            }
             .onAppear {
                 loadLikedTracks()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
             loadLikedTracks()
         }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            settings = DeleteSettings.load()
+        }
     }
-    
+
+    private func shuffleLikedSongs() {
+        guard !likedTracks.isEmpty else { return }
+        let shuffled = likedTracks.shuffled()
+        Task {
+            await appCoordinator.playTrack(shuffled[0], queue: shuffled)
+        }
+    }
+
     private func loadLikedTracks() {
         do {
             let favoriteIds = try appCoordinator.getFavorites()
@@ -646,16 +693,18 @@ struct TrackListView: View {
     let tracks: [Track]
     let playlist: Playlist?
     let isEditMode: Bool
+    let listIdentifier: String? // Unique identifier for this list
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var playerEngine = PlayerEngine.shared
     @State private var sortOption: TrackSortOption = .dateNewest
     @State private var showSortMenu = false
     @State private var recentlyActedTracks: Set<String> = []
 
-    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false) {
+    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil) {
         self.tracks = tracks
         self.playlist = playlist
         self.isEditMode = isEditMode
+        self.listIdentifier = listIdentifier
     }
 
     private func markAsActed(_ trackId: String) {
@@ -664,6 +713,21 @@ struct TrackListView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             recentlyActedTracks.remove(trackId)
         }
+    }
+
+    private func loadSortPreference() {
+        guard let identifier = listIdentifier else { return }
+        let key = "sortPreference_\(identifier)"
+        if let savedRawValue = UserDefaults.standard.string(forKey: key),
+           let saved = TrackSortOption(rawValue: savedRawValue) {
+            sortOption = saved
+        }
+    }
+
+    private func saveSortPreference() {
+        guard let identifier = listIdentifier else { return }
+        let key = "sortPreference_\(identifier)"
+        UserDefaults.standard.set(sortOption.rawValue, forKey: key)
     }
 
     private var sortedTracks: [Track] {
@@ -768,7 +832,10 @@ struct TrackListView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         ForEach(TrackSortOption.allCases, id: \.self) { option in
-                            Button(action: { sortOption = option }) {
+                            Button(action: {
+                                sortOption = option
+                                saveSortPreference()
+                            }) {
                                 HStack {
                                     Text(option.localizedString)
                                     if sortOption == option {
@@ -781,6 +848,9 @@ struct TrackListView: View {
                         Image(systemName: "arrow.up.arrow.down")
                     }
                 }
+            }
+            .onAppear {
+                loadSortPreference()
             }
         }
     }
