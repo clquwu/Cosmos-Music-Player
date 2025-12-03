@@ -141,36 +141,22 @@ struct AlbumDetailScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var artworkImage: UIImage?
     @State private var settings = DeleteSettings.load()
-    
+    @State private var albumTracks: [Track] = []
+
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
     }
-    
-    private var albumTracks: [Track] {
-        let tracks = allTracks.filter { $0.albumId == album.id }
 
+    private var filteredAlbumTracks: [Track] {
         // Filter out incompatible formats when connected to CarPlay
-        let filteredTracks: [Track]
         if SFBAudioEngineManager.shared.isCarPlayEnvironment {
-            filteredTracks = tracks.filter { track in
+            return albumTracks.filter { track in
                 let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
                 let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
                 return !incompatibleFormats.contains(ext)
             }
         } else {
-            filteredTracks = tracks
-        }
-
-        return filteredTracks.sorted {
-            // Sort by disc number first, then track number
-            let disc0 = $0.discNo ?? 1
-            let disc1 = $1.discNo ?? 1
-
-            if disc0 != disc1 {
-                return disc0 < disc1
-            }
-
-            return ($0.trackNo ?? 0) < ($1.trackNo ?? 0)
+            return albumTracks
         }
     }
     
@@ -229,9 +215,9 @@ struct AlbumDetailScreen: View {
                         
                         HStack(spacing: 12) {
                             Button {
-                                if let first = albumTracks.first {
+                                if let first = filteredAlbumTracks.first {
                                     Task {
-                                        await playerEngine.playTrack(first, queue: albumTracks)
+                                        await playerEngine.playTrack(first, queue: filteredAlbumTracks)
                                     }
                                 }
                             } label: {
@@ -246,10 +232,10 @@ struct AlbumDetailScreen: View {
                                 .background(settings.backgroundColorChoice.color)
                                 .cornerRadius(28)
                             }
-                            
+
                             Button {
-                                guard !albumTracks.isEmpty else { return }
-                                let shuffled = albumTracks.shuffled()
+                                guard !filteredAlbumTracks.isEmpty else { return }
+                                let shuffled = filteredAlbumTracks.shuffled()
                                 Task {
                                     await playerEngine.playTrack(shuffled[0], queue: shuffled)
                                 }
@@ -276,26 +262,26 @@ struct AlbumDetailScreen: View {
                             Text(Localized.songs)
                                 .font(.title3.weight(.bold))
                             Spacer()
-                            Text(Localized.songsCount(albumTracks.count))
+                            Text(Localized.songsCount(filteredAlbumTracks.count))
                                 .font(.body)
                                 .foregroundColor(.secondary)
                         }
                         .padding(.horizontal)
                         .padding(.bottom, 12)
-                        
+
                         LazyVStack(spacing: 0) {
-                            ForEach(Array(albumTracks.enumerated()), id: \.offset) { index, track in
+                            ForEach(Array(filteredAlbumTracks.enumerated()), id: \.offset) { index, track in
                                 AlbumTrackRowView(
                                     track: track,
                                     trackNumber: track.trackNo ?? (index + 1),
                                     onTap: {
                                         Task {
-                                            await playerEngine.playTrack(track, queue: albumTracks)
+                                            await playerEngine.playTrack(track, queue: filteredAlbumTracks)
                                         }
                                     }
                                 )
-                                
-                                if index < albumTracks.count - 1 {
+
+                                if index < filteredAlbumTracks.count - 1 {
                                     Divider().padding(.leading, 60)
                                 }
                             }
@@ -306,17 +292,32 @@ struct AlbumDetailScreen: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear(perform: loadAlbumArtwork)
+        .onAppear {
+            loadAlbumTracks()
+            loadAlbumArtwork()
+        }
         .task {
-            // Ensure artwork loads even if onAppear doesn't trigger
+            // Ensure data loads even if onAppear doesn't trigger
+            if albumTracks.isEmpty {
+                loadAlbumTracks()
+            }
             if artworkImage == nil {
                 loadAlbumArtwork()
             }
         }
     }
-    
+
+    private func loadAlbumTracks() {
+        guard let albumId = album.id else { return }
+        do {
+            albumTracks = try appCoordinator.databaseManager.getTracksByAlbumId(albumId)
+        } catch {
+            print("Failed to load album tracks: \(error)")
+        }
+    }
+
     private func loadAlbumArtwork() {
-        guard let first = albumTracks.first else { return }
+        guard let first = filteredAlbumTracks.first else { return }
         Task {
             do {
                 let image = await ArtworkManager.shared.getArtwork(for: first)

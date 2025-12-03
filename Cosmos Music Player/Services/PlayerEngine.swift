@@ -1530,14 +1530,6 @@ class PlayerEngine: NSObject, ObservableObject {
                 print("🎧 Audio session already active during pause")
             }
             
-            // Refresh background time remaining
-            let timeRemaining = UIApplication.shared.backgroundTimeRemaining
-            if timeRemaining < Double.infinity {
-                print("⏰ Background time remaining: \(Int(timeRemaining))s")
-            } else {
-                print("⏰ Background time: unlimited (audio session active)")
-            }
-            
         } catch {
             print("❌ Failed to maintain audio session during pause: \(error)")
             // Don't try to maintain session if it fails - let the app handle it naturally

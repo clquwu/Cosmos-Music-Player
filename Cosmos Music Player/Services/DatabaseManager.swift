@@ -379,10 +379,26 @@ class DatabaseManager: @unchecked Sendable {
 
     func getTracksByAlbumId(_ albumId: Int64) throws -> [Track] {
         return try read { db in
-            return try Track
+            // Fetch all tracks for this album
+            let tracks = try Track
                 .filter(Column("album_id") == albumId)
-                .order(Column("disc_no").ascNullsLast, Column("track_no").ascNullsLast)
                 .fetchAll(db)
+
+            // Sort in Swift to ensure proper integer sorting
+            let sortedTracks = tracks.sorted { track1, track2 in
+                // Sort by track number only (ignore disc number)
+                let trackNo1 = track1.trackNo ?? 999
+                let trackNo2 = track2.trackNo ?? 999
+
+                if trackNo1 != trackNo2 {
+                    return trackNo1 < trackNo2
+                }
+
+                // Tiebreaker: sort by title
+                return track1.title < track2.title
+            }
+
+            return sortedTracks
         }
     }
 
