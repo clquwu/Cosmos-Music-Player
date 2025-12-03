@@ -342,12 +342,12 @@ struct AlbumTrackRowView: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
-                // Track number - moved more to the left
+                // Track number
                 Text("\(trackNumber)")
                     .font(.body)
                     .fontWeight(.medium)
                     .foregroundColor(.secondary)
-                    .frame(width: 20, alignment: .leading)
+                    .frame(width: 22, alignment: .leading)
                 
                 // Track info
                 VStack(alignment: .leading, spacing: 4) {
