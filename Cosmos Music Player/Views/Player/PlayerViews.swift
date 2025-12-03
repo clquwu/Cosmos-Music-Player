@@ -242,12 +242,32 @@ struct PlayerView: View {
                         HStack(alignment: .center, spacing: 16) {
                             // Left side: Title and Artist
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(currentTrack.title)
-                                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
-                                    .fontWeight(.semibold)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                
+                                // Song title - tappable to navigate to album
+                                if let albumId = currentTrack.albumId,
+                                   let album = try? DatabaseManager.shared.read({ db in
+                                       try Album.fetchOne(db, key: albumId)
+                                   }) {
+                                    Button(action: {
+                                        // Post notification to navigate to album and minimize player
+                                        let userInfo = ["album": album, "allTracks": allTracks] as [String : Any]
+                                        NotificationCenter.default.post(name: NSNotification.Name("NavigateToAlbumFromPlayer"), object: nil, userInfo: userInfo)
+                                    }) {
+                                        Text(currentTrack.title)
+                                            .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
+                                            .fontWeight(.semibold)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+                                            .foregroundColor(.primary)
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                } else {
+                                    Text(currentTrack.title)
+                                        .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
+                                        .fontWeight(.semibold)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                }
+
                                 if let artistId = currentTrack.artistId,
                                    let artist = try? DatabaseManager.shared.read({ db in
                                        try Artist.fetchOne(db, key: artistId)
@@ -771,6 +791,13 @@ struct MiniPlayerView: View {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
                         isExpanded = false
                         dragOffset = 0 // Reset drag offset immediately
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToAlbumFromPlayer"))) { _ in
+                    // Minimize the player when album navigation is requested
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                        isExpanded = false
+                        dragOffset = 0
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MinimizePlayer"))) { _ in

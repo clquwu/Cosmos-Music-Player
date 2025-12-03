@@ -30,6 +30,8 @@ struct LibraryView: View {
     @StateObject private var libraryIndexer = LibraryIndexer.shared
     @State private var artistToNavigate: Artist?
     @State private var artistAllTracks: [Track] = []
+    @State private var albumToNavigate: Album?
+    @State private var albumAllTracks: [Track] = []
     @State private var searchArtistToNavigate: Artist?
     @State private var searchArtistTracks: [Track] = []
     @State private var searchAlbumToNavigate: Album?
@@ -423,7 +425,21 @@ struct LibraryView: View {
                 EmptyView()
             }
             .hidden()
-            
+
+            // Hidden NavigationLink for album navigation from player
+            NavigationLink(
+                destination: albumToNavigate.map { album in
+                    AlbumDetailScreen(album: album, allTracks: albumAllTracks)
+                },
+                isActive: Binding(
+                    get: { albumToNavigate != nil },
+                    set: { if !$0 { albumToNavigate = nil } }
+                )
+            ) {
+                EmptyView()
+            }
+            .hidden()
+
             }
             .navigationDestination(isPresented: Binding(
                 get: { searchArtistToNavigate != nil },
@@ -463,6 +479,14 @@ struct LibraryView: View {
                let allTracks = userInfo["allTracks"] as? [Track] {
                 artistToNavigate = artist
                 artistAllTracks = allTracks
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToAlbumFromPlayer"))) { notification in
+            if let userInfo = notification.userInfo,
+               let album = userInfo["album"] as? Album,
+               let allTracks = userInfo["allTracks"] as? [Track] {
+                albumToNavigate = album
+                albumAllTracks = allTracks
             }
         }
         .overlay(
