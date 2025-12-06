@@ -257,3 +257,15 @@
 /* Queue Actions */
 "play_next" = "Lire ensuite";
 "add_to_queue" = "Ajouter à la file";
+
+/* Bulk Selection */
+"select" = "Sélectionner";
+"select_all" = "Tout sélectionner";
+"bulk_actions" = "Actions";
+"add_to_liked" = "Ajouter aux favoris";
+"remove_from_liked" = "Retirer des favoris";
+"delete_files" = "Supprimer les fichiers";
+"delete_files_confirmation" = "Supprimer les fichiers";
+"selected_count_singular" = "%d sélectionné";
+"selected_count_plural" = "%d sélectionnés";
+"delete_files_confirmation_message" = "Êtes-vous sûr de vouloir supprimer %d fichier(s) ? Cette action ne peut pas être annulée.";

@@ -649,7 +649,7 @@ struct LikedSongsScreen: View {
     @State private var settings = DeleteSettings.load()
 
     var body: some View {
-        TrackListView(tracks: likedTracks, listIdentifier: "liked_songs")
+        TrackListView(tracks: likedTracks, listIdentifier: "liked_songs", isLikedSongsScreen: true)
             .background(ScreenSpecificBackgroundView(screen: .likedSongs))
             .navigationTitle(Localized.likedSongs)
             .navigationBarTitleDisplayMode(.inline)
@@ -717,142 +717,156 @@ struct TrackListView: View {
     let tracks: [Track]
     let playlist: Playlist?
     let isEditMode: Bool
-    let listIdentifier: String? // Unique identifier for this list
+    let listIdentifier: String?
+    let isLikedSongsScreen: Bool
+    
     @EnvironmentObject private var appCoordinator: AppCoordinator
-    @StateObject private var playerEngine = PlayerEngine.shared
+    
+    // Local State
     @State private var sortOption: TrackSortOption = .dateNewest
-    @State private var showSortMenu = false
     @State private var recentlyActedTracks: Set<String> = []
-
-    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil) {
+    
+    // Bulk selection state
+    @State private var isBulkMode = false
+    @State private var selectedTracks: Set<String> = []
+    @State private var showBulkPlaylistDialog = false
+    @State private var showBulkDeleteConfirmation = false
+    @State private var settings = DeleteSettings.load()
+    
+    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil, isLikedSongsScreen: Bool = false) {
         self.tracks = tracks
         self.playlist = playlist
         self.isEditMode = isEditMode
         self.listIdentifier = listIdentifier
+        self.isLikedSongsScreen = isLikedSongsScreen
     }
-
-    private func markAsActed(_ trackId: String) {
-        recentlyActedTracks.insert(trackId)
-        // Remove after 1 second so user can swipe again if needed
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            recentlyActedTracks.remove(trackId)
-        }
-    }
-
-    private func loadSortPreference() {
-        guard let identifier = listIdentifier else { return }
-        let key = "sortPreference_\(identifier)"
-        if let savedRawValue = UserDefaults.standard.string(forKey: key),
-           let saved = TrackSortOption(rawValue: savedRawValue) {
-            sortOption = saved
-        }
-    }
-
-    private func saveSortPreference() {
-        guard let identifier = listIdentifier else { return }
-        let key = "sortPreference_\(identifier)"
-        UserDefaults.standard.set(sortOption.rawValue, forKey: key)
-    }
-
+    
+    // Sorting logic stays here
     private var sortedTracks: [Track] {
-        // Filter out incompatible formats when connected to CarPlay
         let filteredTracks: [Track]
         if SFBAudioEngineManager.shared.isCarPlayEnvironment {
             filteredTracks = tracks.filter { track in
                 let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
-                return !incompatibleFormats.contains(ext)
+                return !["ogg", "opus", "dsf", "dff"].contains(ext)
             }
         } else {
             filteredTracks = tracks
         }
-
+        
         switch sortOption {
-        case .dateNewest:
-            return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
-        case .dateOldest:
-            return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
-        case .nameAZ:
-            return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
-        case .nameZA:
-            return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
-        case .sizeLargest:
-            return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
-        case .sizeSmallest:
-            return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
+        case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+        case .dateOldest: return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+        case .nameAZ: return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        case .nameZA: return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+        case .sizeLargest: return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
+        case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
         }
     }
-
+    
+    // Bulk Helpers
+    private func enterBulkMode(initialSelection: String? = nil) {
+        isBulkMode = true
+        if let trackId = initialSelection { selectedTracks.insert(trackId) }
+    }
+    
+    private func exitBulkMode() {
+        isBulkMode = false
+        selectedTracks.removeAll()
+    }
+    
+    private func selectAll() {
+        selectedTracks = Set(sortedTracks.map { $0.stableId })
+    }
+    
+    private func bulkAddToLikedSongs() {
+        for trackId in selectedTracks {
+            if let track = sortedTracks.first(where: { $0.stableId == trackId }) {
+                try? appCoordinator.toggleFavorite(trackStableId: track.stableId)
+            }
+        }
+        exitBulkMode()
+    }
+    
+    private func bulkDelete() {
+        Task {
+            for trackId in selectedTracks {
+                if let track = sortedTracks.first(where: { $0.stableId == trackId }) {
+                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
+                    try? DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                }
+            }
+            NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+            exitBulkMode()
+        }
+    }
+    
+    // Persistence
+    private func loadSortPreference() {
+        guard let identifier = listIdentifier else { return }
+        if let savedRawValue = UserDefaults.standard.string(forKey: "sortPreference_\(identifier)"),
+           let saved = TrackSortOption(rawValue: savedRawValue) {
+            sortOption = saved
+        }
+    }
+    
+    private func saveSortPreference() {
+        guard let identifier = listIdentifier else { return }
+        UserDefaults.standard.set(sortOption.rawValue, forKey: "sortPreference_\(identifier)")
+    }
+    
     var body: some View {
-        if tracks.isEmpty {
-            VStack(spacing: 16) {
-                Image(systemName: "music.note")
-                    .font(.system(size: 40))
-                    .foregroundColor(.secondary)
-
-                Text(Localized.noSongsFound)
-                    .font(.headline)
-
-                Text(Localized.yourMusicWillAppearHere)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            List(sortedTracks, id: \.stableId) { track in
-                TrackRowView(
-                    track: track,
-                    onTap: {
-                        Task {
-                            // Update playlist access time if track is played from a playlist
-                            if let playlist = playlist, let playlistId = playlist.id {
-                                try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
-                                try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
-                            }
-                            await appCoordinator.playTrack(track, queue: sortedTracks)
-                        }
-                    },
-                    playlist: playlist,
-                    showDirectDeleteButton: playlist != nil && isEditMode
-                )
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if !recentlyActedTracks.contains(track.stableId) {
-                        Button {
-                            playerEngine.insertNext(track)
-                            markAsActed(track.stableId)
-                        } label: {
-                            Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward")
-                        }
-                        .tint(DeleteSettings.load().backgroundColorChoice.color)
-                    }
+        // We pass the sorted tracks and state bindings to the Inner View.
+        // The Inner View observes PlayerEngine, so IT updates, but THIS view (and the Toolbar) remains stable.
+        TrackListContentView(
+            tracks: sortedTracks,
+            playlist: playlist,
+            isEditMode: isEditMode,
+            isBulkMode: $isBulkMode,
+            selectedTracks: $selectedTracks,
+            recentlyActedTracks: $recentlyActedTracks,
+            onEnterBulkMode: { id in enterBulkMode(initialSelection: id) }
+        )
+        // MARK: - TOOLBAR
+        // Since PlayerEngine is not observed in this view, this Toolbar will not rebuild on every frame.
+        .toolbar {
+            if isBulkMode {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(Localized.cancel) { exitBulkMode() }
+                        .foregroundColor(settings.backgroundColorChoice.color)
                 }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if !recentlyActedTracks.contains(track.stableId) {
-                        Button {
-                            playerEngine.addToQueue(track)
-                            markAsActed(track.stableId)
-                        } label: {
-                            Label(Localized.addToQueue, systemImage: "text.append")
+                
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Button(action: { selectAll() }) {
+                            Label(Localized.selectAll, systemImage: "checkmark.circle")
                         }
-                        .tint(.blue)
+                        Divider()
+                        Button(action: { bulkAddToLikedSongs() }) {
+                            Label(isLikedSongsScreen ? Localized.removeFromLiked : Localized.addToLiked, systemImage: "heart.fill")
+                        }
+                        .disabled(selectedTracks.isEmpty)
+                        
+                        Button(action: { showBulkPlaylistDialog = true }) {
+                            Label(Localized.addToPlaylist, systemImage: "music.note.list")
+                        }
+                        .disabled(selectedTracks.isEmpty)
+                        Divider()
+                        Button(role: .destructive, action: { showBulkDeleteConfirmation = true }) {
+                            Label(Localized.deleteFiles, systemImage: "trash")
+                        }
+                        .disabled(selectedTracks.isEmpty)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                            .foregroundColor(settings.backgroundColorChoice.color)
+                        // Increase hit area
+                            .padding(4)
+                            .contentShape(Rectangle())
                     }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
                 }
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.ultraThinMaterial)
-                        .opacity(0.7)
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
-            }
-            .listStyle(PlainListStyle())
-            .scrollContentBackground(.hidden)
-            .contentMargins(.bottom, 100, for: .scrollContent)
-            .toolbar {
+            } else {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         ForEach(TrackSortOption.allCases, id: \.self) { option in
@@ -862,20 +876,282 @@ struct TrackListView: View {
                             }) {
                                 HStack {
                                     Text(option.localizedString)
-                                    if sortOption == option {
-                                        Image(systemName: "checkmark")
-                                    }
+                                    if sortOption == option { Image(systemName: "checkmark") }
                                 }
                             }
                         }
                     } label: {
-                        Image(systemName: "arrow.up.arrow.down")
+                        Image(systemName: "arrow.up.arrow.down.circle")
+                            .font(.title3)
+                            .foregroundColor(settings.backgroundColorChoice.color)
+                            .padding(4)
+                            .contentShape(Rectangle())
                     }
                 }
             }
-            .onAppear {
-                loadSortPreference()
+        }
+        .sheet(isPresented: $showBulkPlaylistDialog) {
+            BulkPlaylistSelectionView(trackIds: Array(selectedTracks), onComplete: { exitBulkMode() })
+                .accentColor(settings.backgroundColorChoice.color)
+        }
+        .alert(Localized.deleteFilesConfirmation, isPresented: $showBulkDeleteConfirmation) {
+            Button(Localized.delete, role: .destructive) { bulkDelete() }
+            Button(Localized.cancel, role: .cancel) { }
+        } message: {
+            Text(Localized.deleteFilesConfirmationMessage(selectedTracks.count))
+        }
+        .onAppear { loadSortPreference() }
+    }
+}
+
+struct TrackListContentView: View {
+    let tracks: [Track]
+    let playlist: Playlist?
+    let isEditMode: Bool
+    
+    // Bindings to parent state
+    @Binding var isBulkMode: Bool
+    @Binding var selectedTracks: Set<String>
+    @Binding var recentlyActedTracks: Set<String>
+    let onEnterBulkMode: (String?) -> Void
+    
+    // Only THIS view updates when the song progresses
+    @StateObject private var playerEngine = PlayerEngine.shared
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @State private var settings = DeleteSettings.load()
+    
+    private func toggleSelection(for track: Track) {
+        if selectedTracks.contains(track.stableId) {
+            selectedTracks.remove(track.stableId)
+        } else {
+            selectedTracks.insert(track.stableId)
+        }
+    }
+    
+    private func markAsActed(_ trackId: String) {
+        recentlyActedTracks.insert(trackId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            recentlyActedTracks.remove(trackId)
+        }
+    }
+    
+    var body: some View {
+        if tracks.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "music.note").font(.system(size: 40)).foregroundColor(.secondary)
+                Text(Localized.noSongsFound).font(.headline)
+                Text(Localized.yourMusicWillAppearHere).font(.subheadline).foregroundColor(.secondary)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(tracks, id: \.stableId) { track in
+                ZStack(alignment: .leading) {
+                    HStack(spacing: 0) {
+                        if isBulkMode {
+                            Image(systemName: selectedTracks.contains(track.stableId) ? "checkmark.circle.fill" : "circle")
+                                .font(.title2)
+                                .foregroundColor(selectedTracks.contains(track.stableId) ? settings.backgroundColorChoice.color : .secondary)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                                .onTapGesture { toggleSelection(for: track) }
+                        }
+                        
+                        TrackRowView(
+                            track: track,
+                            activeTrackId: playerEngine.currentTrack?.stableId,
+                            isAudioPlaying: playerEngine.isPlaying,
+                            onTap: {
+                                if isBulkMode {
+                                    toggleSelection(for: track)
+                                } else {
+                                    Task {
+                                        if let playlist = playlist, let playlistId = playlist.id {
+                                            try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
+                                            try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+                                        }
+                                        await appCoordinator.playTrack(track, queue: tracks)
+                                    }
+                                }
+                            },
+                            playlist: playlist,
+                            showDirectDeleteButton: playlist != nil && isEditMode,
+                            onEnterBulkMode: { onEnterBulkMode(track.stableId) }
+                        )
+                        .equatable() // Crucial for performance
+                        .onLongPressGesture(minimumDuration: 0.5) {
+                            if !isBulkMode { onEnterBulkMode(track.stableId) }
+                        }
+                    }
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    if !isBulkMode && !recentlyActedTracks.contains(track.stableId) {
+                        Button {
+                            playerEngine.insertNext(track)
+                            markAsActed(track.stableId)
+                        } label: { Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward") }
+                            .tint(settings.backgroundColorChoice.color)
+                    }
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    if !isBulkMode && !recentlyActedTracks.contains(track.stableId) {
+                        Button {
+                            playerEngine.addToQueue(track)
+                            markAsActed(track.stableId)
+                        } label: { Label(Localized.addToQueue, systemImage: "text.append") }
+                            .tint(.blue)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial).opacity(0.7))
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .listRowSeparator(.hidden).listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
+            .listStyle(PlainListStyle())
+            .scrollContentBackground(.hidden)
+            .contentMargins(.bottom, 100, for: .scrollContent)
+        }
+    }
+}
+
+// MARK: - Bulk Selection Components
+
+struct BulkPlaylistSelectionView: View {
+    let trackIds: [String]
+    let onComplete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @State private var playlists: [Playlist] = []
+    @State private var showCreatePlaylist = false
+    @State private var newPlaylistName = ""
+    @State private var settings = DeleteSettings.load()
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                VStack(spacing: 8) {
+                    Text(Localized.addToPlaylist)
+                        .font(.title2)
+                        .fontWeight(.semibold)
+
+                    Text(Localized.songsCountOnly(trackIds.count))
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+
+                if playlists.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "music.note.list")
+                            .font(.system(size: 40))
+                            .foregroundColor(.secondary)
+
+                        Text(Localized.noPlaylistsYet)
+                            .font(.headline)
+
+                        Text(Localized.createFirstPlaylist)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(playlists, id: \.id) { playlist in
+                            Button(action: {
+                                addToPlaylist(playlist)
+                            }) {
+                                HStack {
+                                    Image(systemName: "music.note.list")
+                                        .foregroundColor(settings.backgroundColorChoice.color)
+
+                                    Text(playlist.title)
+                                        .foregroundColor(.primary)
+
+                                    Spacer()
+
+                                    Image(systemName: "plus.circle")
+                                        .foregroundColor(settings.backgroundColorChoice.color)
+                                }
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                }
+
+                Button(Localized.createNewPlaylist) {
+                    showCreatePlaylist = true
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+            }
+            .padding()
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(Localized.cancel) {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .alert(Localized.createPlaylist, isPresented: $showCreatePlaylist) {
+            TextField(Localized.playlistNamePlaceholder, text: $newPlaylistName)
+            Button(Localized.create) {
+                createPlaylist()
+            }
+            .disabled(newPlaylistName.isEmpty)
+            Button(Localized.cancel, role: .cancel) { }
+        } message: {
+            Text(Localized.enterPlaylistName)
+        }
+        .onAppear {
+            loadPlaylists()
+        }
+    }
+
+    private func loadPlaylists() {
+        do {
+            playlists = try DatabaseManager.shared.getAllPlaylists()
+        } catch {
+            print("Failed to load playlists: \(error)")
+        }
+    }
+
+    private func createPlaylist() {
+        guard !newPlaylistName.isEmpty else { return }
+
+        do {
+            let playlist = try appCoordinator.createPlaylist(title: newPlaylistName)
+            playlists.append(playlist)
+            newPlaylistName = ""
+
+            // Automatically add the tracks to the new playlist
+            if let playlistId = playlist.id {
+                for trackId in trackIds {
+                    try? appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
+                }
+            }
+
+            onComplete()
+            dismiss()
+        } catch {
+            print("Failed to create playlist: \(error)")
+        }
+    }
+
+    private func addToPlaylist(_ playlist: Playlist) {
+        do {
+            guard let playlistId = playlist.id else {
+                print("Error: Playlist has no ID")
+                return
+            }
+
+            for trackId in trackIds {
+                try? appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
+            }
+
+            onComplete()
+            dismiss()
+        } catch {
+            print("Failed to add to playlist: \(error)")
         }
     }
 }

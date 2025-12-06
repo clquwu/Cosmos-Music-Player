@@ -319,4 +319,25 @@ struct Localized {
     // MARK: - Queue Actions
     static let playNext = "play_next".localized
     static let addToQueue = "add_to_queue".localized
+
+    // MARK: - Bulk Selection
+    static let select = "select".localized
+    static let selectAll = "select_all".localized
+    static let bulkActions = "bulk_actions".localized
+    static let addToLiked = "add_to_liked".localized
+    static let removeFromLiked = "remove_from_liked".localized
+    static let deleteFiles = "delete_files".localized
+    static let deleteFilesConfirmation = "delete_files_confirmation".localized
+
+    static func selectedCount(_ count: Int) -> String {
+        if count == 1 {
+            return "selected_count_singular".localized(with: count)
+        } else {
+            return "selected_count_plural".localized(with: count)
+        }
+    }
+
+    static func deleteFilesConfirmationMessage(_ count: Int) -> String {
+        return "delete_files_confirmation_message".localized(with: count)
+    }
 }

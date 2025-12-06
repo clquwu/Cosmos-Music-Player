@@ -257,3 +257,15 @@
 /* Queue Actions */
 "play_next" = "Play Next";
 "add_to_queue" = "Add to Queue";
+
+/* Bulk Selection */
+"select" = "Select";
+"select_all" = "Select All";
+"bulk_actions" = "Actions";
+"add_to_liked" = "Add to Liked";
+"remove_from_liked" = "Remove from Liked";
+"delete_files" = "Delete Files";
+"delete_files_confirmation" = "Delete Files";
+"selected_count_singular" = "%d selected";
+"selected_count_plural" = "%d selected";
+"delete_files_confirmation_message" = "Are you sure you want to delete %d file(s)? This action cannot be undone.";
