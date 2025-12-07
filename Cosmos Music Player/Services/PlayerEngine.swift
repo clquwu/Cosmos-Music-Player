@@ -53,6 +53,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var hasSetupAudioEngine = false
     private var hasSetupAudioSession = false
     private var hasSetupSiriBackgroundSession = false
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
     private var backgroundCheckTimer: Timer?
