@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		230D66372E894889007C642A /* SFBAudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 230D66362E894889007C642A /* SFBAudioEngine */; };
 		2312D61A2E6090E4007F756D /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2312D6192E6090E4007F756D /* GRDB */; };
+		239B247D2EE59BEC009F83F1 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 239B247C2EE59BEC009F83F1 /* WidgetKit.framework */; };
+		239B247F2EE59BEC009F83F1 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 239B247E2EE59BEC009F83F1 /* SwiftUI.framework */; };
+		239B24902EE59BED009F83F1 /* PlayerWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 239B247B2EE59BEC009F83F1 /* PlayerWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		23AF813F2E71E15D0005527C /* Share.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 23AF81352E71E15D0005527C /* Share.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		23C312DD2E78015500342F7C /* Intents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 23C312DC2E78015500342F7C /* Intents.framework */; };
 		23C312E42E78015500342F7C /* SiriIntentsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 23C312DA2E78015500342F7C /* SiriIntentsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -16,6 +19,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		239B248E2EE59BED009F83F1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2312D6042E6090E2007F756D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 239B247A2EE59BEC009F83F1;
+			remoteInfo = PlayerWidgetExtension;
+		};
 		23AF813D2E71E15D0005527C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 2312D6042E6090E2007F756D /* Project object */;
@@ -41,6 +51,7 @@
 			files = (
 				23AF813F2E71E15D0005527C /* Share.appex in Embed Foundation Extensions */,
 				23C312E42E78015500342F7C /* SiriIntentsExtension.appex in Embed Foundation Extensions */,
+				239B24902EE59BED009F83F1 /* PlayerWidgetExtension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -49,6 +60,10 @@
 
 /* Begin PBXFileReference section */
 		2312D60C2E6090E2007F756D /* Cosmos Music Player.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Cosmos Music Player.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		239B247B2EE59BEC009F83F1 /* PlayerWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PlayerWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		239B247C2EE59BEC009F83F1 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		239B247E2EE59BEC009F83F1 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		239B249A2EE5A20E009F83F1 /* PlayerWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PlayerWidgetExtension.entitlements; sourceTree = "<group>"; };
 		23AF81352E71E15D0005527C /* Share.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = Share.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		23C312DA2E78015500342F7C /* SiriIntentsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SiriIntentsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		23C312DC2E78015500342F7C /* Intents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Intents.framework; path = System/Library/Frameworks/Intents.framework; sourceTree = SDKROOT; };
@@ -61,6 +76,13 @@
 				Info.plist,
 			);
 			target = 2312D60B2E6090E2007F756D /* Cosmos Music Player */;
+		};
+		239B24A22EE5F806009F83F1 /* Exceptions for "Cosmos Music Player" folder in "PlayerWidgetExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Models/WidgetData.swift,
+			);
+			target = 239B247A2EE59BEC009F83F1 /* PlayerWidgetExtension */;
 		};
 		23AF81432E71E15D0005527C /* Exceptions for "Share" folder in "Share" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -76,6 +98,13 @@
 			);
 			target = 23C312D92E78015500342F7C /* SiriIntentsExtension */;
 		};
+		23FE5A582EE63B460027CEE8 /* Exceptions for "PlayerWidget" folder in "PlayerWidgetExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 239B247A2EE59BEC009F83F1 /* PlayerWidgetExtension */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -83,8 +112,17 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				2312D6502E6090E2007F756D /* Exceptions for "Cosmos Music Player" folder in "Cosmos Music Player" target */,
+				239B24A22EE5F806009F83F1 /* Exceptions for "Cosmos Music Player" folder in "PlayerWidgetExtension" target */,
 			);
 			path = "Cosmos Music Player";
+			sourceTree = "<group>";
+		};
+		239B24802EE59BEC009F83F1 /* PlayerWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				23FE5A582EE63B460027CEE8 /* Exceptions for "PlayerWidget" folder in "PlayerWidgetExtension" target */,
+			);
+			path = PlayerWidget;
 			sourceTree = "<group>";
 		};
 		23AF81362E71E15D0005527C /* Share */ = {
@@ -115,6 +153,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		239B24782EE59BEC009F83F1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				239B247F2EE59BEC009F83F1 /* SwiftUI.framework in Frameworks */,
+				239B247D2EE59BEC009F83F1 /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		23AF81322E71E15D0005527C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -137,9 +184,11 @@
 		2312D6032E6090E2007F756D = {
 			isa = PBXGroup;
 			children = (
+				239B249A2EE5A20E009F83F1 /* PlayerWidgetExtension.entitlements */,
 				2312D60E2E6090E2007F756D /* Cosmos Music Player */,
 				23AF81362E71E15D0005527C /* Share */,
 				23C312DE2E78015500342F7C /* SiriIntentsExtension */,
+				239B24802EE59BEC009F83F1 /* PlayerWidget */,
 				23C312DB2E78015500342F7C /* Frameworks */,
 				2312D60D2E6090E2007F756D /* Products */,
 			);
@@ -151,6 +200,7 @@
 				2312D60C2E6090E2007F756D /* Cosmos Music Player.app */,
 				23AF81352E71E15D0005527C /* Share.appex */,
 				23C312DA2E78015500342F7C /* SiriIntentsExtension.appex */,
+				239B247B2EE59BEC009F83F1 /* PlayerWidgetExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -159,6 +209,8 @@
 			isa = PBXGroup;
 			children = (
 				23C312DC2E78015500342F7C /* Intents.framework */,
+				239B247C2EE59BEC009F83F1 /* WidgetKit.framework */,
+				239B247E2EE59BEC009F83F1 /* SwiftUI.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -180,6 +232,7 @@
 			dependencies = (
 				23AF813E2E71E15D0005527C /* PBXTargetDependency */,
 				23C312E32E78015500342F7C /* PBXTargetDependency */,
+				239B248F2EE59BED009F83F1 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				2312D60E2E6090E2007F756D /* Cosmos Music Player */,
@@ -192,6 +245,28 @@
 			productName = "Cosmos Music Player";
 			productReference = 2312D60C2E6090E2007F756D /* Cosmos Music Player.app */;
 			productType = "com.apple.product-type.application";
+		};
+		239B247A2EE59BEC009F83F1 /* PlayerWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 239B24912EE59BED009F83F1 /* Build configuration list for PBXNativeTarget "PlayerWidgetExtension" */;
+			buildPhases = (
+				239B24772EE59BEC009F83F1 /* Sources */,
+				239B24782EE59BEC009F83F1 /* Frameworks */,
+				239B24792EE59BEC009F83F1 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				239B24802EE59BEC009F83F1 /* PlayerWidget */,
+			);
+			name = PlayerWidgetExtension;
+			packageProductDependencies = (
+			);
+			productName = PlayerWidgetExtension;
+			productReference = 239B247B2EE59BEC009F83F1 /* PlayerWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		23AF81342E71E15D0005527C /* Share */ = {
 			isa = PBXNativeTarget;
@@ -245,11 +320,14 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 1640;
+				LastSwiftUpdateCheck = 2600;
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					2312D60B2E6090E2007F756D = {
 						CreatedOnToolsVersion = 16.4;
+					};
+					239B247A2EE59BEC009F83F1 = {
+						CreatedOnToolsVersion = 26.0.1;
 					};
 					23AF81342E71E15D0005527C = {
 						CreatedOnToolsVersion = 16.4;
@@ -281,12 +359,20 @@
 				2312D60B2E6090E2007F756D /* Cosmos Music Player */,
 				23AF81342E71E15D0005527C /* Share */,
 				23C312D92E78015500342F7C /* SiriIntentsExtension */,
+				239B247A2EE59BEC009F83F1 /* PlayerWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		2312D60A2E6090E2007F756D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		239B24792EE59BEC009F83F1 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -317,6 +403,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		239B24772EE59BEC009F83F1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		23AF81312E71E15D0005527C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -334,6 +427,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		239B248F2EE59BED009F83F1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 239B247A2EE59BEC009F83F1 /* PlayerWidgetExtension */;
+			targetProxy = 239B248E2EE59BED009F83F1 /* PBXContainerItemProxy */;
+		};
 		23AF813E2E71E15D0005527C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 23AF81342E71E15D0005527C /* Share */;
@@ -534,6 +632,70 @@
 			};
 			name = Release;
 		};
+		239B24922EE59BED009F83F1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = PlayerWidgetExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PC237X7NGJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PlayerWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PlayerWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.PlayerWidget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		239B24932EE59BED009F83F1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = PlayerWidgetExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PC237X7NGJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PlayerWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PlayerWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.PlayerWidget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		23AF81412E71E15D0005527C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -655,6 +817,15 @@
 			buildConfigurations = (
 				2312D6182E6090E3007F756D /* Debug */,
 				2312D6192E6090E3007F756D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		239B24912EE59BED009F83F1 /* Build configuration list for PBXNativeTarget "PlayerWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				239B24922EE59BED009F83F1 /* Debug */,
+				239B24932EE59BED009F83F1 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

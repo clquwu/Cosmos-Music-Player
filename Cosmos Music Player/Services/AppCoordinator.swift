@@ -320,7 +320,7 @@ class AppCoordinator: ObservableObject {
     private func onIndexingCompleted() async {
         do {
             let favorites = try databaseManager.getFavorites()
-            
+
             // Only save to iCloud if we actually have favorites AND initial sync is completed
             // This prevents overwriting existing iCloud favorites with an empty array during startup
             if !favorites.isEmpty && isInitialSyncCompleted {
@@ -331,16 +331,16 @@ class AppCoordinator: ObservableObject {
             } else {
                 print("Skipping iCloud save - no favorites to save (prevents overwriting existing iCloud data)")
             }
-            
+
             // Restore playlists from iCloud after indexing is complete
             await restorePlaylistsFromiCloud()
-            
+
             // Verify and fix any database relationship issues
             await verifyDatabaseRelationships()
-            
+
             // Try playlist restoration again after relationships are fixed
             await retryPlaylistRestoration()
-            
+
             // Check for orphaned files after sync completes
             print("🔄 AppCoordinator: Starting orphaned files check...")
             await fileCleanupManager.checkForOrphanedFiles()
@@ -672,15 +672,17 @@ class AppCoordinator: ObservableObject {
         Task {
             do {
                 let playlists = try databaseManager.getAllPlaylists()
+
+                // Sync to iCloud
                 for playlist in playlists {
                     guard let playlistId = playlist.id else { continue }
-                    
+
                     // Get playlist items from database
                     let dbPlaylistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
                     let stateItems = dbPlaylistItems.map { item in
                         (item.trackStableId, Date()) // Use current date as addedAt since we don't track that yet
                     }
-                    
+
                     let playlistState = PlaylistState(
                         slug: playlist.slug,
                         title: playlist.title,
@@ -690,6 +692,7 @@ class AppCoordinator: ObservableObject {
                     try stateManager.savePlaylist(playlistState)
                 }
                 print("✅ Playlists synced to iCloud with \(playlists.count) playlists")
+
             } catch {
                 print("❌ Failed to sync playlists to iCloud: \(error)")
             }

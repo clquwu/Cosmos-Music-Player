@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 enum BackgroundColor: String, CaseIterable, Codable {
     case violet = "b11491"
@@ -71,5 +72,24 @@ struct DeleteSettings: Codable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "DeleteSettings")
         }
+    }
+}
+
+// MARK: - Color Extension for Widget
+extension Color {
+    func toHex() -> String {
+        #if canImport(UIKit)
+        let components = UIColor(self).cgColor.components
+        let r = Float(components?[0] ?? 0)
+        let g = Float(components?[1] ?? 0)
+        let b = Float(components?[2] ?? 0)
+
+        return String(format: "%02lX%02lX%02lX",
+                      lroundf(r * 255),
+                      lroundf(g * 255),
+                      lroundf(b * 255))
+        #else
+        return "b11491" // Default violet
+        #endif
     }
 }

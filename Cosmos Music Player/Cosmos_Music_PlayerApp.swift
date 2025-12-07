@@ -178,13 +178,25 @@ struct Cosmos_Music_PlayerApp: App {
             return
         }
 
-        if url.host == "refresh" {
-            print("📁 URL triggered library refresh - this is a manual refresh so always scan")
-            Task { @MainActor in
+        Task { @MainActor in
+            switch url.host {
+            case "refresh":
+                print("📁 URL triggered library refresh - this is a manual refresh so always scan")
                 await LibraryIndexer.shared.copyFilesFromSharedContainer()
                 if !LibraryIndexer.shared.isIndexing {
                     LibraryIndexer.shared.start()
                 }
+
+            case "playlist":
+                // Extract playlist ID from path
+                let playlistId = url.pathComponents.dropFirst().joined(separator: "/")
+                print("📋 Widget: Opening playlist - \(playlistId)")
+                // For now, just log that we received the deep link
+                // You can implement navigation logic here based on your app's navigation structure
+                print("📋 Widget: Would navigate to playlist with ID: \(playlistId)")
+
+            default:
+                print("⚠️ Unknown URL host: \(url.host ?? "nil")")
             }
         }
     }

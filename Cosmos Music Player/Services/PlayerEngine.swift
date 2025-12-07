@@ -10,6 +10,8 @@ import MediaPlayer
 import UIKit
 import GRDB
 import SFBAudioEngine
+import WidgetKit
+
 @MainActor
 class PlayerEngine: NSObject, ObservableObject {
     static let shared = PlayerEngine()
@@ -53,7 +55,6 @@ class PlayerEngine: NSObject, ObservableObject {
     private var hasSetupSiriBackgroundSession = false
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
-    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var backgroundCheckTimer: Timer?
     
     // Artwork caching
@@ -591,8 +592,49 @@ class PlayerEngine: NSObject, ObservableObject {
         cc.changePlaybackPositionCommand.isEnabled = true
         print("✅ CarPlay seek command enabled")
     }
-    
-    
+
+    // MARK: - Widget Integration
+
+    private func updateWidgetData() {
+        guard let track = currentTrack else {
+            WidgetDataManager.shared.clearCurrentTrack()
+            return
+        }
+
+        Task {
+            // Get artwork
+            let artwork = await ArtworkManager.shared.getArtwork(for: track)
+            let artworkData = artwork?.pngData()
+
+            // Get artist name
+            let artistName: String
+            if let artistId = track.artistId,
+               let artist = try? DatabaseManager.shared.read({ db in
+                   try Artist.fetchOne(db, key: artistId)
+               }) {
+                artistName = artist.name
+            } else {
+                artistName = Localized.unknownArtist
+            }
+
+            // Get theme color
+            let settings = DeleteSettings.load()
+            let colorHex = settings.backgroundColorChoice.color.toHex()
+
+            let widgetData = WidgetTrackData(
+                trackId: track.stableId,
+                title: track.title,
+                artist: artistName,
+                isPlaying: isPlaying,
+                backgroundColorHex: colorHex
+            )
+
+            WidgetDataManager.shared.saveCurrentTrack(widgetData, artworkData: artworkData)
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
+
     // Enhanced manual approach with better Control Center synchronization
     private func updateNowPlayingInfoEnhanced() {
         guard let track = currentTrack else {
@@ -996,6 +1038,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 startPlaybackTimer()
                 print("✅ SFBAudioEngine resumed playback")
                 updateNowPlayingInfoEnhanced()
+                updateWidgetData()
                 return
             } catch {
                 print("❌ Failed to play with SFBAudioEngine: \(error)")
@@ -1097,6 +1140,7 @@ class PlayerEngine: NSObject, ObservableObject {
 
             // Update Now Playing info with enhanced approach
             updateNowPlayingInfoEnhanced()
+            updateWidgetData()
             return
         }
         
@@ -1170,7 +1214,8 @@ class PlayerEngine: NSObject, ObservableObject {
         
         // Update Now Playing info with enhanced approach
         updateNowPlayingInfoEnhanced()
-        
+        updateWidgetData()
+
         print("✅ Playback started and control center claimed")
     }
     
@@ -1185,6 +1230,7 @@ class PlayerEngine: NSObject, ObservableObject {
             stopPlaybackTimer()
             print("✅ SFBAudioEngine paused")
             updateNowPlayingInfoEnhanced()
+            updateWidgetData()
             return
         }
 
@@ -1214,6 +1260,7 @@ class PlayerEngine: NSObject, ObservableObject {
 
         // Update Now Playing info with enhanced approach
         updateNowPlayingInfoEnhanced()
+        updateWidgetData()
 
         // Only start silent audio if paused from within the app, not from Control Center
         // This prevents Control Center button state confusion
@@ -1638,6 +1685,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 self.seekTimeOffset = 0
                 self.playbackTime = 0
                 self.updateNowPlayingInfoEnhanced()
+                self.updateWidgetData()
             }
         }
     }
@@ -1655,6 +1703,7 @@ class PlayerEngine: NSObject, ObservableObject {
                     isPlaying = false
                     playbackState = .paused
                     updateNowPlayingInfoEnhanced()
+                    updateWidgetData()
                 }
             }
             return
@@ -1677,6 +1726,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 seekTimeOffset = 0
                 playbackTime = 0
                 updateNowPlayingInfoEnhanced()
+                updateWidgetData()
             }
         }
     }
