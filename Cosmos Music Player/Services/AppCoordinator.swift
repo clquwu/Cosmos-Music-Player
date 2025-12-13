@@ -10,6 +10,7 @@ import Combine
 import Intents
 import UIKit
 import AVFoundation
+import WidgetKit
 
 extension Dictionary {
     func compactMapKeys<T>(_ transform: (Key) throws -> T?) rethrows -> [T: Value] {
@@ -298,6 +299,19 @@ class AppCoordinator: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Listen for background color changes to update widget theme
+        NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    print("🎨 Background color changed - updating widget theme")
+                    // Update playlist widget colors
+                    self?.syncPlaylistsToCloud()
+                    // Update now playing widget color
+                    self?.playerEngine.updateWidgetData()
+                }
+            }
+            .store(in: &cancellables)
     }
     
     func handleiCloudAuthenticationError() {
@@ -340,6 +354,9 @@ class AppCoordinator: ObservableObject {
 
             // Try playlist restoration again after relationships are fixed
             await retryPlaylistRestoration()
+
+            // Update widget with playlists
+            syncPlaylistsToCloud()
 
             // Check for orphaned files after sync completes
             print("🔄 AppCoordinator: Starting orphaned files check...")
@@ -666,6 +683,8 @@ class AppCoordinator: ObservableObject {
     
     func updatePlaylistLastPlayed(playlistId: Int64) throws {
         try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+        // Update widget to show most recently played playlists
+        syncPlaylistsToCloud()
     }
     
     private func syncPlaylistsToCloud() {
@@ -693,10 +712,90 @@ class AppCoordinator: ObservableObject {
                 }
                 print("✅ Playlists synced to iCloud with \(playlists.count) playlists")
 
+                // Update widget playlist data with artwork
+                await updateWidgetPlaylists(playlists: playlists)
+
             } catch {
                 print("❌ Failed to sync playlists to iCloud: \(error)")
             }
         }
+    }
+
+    private func updateWidgetPlaylists(playlists: [Playlist]) async {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
+        ) else {
+            print("⚠️ Widget: Failed to get shared container URL")
+            return
+        }
+
+        // Sort playlists by most recently played (lastPlayedAt descending)
+        let sortedPlaylists = playlists.sorted { playlist1, playlist2 in
+            return playlist1.lastPlayedAt > playlist2.lastPlayedAt
+        }
+
+        // Show only the top 3 most recently played playlists
+        let playlistsToShow = Array(sortedPlaylists.prefix(3))
+        print("📊 Widget: Showing top 3 most recently played playlists out of \(playlists.count) total")
+
+        var widgetPlaylists: [WidgetPlaylistData] = []
+
+        for playlist in playlistsToShow {
+            guard let playlistId = playlist.id else { continue }
+
+            do {
+                // Get playlist items IN ORDER (same as app displays)
+                let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
+
+                // Preserve playlist order by fetching tracks one by one
+                var orderedTracks: [Track] = []
+                for item in playlistItems {
+                    if let track = try databaseManager.getTrack(byStableId: item.trackStableId) {
+                        orderedTracks.append(track)
+                    }
+                }
+
+                // Get first 4 tracks for artwork mashup (in correct playlist order)
+                let artworkTracks = Array(orderedTracks.prefix(4))
+                var artworkPaths: [String] = []
+
+                // Save artwork for each track
+                for (index, track) in artworkTracks.enumerated() {
+                    if let artwork = await ArtworkManager.shared.getArtwork(for: track),
+                       let artworkData = artwork.jpegData(compressionQuality: 0.8) {
+                        let filename = "playlist_\(playlistId)_\(index).jpg"
+                        let fileURL = containerURL.appendingPathComponent(filename)
+
+                        try? artworkData.write(to: fileURL, options: .atomic)
+                        artworkPaths.append(filename)
+                        print("✅ Widget: Saved artwork '\(track.title)' for playlist '\(playlist.title)' tile \(index)")
+                    }
+                }
+
+                // Get theme color from settings
+                let settings = DeleteSettings.load()
+                let colorHex = settings.backgroundColorChoice.rawValue
+
+                let widgetPlaylist = WidgetPlaylistData(
+                    id: String(playlistId),
+                    name: playlist.title,
+                    trackCount: orderedTracks.count,
+                    colorHex: colorHex,
+                    artworkPaths: artworkPaths
+                )
+                widgetPlaylists.append(widgetPlaylist)
+
+            } catch {
+                print("❌ Failed to process playlist \(playlist.title): \(error)")
+            }
+        }
+
+        PlaylistDataManager.shared.savePlaylists(widgetPlaylists)
+        print("✅ Widget playlist data updated with \(widgetPlaylists.count) playlists")
+
+        // Force widget to reload immediately
+        WidgetCenter.shared.reloadAllTimelines()
+        print("🔄 Widget timeline reload triggered")
     }
     
     func playTrack(_ track: Track, queue: [Track] = []) async {

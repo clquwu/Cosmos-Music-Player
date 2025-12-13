@@ -159,3 +159,75 @@ final class WidgetDataManager: @unchecked Sendable {
     }
 }
 
+// MARK: - Widget Playlist Data
+public struct WidgetPlaylistData: Codable {
+    public let id: String
+    public let name: String
+    public let trackCount: Int
+    public let colorHex: String
+    public let artworkPaths: [String] // Filenames of artwork files in shared container
+
+    public init(id: String, name: String, trackCount: Int, colorHex: String, artworkPaths: [String]) {
+        self.id = id
+        self.name = name
+        self.trackCount = trackCount
+        self.colorHex = colorHex
+        self.artworkPaths = artworkPaths
+    }
+}
+
+// MARK: - Playlist Data Manager
+public final class PlaylistDataManager: @unchecked Sendable {
+    public static let shared = PlaylistDataManager()
+
+    private let userDefaults: UserDefaults?
+    private let playlistsKey = "widget.playlists"
+
+    private init() {
+        userDefaults = UserDefaults(suiteName: "group.dev.clq.Cosmos-Music-Player")
+    }
+
+    public func savePlaylists(_ playlists: [WidgetPlaylistData]) {
+        guard let userDefaults = userDefaults else {
+            print("⚠️ Widget: Failed to access shared UserDefaults for playlists")
+            return
+        }
+
+        do {
+            let encoded = try JSONEncoder().encode(playlists)
+            userDefaults.set(encoded, forKey: playlistsKey)
+            userDefaults.synchronize()
+            print("✅ Widget: Saved \(playlists.count) playlists")
+        } catch {
+            print("❌ Widget: Failed to encode playlists - \(error)")
+        }
+    }
+
+    public func getPlaylists() -> [WidgetPlaylistData] {
+        guard let userDefaults = userDefaults else {
+            print("⚠️ Widget: Failed to access shared UserDefaults for playlists")
+            return []
+        }
+
+        guard let data = userDefaults.data(forKey: playlistsKey) else {
+            print("ℹ️ Widget: No playlist data found")
+            return []
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode([WidgetPlaylistData].self, from: data)
+            print("✅ Widget: Retrieved \(decoded.count) playlists")
+            return decoded
+        } catch {
+            print("❌ Widget: Failed to decode playlists - \(error)")
+            return []
+        }
+    }
+
+    public func clearPlaylists() {
+        userDefaults?.removeObject(forKey: playlistsKey)
+        userDefaults?.synchronize()
+        print("🗑️ Widget: Cleared playlists")
+    }
+}
+

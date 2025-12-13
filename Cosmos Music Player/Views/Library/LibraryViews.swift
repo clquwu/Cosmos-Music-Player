@@ -37,6 +37,7 @@ struct LibraryView: View {
     @State private var searchAlbumToNavigate: Album?
     @State private var searchAlbumTracks: [Track] = []
     @State private var searchPlaylistToNavigate: Playlist?
+    @State private var playlistToNavigate: Playlist?
     @State private var showSearch = false
     @State private var settings = DeleteSettings.load()
     @State private var isRefreshing = false
@@ -466,6 +467,14 @@ struct LibraryView: View {
                     PlaylistDetailScreen(playlist: playlist)
                 }
             }
+            .navigationDestination(isPresented: Binding(
+                get: { playlistToNavigate != nil },
+                set: { if !$0 { playlistToNavigate = nil } }
+            )) {
+                if let playlist = playlistToNavigate {
+                    PlaylistDetailScreen(playlist: playlist)
+                }
+            }
         }
         .background(.clear)
         .toolbarBackground(.clear, for: .navigationBar)
@@ -487,6 +496,20 @@ struct LibraryView: View {
                let allTracks = userInfo["allTracks"] as? [Track] {
                 albumToNavigate = album
                 albumAllTracks = allTracks
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToPlaylist"))) { notification in
+            if let userInfo = notification.userInfo,
+               let playlistId = userInfo["playlistId"] as? Int64 {
+                do {
+                    let playlists = try appCoordinator.databaseManager.getAllPlaylists()
+                    if let playlist = playlists.first(where: { $0.id == playlistId }) {
+                        playlistToNavigate = playlist
+                        print("✅ LibraryView: Navigating to playlist \(playlist.title)")
+                    }
+                } catch {
+                    print("❌ LibraryView: Failed to find playlist: \(error)")
+                }
             }
         }
         .overlay(

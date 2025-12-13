@@ -40,7 +40,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var audioFile: AVAudioFile?
     private var playbackStrategy: PlaybackRouter.PlaybackStrategy?
     private var playbackTimer: Timer?
-
+    
     // SFBAudioEngine integration
     private lazy var sfbAudioManager = SFBAudioEngineManager.shared
     private var usingSFBEngine = false
@@ -61,7 +61,7 @@ class PlayerEngine: NSObject, ObservableObject {
     // Artwork caching
     private var cachedArtwork: MPMediaItemArtwork?
     private var cachedArtworkTrackId: String?
-
+    
     // Security-scoped resource tracking for external files
     private var currentSecurityScopedURL: URL?
     
@@ -230,31 +230,31 @@ class PlayerEngine: NSObject, ObservableObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
             return
         }
-
+        
         switch type {
         case .began:
             print("🚫 Audio session interruption began - pausing playback")
             // Save current playback position before interruption
             let savedPosition = playbackTime
             let wasPlaying = isPlaying
-
+            
             if isPlaying {
                 pause()
             }
-
+            
             // IMPORTANT: Don't stop the audio engine during interruption
             // Stopping it can invalidate the audioFile and cause position loss
             // The system will handle the interruption, we just need to pause
             print("⏸️ Keeping audio engine in paused state during interruption")
-
+            
             // Restore the saved position (pause() may have updated it)
             playbackTime = savedPosition
             print("💾 Saved playback position: \(savedPosition)s (was playing: \(wasPlaying))")
-
+            
         case .ended:
             print("✅ Audio session interruption ended")
             print("💾 Will restore to position: \(playbackTime)s when playback resumes")
-
+            
             // Check if we should resume playback
             let shouldResume: Bool
             if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
@@ -265,7 +265,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 shouldResume = false
                 print("🔍 No interruption options - will not auto-resume")
             }
-
+            
             // Only auto-resume if the system tells us to (e.g., after a Siri interruption)
             // Don't auto-resume for user-initiated interruptions (like audio messages)
             if shouldResume && playbackState == .paused {
@@ -273,13 +273,13 @@ class PlayerEngine: NSObject, ObservableObject {
                 play()
             } else {
                 print("⏸️ Not auto-resuming - user must manually resume")
-
+                
                 // Ensure playback state is correct but keep position saved
                 isPlaying = false
                 playbackState = .paused
                 updateNowPlayingInfoEnhanced()
             }
-
+            
         @unknown default:
             break
         }
@@ -291,10 +291,10 @@ class PlayerEngine: NSObject, ObservableObject {
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
             return
         }
-
+        
         // Update CarPlay status when route changes
         sfbAudioManager.updateCarPlayStatus()
-
+        
         switch reason {
         case .oldDeviceUnavailable:
             // Headphones were unplugged or similar
@@ -556,16 +556,16 @@ class PlayerEngine: NSObject, ObservableObject {
         
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let self, let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-
+            
             // Perform seek synchronously for CarPlay
             let positionTime = e.positionTime
             print("🎯 CarPlay seek request to: \(positionTime)s")
-
+            
             Task { @MainActor in
                 await self.seek(to: positionTime)
                 print("✅ Seek completed to: \(positionTime)s")
             }
-
+            
             return .success
         }
         
@@ -588,25 +588,25 @@ class PlayerEngine: NSObject, ObservableObject {
         cc.previousTrackCommand.isEnabled = true
         cc.changePlaybackPositionCommand.isEnabled = true
         cc.togglePlayPauseCommand.isEnabled = true
-
+        
         // Enable seeking in CarPlay
         cc.changePlaybackPositionCommand.isEnabled = true
         print("✅ CarPlay seek command enabled")
     }
-
+    
     // MARK: - Widget Integration
 
-    private func updateWidgetData() {
+    func updateWidgetData() {
         guard let track = currentTrack else {
             WidgetDataManager.shared.clearCurrentTrack()
             return
         }
-
+        
         Task {
             // Get artwork
             let artwork = await ArtworkManager.shared.getArtwork(for: track)
             let artworkData = artwork?.pngData()
-
+            
             // Get artist name
             let artistName: String
             if let artistId = track.artistId,
@@ -617,11 +617,11 @@ class PlayerEngine: NSObject, ObservableObject {
             } else {
                 artistName = Localized.unknownArtist
             }
-
+            
             // Get theme color
             let settings = DeleteSettings.load()
             let colorHex = settings.backgroundColorChoice.color.toHex()
-
+            
             let widgetData = WidgetTrackData(
                 trackId: track.stableId,
                 title: track.title,
@@ -629,13 +629,13 @@ class PlayerEngine: NSObject, ObservableObject {
                 isPlaying: isPlaying,
                 backgroundColorHex: colorHex
             )
-
+            
             WidgetDataManager.shared.saveCurrentTrack(widgetData, artworkData: artworkData)
             WidgetCenter.shared.reloadAllTimelines()
         }
     }
-
-
+    
+    
     // Enhanced manual approach with better Control Center synchronization
     private func updateNowPlayingInfoEnhanced() {
         guard let track = currentTrack else {
@@ -666,12 +666,12 @@ class PlayerEngine: NSObject, ObservableObject {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyPlaybackQueueCount: playbackQueue.count
         ]
-
+        
         // Add queue position
         if playbackQueue.indices.contains(currentIndex) {
             info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = currentIndex
         }
-
+        
         // Add metadata
         do {
             if let artistId = track.artistId,
@@ -680,17 +680,17 @@ class PlayerEngine: NSObject, ObservableObject {
                }) {
                 info[MPMediaItemPropertyArtist] = artist.name
             }
-
+            
             // Don't add album title to Now Playing info
         } catch {
             print("Failed to fetch metadata: \(error)")
         }
-
+        
         // Add track number
         if let trackNo = track.trackNo {
             info[MPMediaItemPropertyAlbumTrackNumber] = trackNo
         }
-
+        
         // Add cached artwork
         if let cachedArtwork = cachedArtwork, cachedArtworkTrackId == track.stableId {
             info[MPMediaItemPropertyArtwork] = cachedArtwork
@@ -698,20 +698,20 @@ class PlayerEngine: NSObject, ObservableObject {
         } else {
             print("⚠️ No cached artwork available for: \(track.title) (cached: \(cachedArtwork != nil), trackId match: \(cachedArtworkTrackId == track.stableId))")
         }
-
+        
         // Update with explicit synchronization
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-
+            
             // Update Now Playing Info
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-
+            
             // Trigger CarPlay Now Playing button update
             MPNowPlayingInfoCenter.default().playbackState = self.isPlaying ? .playing : .paused
-
+            
             // Notify CarPlay delegate of state change
             NotificationCenter.default.post(name: NSNotification.Name("PlayerStateChanged"), object: nil)
-
+            
             print("🎛️ Enhanced Control Center update - playing: \(self.isPlaying)")
             print("🎛️ Title: \(track.title), Time: \(currentTime)")
         }
@@ -832,7 +832,7 @@ class PlayerEngine: NSObject, ObservableObject {
         playbackState = .loading
         
         // Volume control already set up in init
-
+        
         do {
             // Stop accessing previous security-scoped resource if any
             if let previousURL = currentSecurityScopedURL {
@@ -840,23 +840,23 @@ class PlayerEngine: NSObject, ObservableObject {
                 currentSecurityScopedURL = nil
                 print("🔓 Stopped accessing previous security-scoped resource")
             }
-
+            
             // Check if this is an external file with a bookmark (file may have moved)
             var url: URL
             var needsSecurityScope = false
-
+            
             if let resolvedURL = await LibraryIndexer.shared.resolveBookmarkForTrack(track) {
                 // Bookmark found and resolved - use the current location
                 print("📍 Using resolved bookmark location: \(resolvedURL.path)")
                 url = resolvedURL
                 needsSecurityScope = true
-
+                
                 // Start accessing security-scoped resource for external files
                 guard url.startAccessingSecurityScopedResource() else {
                     print("❌ Failed to start accessing security-scoped resource")
                     throw PlayerError.fileNotFound
                 }
-
+                
                 // Store URL to stop access later
                 currentSecurityScopedURL = url
                 print("🔐 Started accessing security-scoped resource for external file")
@@ -864,7 +864,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 // No bookmark - use path from database
                 url = URL(fileURLWithPath: track.path)
             }
-
+            
             try await cloudDownloadManager.ensureLocal(url)
             
             // Remove file protection to prevent background stalls
@@ -878,33 +878,33 @@ class PlayerEngine: NSObject, ObservableObject {
             // Check if SFBAudioEngine can handle this format
             if SFBAudioEngineManager.canHandle(url: url) {
                 print("🚀 PlayerEngine delegating to SFBAudioEngine: \(url.lastPathComponent)")
-
+                
                 do {
                     // Delegate to SFBAudioEngine for Opus, Vorbis, DSD
                     try await sfbAudioManager.loadAndPlay(url: url)
                     usingSFBEngine = true
-
+                    
                     // Note: SFBAudioEngine now handles its own native EQ setup
-
+                    
                     // Sync duration from SFB engine
                     duration = sfbAudioManager.duration
                     print("🔄 PlayerEngine duration synced from SFBAudioEngine: \(duration)s")
-
+                    
                     print("✅ Delegated to SFBAudioEngine: \(url.lastPathComponent)")
                 } catch {
                     print("❌ SFBAudioEngine delegation failed: \(error)")
-
+                    
                     // Check if this is a DSD sample rate issue - if so, try native fallback
                     if let nsError = error as NSError?,
                        ((nsError.domain == "SFBAudioEngineManager" && nsError.code == 1001) ||
                         (nsError.domain == "org.sbooth.AudioEngine.DSDDecoder" && nsError.code == 2)),
                        url.pathExtension.lowercased() == "dff" || url.pathExtension.lowercased() == "dsf" {
-
+                        
                         print("💡 Attempting native playback fallback for DSD file with unsupported sample rate")
-
+                        
                         // Force native playback for this DSD file
                         usingSFBEngine = false
-
+                        
                         do {
                             // Try native AVAudioFile loading
                             audioFile = try await withCheckedThrowingContinuation { continuation in
@@ -917,9 +917,9 @@ class PlayerEngine: NSObject, ObservableObject {
                                     }
                                 }
                             }
-
+                            
                             print("✅ DSD file loaded successfully with native AVAudioFile fallback")
-
+                            
                         }
                     } else {
                         // For other SFBAudioEngine errors (like AudioPlayer init failure), rethrow
@@ -930,22 +930,22 @@ class PlayerEngine: NSObject, ObservableObject {
             } else {
                 // Use your existing native implementation for FLAC, MP3, WAV, AAC
                 usingSFBEngine = false
-
+                
                 audioFile = try await withCheckedThrowingContinuation { continuation in
                     DispatchQueue.global(qos: .background).async {
                         var error: NSError?
                         let coordinator = NSFileCoordinator()
-
+                        
                         coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &error) { (readingURL) in
                             do {
                                 let freshURL = URL(fileURLWithPath: readingURL.path)
                                 print("🎵 Loading native audio file: \(freshURL.lastPathComponent)")
-
+                                
                                 // Check if this is a DSD file that was rejected by SFBAudioEngine
                                 let fileExtension = freshURL.pathExtension.lowercased()
                                 if fileExtension == "dsf" || fileExtension == "dff" {
                                     print("⚠️ DSD file rejected by SFBAudioEngine - may be due to sample rate or format incompatibility")
-
+                                    
                                     let dsdError = NSError(domain: "PlayerEngine", code: 3001, userInfo: [
                                         NSLocalizedDescriptionKey: "DSD file not supported",
                                         NSLocalizedFailureReasonErrorKey: "This DSD file has a sample rate that is too high for playback.",
@@ -954,12 +954,12 @@ class PlayerEngine: NSObject, ObservableObject {
                                     continuation.resume(throwing: dsdError)
                                     return
                                 }
-
+                                
                                 guard FileManager.default.fileExists(atPath: freshURL.path) else {
                                     continuation.resume(throwing: PlayerError.fileNotFound)
                                     return
                                 }
-
+                                
                                 let audioFile = try AVAudioFile(forReading: freshURL)
                                 print("✅ Native AVAudioFile loaded successfully: \(freshURL.lastPathComponent)")
                                 continuation.resume(returning: audioFile)
@@ -968,24 +968,24 @@ class PlayerEngine: NSObject, ObservableObject {
                                 continuation.resume(throwing: error)
                             }
                         }
-
+                        
                         if let error = error {
                             print("❌ NSFileCoordinator error in PlayerEngine: \(error)")
                             continuation.resume(throwing: error)
                         }
                     }
                 }
-
+                
                 guard let audioFile = audioFile else {
                     throw PlayerError.invalidAudioFile
                 }
-
+                
                 duration = Double(audioFile.length) / audioFile.processingFormat.sampleRate
-
+                
                 // Ensure audio engine is setup for native playback
                 ensureAudioEngineSetup(with: audioFile.processingFormat)
             }
-
+            
             // Handle SFBAudioEngine specific setup
             if usingSFBEngine {
                 if !preservePlaybackTime {
@@ -998,14 +998,14 @@ class PlayerEngine: NSObject, ObservableObject {
                 if !preservePlaybackTime {
                     playbackTime = 0
                 }
-
+                
                 // CRITICAL: Reset audio session if switching from SFBAudioEngine
                 // SFBAudioEngine configures for DoP/DSD which is incompatible with native AVAudioEngine
                 await resetAudioSessionForNative()
-
+                
                 // Also reset AVAudioEngine to ensure clean state
                 resetAudioEngineForNative()
-
+                
                 await configureAudioSession(for: audioFile!.processingFormat)
             }
             
@@ -1029,7 +1029,7 @@ class PlayerEngine: NSObject, ObservableObject {
     
     func play() {
         print("▶️ play() called - state: \(playbackState), loading: \(isLoadingTrack), usingSFBEngine: \(usingSFBEngine)")
-
+        
         // Delegate to SFBAudioEngine if it's handling this track
         if usingSFBEngine {
             do {
@@ -1046,7 +1046,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 return
             }
         }
-
+        
         // If no audio file is loaded but we have a current track, load it first
         if audioFile == nil && currentTrack != nil && !isLoadingTrack {
             Task {
@@ -1056,7 +1056,7 @@ class PlayerEngine: NSObject, ObservableObject {
                     print("🔄 Reloading track after interruption, preserving position: \(playbackTime)s")
                     let savedPosition = playbackTime
                     await loadTrack(currentTrack!, preservePlaybackTime: true)
-
+                    
                     // Restore position after reload
                     if savedPosition > 0 {
                         await seek(to: savedPosition)
@@ -1066,7 +1066,7 @@ class PlayerEngine: NSObject, ObservableObject {
                     // First-time state restoration
                     await ensurePlayerStateRestored()
                 }
-
+                
                 // After loading, try to play again
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     self.play()
@@ -1074,7 +1074,7 @@ class PlayerEngine: NSObject, ObservableObject {
             }
             return
         }
-
+        
         guard let audioFile = audioFile,
               playbackState != .loading,
               !isLoadingTrack else {
@@ -1099,21 +1099,21 @@ class PlayerEngine: NSObject, ObservableObject {
         
         if playbackState == .paused {
             print("▶️ Resuming from pause at position: \(playbackTime)s")
-
+            
             // When resuming from pause, we need to re-schedule audio from the correct position
             // instead of just continuing the engine, because the timing may have drifted
             cancelPendingCompletions()
             playerNode.stop()
-
+            
             // Re-schedule from the stored pause position
             // Note: audioFile is already unwrapped from the guard statement above
-
+            
             // CRITICAL: Update seekTimeOffset to match the resume position
             // This ensures time calculation (seekTimeOffset + nodePlaybackTime) is correct
             seekTimeOffset = playbackTime
-
+            
             let framePosition = AVAudioFramePosition(playbackTime * audioFile.processingFormat.sampleRate)
-
+            
             // IMPORTANT: Ensure audio engine is running BEFORE scheduling
             do {
                 if !audioEngine.isRunning {
@@ -1124,21 +1124,21 @@ class PlayerEngine: NSObject, ObservableObject {
                 print("❌ Failed to start audio engine when resuming: \(error)")
                 return
             }
-
+            
             scheduleSegment(from: framePosition, file: audioFile)
-
+            
             playerNode.play()
             isPlaying = true
             playbackState = .playing
             startPlaybackTimer()
-
+            
             // End paused state monitoring and start regular playing monitoring
             stopSilentPlaybackForPause()
             endBackgroundMonitoring()
             startBackgroundMonitoring()
-
+            
             print("✅ Resumed playback from position: \(playbackTime)s")
-
+            
             // Update Now Playing info with enhanced approach
             updateNowPlayingInfoEnhanced()
             updateWidgetData()
@@ -1147,16 +1147,16 @@ class PlayerEngine: NSObject, ObservableObject {
         
         cancelPendingCompletions()
         playerNode.stop()
-
+        
         print("🔊 Audio format - Sample Rate: \(audioFile.processingFormat.sampleRate), Channels: \(audioFile.processingFormat.channelCount)")
         print("🔊 Audio file length: \(audioFile.length) frames")
-
+        
         // Check if the file length is reasonable
         guard audioFile.length > 0 && audioFile.length < 1_000_000_000 else {
             print("❌ Invalid audio file length: \(audioFile.length)")
             return
         }
-
+        
         // IMPORTANT: Ensure audio engine is running BEFORE scheduling
         if !audioEngine.isRunning {
             do {
@@ -1167,11 +1167,11 @@ class PlayerEngine: NSObject, ObservableObject {
                 return
             }
         }
-
+        
         // Preserve current seek offset and playback time when resuming
         let currentPosition = playbackTime
         let startFrame = AVAudioFramePosition(currentPosition * audioFile.processingFormat.sampleRate)
-
+        
         // Schedule appropriate segment based on current position
         if startFrame > 0 && startFrame < audioFile.length {
             // Continue from current position
@@ -1194,7 +1194,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 print("✅ Starting playback from beginning")
             }
         }
-
+        
         print("✅ Audio segment scheduled successfully")
         
         // Set up audio session notifications only when needed
@@ -1216,13 +1216,13 @@ class PlayerEngine: NSObject, ObservableObject {
         // Update Now Playing info with enhanced approach
         updateNowPlayingInfoEnhanced()
         updateWidgetData()
-
+        
         print("✅ Playback started and control center claimed")
     }
     
     func pause(fromControlCenter: Bool = false) {
         print("⏸️ pause() called - usingSFBEngine: \(usingSFBEngine)")
-
+        
         // Delegate to SFBAudioEngine if it's handling this track
         if usingSFBEngine {
             sfbAudioManager.pause()
@@ -1234,35 +1234,35 @@ class PlayerEngine: NSObject, ObservableObject {
             updateWidgetData()
             return
         }
-
+        
         // Capture current playback position before pausing
         if let audioFile = audioFile,
            let nodeTime = playerNode.lastRenderTime,
            let playerTime = playerNode.playerTime(forNodeTime: nodeTime) {
             let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
             let currentPosition = seekTimeOffset + nodePlaybackTime
-
+            
             print("🔄 Pausing at position: \(currentPosition)s (from Control Center: \(fromControlCenter))")
-
+            
             // Store the exact pause position
             playbackTime = currentPosition
             seekTimeOffset = currentPosition
         }
-
+        
         // Use AVAudioEngine.pause() instead of playerNode.pause()
         audioEngine.pause()
-
+        
         // Update state
         isPlaying = false
         playbackState = .paused
         stopPlaybackTimer()
-
+        
         print("🔄 Paused audio engine - stored position: \(playbackTime)s")
-
+        
         // Update Now Playing info with enhanced approach
         updateNowPlayingInfoEnhanced()
         updateWidgetData()
-
+        
         // Only start silent audio if paused from within the app, not from Control Center
         // This prevents Control Center button state confusion
         if !fromControlCenter {
@@ -1272,7 +1272,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 }
             }
         }
-
+        
         // Save state when pausing
         savePlayerState()
     }
@@ -1288,7 +1288,7 @@ class PlayerEngine: NSObject, ObservableObject {
         isPlaying = false
         playbackState = .stopped
         playbackTime = 0
-
+        
         // Stop accessing security-scoped resource if any
         if let securedURL = currentSecurityScopedURL {
             securedURL.stopAccessingSecurityScopedResource()
@@ -1319,17 +1319,17 @@ class PlayerEngine: NSObject, ObservableObject {
     
     private func cleanupCurrentPlayback(resetTime: Bool = false) async {
         print("🧹 Cleaning up current playback")
-
+        
         // Stop accessing security-scoped resource if any
         if let securedURL = currentSecurityScopedURL {
             securedURL.stopAccessingSecurityScopedResource()
             currentSecurityScopedURL = nil
             print("🔓 Stopped accessing security-scoped resource during cleanup")
         }
-
+        
         // Stop timer first
         stopPlaybackTimer()
-
+        
         // Stop appropriate audio engine
         if usingSFBEngine {
             print("🛑 Stopping SFBAudioEngine")
@@ -1338,23 +1338,23 @@ class PlayerEngine: NSObject, ObservableObject {
             // Stop player node
             playerNode.stop()
         }
-
+        
         // NEVER deactivate session during cleanup - this causes 30-second suspension on iOS 18
-
+        
         // Reset state
         isPlaying = false
         if resetTime { playbackTime = 0 }        // was unconditional
-
+        
         // Keep audio engine running for next playback
         // Don't stop the engine here as it causes the error message
-
+        
         // Give the audio engine a moment to clean up
         try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
     }
     
     func seek(to time: TimeInterval) async {
         print("⏪ seek(to: \(time)) called - usingSFBEngine: \(usingSFBEngine)")
-
+        
         // Delegate to SFBAudioEngine if it's handling this track
         if usingSFBEngine {
             do {
@@ -1368,18 +1368,18 @@ class PlayerEngine: NSObject, ObservableObject {
                 return
             }
         }
-
+        
         // If no audio file is loaded but we have a current track, load it first
         if audioFile == nil && currentTrack != nil && !isLoadingTrack {
             await ensurePlayerStateRestored()
         }
-
+        
         guard let audioFile = audioFile,
               !isLoadingTrack else {
             print("⚠️ Cannot seek: audioFile=\(audioFile != nil), loading=\(isLoadingTrack)")
             return
         }
-
+        
         let framePosition = AVAudioFramePosition(time * audioFile.processingFormat.sampleRate)
         let wasPlaying = isPlaying
         
@@ -1390,10 +1390,10 @@ class PlayerEngine: NSObject, ObservableObject {
         }
         
         print("🔍 Seeking to: \(time)s (frame: \(framePosition))")
-
+        
         // Ensure audio engine is set up before seeking with file's format
         ensureAudioEngineSetup(with: audioFile.processingFormat)
-
+        
         // Ensure audio engine is running before scheduling
         if !audioEngine.isRunning {
             do {
@@ -1404,10 +1404,10 @@ class PlayerEngine: NSObject, ObservableObject {
                 return
             }
         }
-
+        
         cancelPendingCompletions()
         playerNode.stop()
-
+        
         scheduleSegment(from: framePosition, file: audioFile)
         
         // Update seek offset and playback time
@@ -1470,35 +1470,35 @@ class PlayerEngine: NSObject, ObservableObject {
     
     // MARK: - SFBAudioEngine Integration
     // SFBAudioEngine now handles playback directly via SFBAudioEngineManager
-
-
+    
+    
     // MARK: - Audio Scheduling Helper
-
+    
     private func scheduleSegment(from startFrame: AVAudioFramePosition, file: AVAudioFile) {
         // Safety check: Ensure audio engine is running
         guard audioEngine.isRunning else {
             print("❌ Cannot schedule segment: audio engine is not running")
             return
         }
-
+        
         // Validate startFrame is within bounds
         guard startFrame >= 0 && startFrame < file.length else {
             print("❌ Invalid startFrame: \(startFrame), file length: \(file.length)")
             return
         }
-
+        
         let remaining = file.length - startFrame
         guard remaining > 0 else {
             print("❌ No remaining frames to schedule: startFrame=\(startFrame), length=\(file.length)")
             return
         }
-
+        
         // Validate that frameCount doesn't overflow AVAudioFrameCount
         guard remaining <= AVAudioFrameCount.max else {
             print("❌ Remaining frames exceed AVAudioFrameCount.max: \(remaining)")
             return
         }
-
+        
         // Schedule segment with error handling
         do {
             // Schedule WITHOUT any completion handler
@@ -1509,9 +1509,9 @@ class PlayerEngine: NSObject, ObservableObject {
                 at: nil,
                 completionHandler: nil
             )
-
+            
             print("✅ Successfully scheduled segment: startFrame=\(startFrame), frameCount=\(remaining)")
-
+            
             // Start background monitoring when we schedule a segment
             startBackgroundMonitoring()
         } catch {
@@ -1519,21 +1519,22 @@ class PlayerEngine: NSObject, ObservableObject {
             print("❌ Details - startFrame: \(startFrame), remaining: \(remaining), file length: \(file.length)")
         }
     }
-    
     private func startBackgroundMonitoring() {
         // Only create a background task if we don't already have one
         if backgroundTask == .invalid {
             backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
                 print("🚨 Background task expiring during playback")
-                self?.endBackgroundMonitoring()
+                Task { @MainActor in
+                    self?.endBackgroundMonitoring()
+                }
             }
         }
-        
+
         // Start a timer that works in background
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.checkIfTrackEnded()
+                await self?.checkIfTrackEnded()
             }
         }
     }
@@ -1556,36 +1557,37 @@ class PlayerEngine: NSObject, ObservableObject {
     
     private func maintainAudioSessionForBackground() {
         // Keep the audio session active to prevent app termination
-        do {
-            let session = AVAudioSession.sharedInstance()
-            
-            // Only maintain session if we're not already active
-            guard !session.isOtherAudioPlaying else {
-                print("🎧 Other audio playing, not maintaining session")
-                return
+        Task { @MainActor in
+            do {
+                let session = AVAudioSession.sharedInstance()
+
+                // Only maintain session if we're not already active
+                guard !session.isOtherAudioPlaying else {
+                    print("🎧 Other audio playing, not maintaining session")
+                    return
+                }
+
+                // Don't change category if already correct - this prevents the error
+                if session.category != .playback {
+                    try session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetoothA2DP])
+                }
+
+                // Only activate if not already active
+                if !session.secondaryAudioShouldBeSilencedHint {
+                    try session.setActive(true, options: [])
+                    print("🎧 Audio session maintained during pause to prevent termination")
+                } else {
+                    print("🎧 Audio session already active during pause")
+                }
+
+            } catch {
+                print("❌ Failed to maintain audio session during pause: \(error)")
+                // Don't try to maintain session if it fails - let the app handle it naturally
             }
-            
-            // Don't change category if already correct - this prevents the error
-            if session.category != .playback {
-                try session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetoothA2DP])
-            }
-            
-            // Only activate if not already active
-            if !session.secondaryAudioShouldBeSilencedHint {
-                try session.setActive(true, options: [])
-                print("🎧 Audio session maintained during pause to prevent termination")
-            } else {
-                print("🎧 Audio session already active during pause")
-            }
-            
-        } catch {
-            print("❌ Failed to maintain audio session during pause: \(error)")
-            // Don't try to maintain session if it fails - let the app handle it naturally
         }
     }
     
-    @MainActor
-    private func checkIfTrackEnded() {
+    private func checkIfTrackEnded() async {
         // Check if audio has finished playing
         guard isPlaying else { return }
 
@@ -1595,24 +1597,21 @@ class PlayerEngine: NSObject, ObservableObject {
         // Check if player node has stopped naturally (reached end)
         if !playerNode.isPlaying && audioFile != nil {
             // Track has ended
-            Task { @MainActor in
-                await handleTrackEnd()
-            }
+            await handleTrackEnd()
+            return
         }
-        
+
         // Alternative check: position-based
         if let audioFile = audioFile {
             if let nodeTime = playerNode.lastRenderTime,
                let playerTime = playerNode.playerTime(forNodeTime: nodeTime) {
                 let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
                 let currentTime = seekTimeOffset + nodePlaybackTime
-                
+
                 if currentTime >= duration - 0.2 && duration > 0 {
                     // Track is ending
                     isPlaying = false // Prevent multiple triggers
-                    Task { @MainActor in
-                        await handleTrackEnd()
-                    }
+                    await handleTrackEnd()
                 }
             }
         }
@@ -1804,69 +1803,69 @@ class PlayerEngine: NSObject, ObservableObject {
     }
     
     // MARK: - Audio Session Configuration
-
+    
     /// Reset AVAudioEngine to clean state when switching from SFBAudioEngine
     private func resetAudioEngineForNative() {
         print("🔄 Resetting AVAudioEngine for native playback")
-
+        
         // Stop and reset the audio engine completely
         if audioEngine.isRunning {
             audioEngine.stop()
             print("✅ AVAudioEngine stopped")
         }
-
+        
         // Reset player node
         if playerNode.isPlaying {
             playerNode.stop()
         }
-
+        
         // Detach all nodes and recreate clean setup
         audioEngine.detach(playerNode)
         eqManager.setAudioEngine(nil) // Detach EQ by setting engine to nil
-
+        
         // Create fresh player node
         playerNode = AVAudioPlayerNode()
         audioEngine.attach(playerNode)
-
+        
         // Reattach EQ manager with fresh engine
         eqManager.setAudioEngine(audioEngine)
-
+        
         // Reset setup flag to force proper reconnection
         hasSetupAudioEngine = false
-
+        
         print("✅ AVAudioEngine reset complete for native playback")
     }
-
+    
     /// Reset audio session to standard configuration when switching from SFBAudioEngine
     private func resetAudioSessionForNative() async {
         do {
             let session = AVAudioSession.sharedInstance()
-
+            
             print("🔄 Resetting audio session for native playback after SFBAudioEngine")
-
+            
             // Deactivate first to clear any SFBAudioEngine DoP/DSD configuration
             try session.setActive(false)
             print("✅ Audio session deactivated to clear SFBAudioEngine settings")
-
+            
             // Set standard category for native playback
             try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
             print("✅ Audio session category reset to standard playback")
-
+            
             // Reset to standard sample rate and buffer for native AVAudioEngine
             try session.setPreferredSampleRate(44100) // Start with standard rate
             try session.setPreferredIOBufferDuration(0.020) // 20ms buffer for native
             print("✅ Audio session sample rate and buffer reset to native defaults")
-
+            
             // Reactivate with new settings
             try session.setActive(true)
             print("✅ Audio session reactivated for native playback")
-
+            
         } catch {
             print("⚠️ Audio session reset failed (continuing): \(error)")
             // Continue anyway - the next configureAudioSession call will fix it
         }
     }
-
+    
     private func configureAudioSession(for format: AVAudioFormat) async {
         do {
             let session = AVAudioSession.sharedInstance()
@@ -1912,21 +1911,21 @@ class PlayerEngine: NSObject, ObservableObject {
         // Handle SFBAudioEngine timing
         if usingSFBEngine {
             playbackTime = sfbAudioManager.currentTime
-
+            
             // Check for completion
             if playbackTime >= duration && duration > 0 {
                 await handleTrackEnd()
             }
             return
         }
-
+        
         // Handle native engine timing
         guard let audioFile = audioFile,
               let nodeTime = playerNode.lastRenderTime,
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
             return
         }
-
+        
         // Add seek offset to handle scheduleSegment from non-zero positions
         // playerTime.sampleTime is in the file's sample rate, so use file rate for calculation
         let nodePlaybackTime = Double(playerTime.sampleTime) / audioFile.processingFormat.sampleRate
@@ -2017,7 +2016,7 @@ class PlayerEngine: NSObject, ObservableObject {
                             
                             // Handle different file formats for artwork extraction
                             let fileExtension = freshURL.pathExtension.lowercased()
-
+                            
                             if fileExtension == "dsf" || fileExtension == "dff" {
                                 // For DSD files, try SFBAudioEngine metadata extraction
                                 if let artwork = self.loadArtworkFromSFBAudioEngine(url: freshURL) {
@@ -2025,14 +2024,14 @@ class PlayerEngine: NSObject, ObservableObject {
                                     continuation.resume(returning: artwork)
                                     return
                                 }
-
+                                
                                 // Fallback to direct file parsing for DSD
                                 if let artwork = self.loadArtworkFromDSDFile(url: freshURL) {
                                     print("✅ Loaded DSD artwork via direct parsing")
                                     continuation.resume(returning: artwork)
                                     return
                                 }
-
+                                
                                 print("⚠️ No artwork found in DSD file: \(freshURL.lastPathComponent)")
                                 continuation.resume(returning: nil)
                             } else if fileExtension == "flac" {
@@ -2106,17 +2105,17 @@ class PlayerEngine: NSObject, ObservableObject {
                    let originalImage = UIImage(data: data) {
                     
                     print("🎨 Found artwork in AVAsset metadata (size: \(Int(originalImage.size.width))x\(Int(originalImage.size.height)))")
-
+                    
                     // Crop to square if width is significantly larger than height
                     let processedImage = self.cropToSquareIfNeeded(image: originalImage)
-
+                    
                     // Use large size for CarPlay - 1024x1024 recommended
                     let targetSize = CGSize(width: 1024, height: 1024)
                     let artwork = MPMediaItemArtwork(boundsSize: targetSize) { size in
                         // Resize image to requested size
                         return self.resizeImage(processedImage, to: size)
                     }
-
+                    
                     return artwork
                 }
             }
@@ -2271,25 +2270,25 @@ class PlayerEngine: NSObject, ObservableObject {
             // Try to use SFBAudioEngine to extract artwork
             let audioFile = try SFBAudioEngine.AudioFile(readingPropertiesAndMetadataFrom: url)
             let metadata = audioFile.metadata
-
+            
             // SFBAudioEngine AudioMetadata doesn't expose raw artwork data directly
             // The current SFBAudioEngine API doesn't provide easy access to embedded artwork
             // We'll need to use the direct file parsing method instead
             print("🔍 SFBAudioEngine metadata available but artwork extraction not directly supported")
             print("🔍 Metadata - Title: \(metadata.title ?? "nil"), Artist: \(metadata.artist ?? "nil")")
-
+            
             return nil
         } catch {
             print("⚠️ SFBAudioEngine artwork extraction failed: \(error)")
             return nil
         }
     }
-
+    
     private nonisolated func loadArtworkFromDSDFile(url: URL) -> MPMediaItemArtwork? {
         do {
             let data = try Data(contentsOf: url)
             let fileExtension = url.pathExtension.lowercased()
-
+            
             // For DSF files, try ID3v2 APIC frame extraction first
             if fileExtension == "dsf" {
                 if let image = extractDSFArtworkFromID3(data: data, filename: url.lastPathComponent) {
@@ -2300,28 +2299,28 @@ class PlayerEngine: NSObject, ObservableObject {
                     }
                 }
             }
-
+            
             // Fallback to binary signature search for both DSF and DFF files
             print("⚠️ No ID3v2 artwork found, searching for binary signatures in: \(url.lastPathComponent)")
-
+            
             // Image signatures to look for
             let jpegSignature = Data([0xFF, 0xD8, 0xFF])
             let pngSignature = Data([0x89, 0x50, 0x4E, 0x47])
-
+            
             // Search for embedded images in DSD files
             let searchRange = 0..<min(data.count, 2097152) // Search first 2MB
-
+            
             // Look for JPEG images
             if let jpegRange = data.range(of: jpegSignature, in: searchRange) {
                 // Try to extract JPEG starting from found position
                 let startOffset = jpegRange.lowerBound
-
+                
                 // Look for JPEG end marker (FF D9)
                 let jpegEndSignature = Data([0xFF, 0xD9])
                 if let endRange = data.range(of: jpegEndSignature, in: startOffset..<min(data.count, startOffset + 1048576)) {
                     let endOffset = endRange.upperBound
                     let imageData = data.subdata(in: startOffset..<endOffset)
-
+                    
                     if let image = UIImage(data: imageData) {
                         print("🎨 Extracted JPEG artwork from DSD file (binary search)")
                         let processedImage = self.cropToSquareIfNeeded(image: image)
@@ -2331,18 +2330,18 @@ class PlayerEngine: NSObject, ObservableObject {
                     }
                 }
             }
-
+            
             // Look for PNG images
             if let pngRange = data.range(of: pngSignature, in: searchRange) {
                 // Try to extract PNG starting from found position
                 let startOffset = pngRange.lowerBound
-
+                
                 // PNG files end with IEND chunk (49 45 4E 44)
                 let pngEndSignature = Data([0x49, 0x45, 0x4E, 0x44])
                 if let endRange = data.range(of: pngEndSignature, in: startOffset..<min(data.count, startOffset + 1048576)) {
                     let endOffset = endRange.upperBound + 4 // Include CRC after IEND
                     let imageData = data.subdata(in: startOffset..<min(endOffset, data.count))
-
+                    
                     if let image = UIImage(data: imageData) {
                         print("🎨 Extracted PNG artwork from DSD file (binary search)")
                         let processedImage = self.cropToSquareIfNeeded(image: image)
@@ -2352,55 +2351,55 @@ class PlayerEngine: NSObject, ObservableObject {
                     }
                 }
             }
-
+            
             return nil
         } catch {
             print("⚠️ Direct DSD artwork extraction failed: \(error)")
             return nil
         }
     }
-
+    
     private nonisolated func cropToSquareIfNeeded(image: UIImage) -> UIImage {
         let width = image.size.width
         let height = image.size.height
-
+        
         // If the image is already square or taller than wide, return as-is
         if width <= height {
             return image
         }
-
+        
         // If width is more than 20% larger than height, crop to square
         let aspectRatio = width / height
         if aspectRatio > 1.2 {
             print("🖼️ Cropping wide artwork (aspect ratio: \(String(format: "%.2f", aspectRatio))) to square")
-
+            
             // Calculate the square size (use height as the dimension)
             let squareSize = height
-
+            
             // Calculate the crop rect (center the crop horizontally)
             let xOffset = (width - squareSize) / 2
             let cropRect = CGRect(x: xOffset, y: 0, width: squareSize, height: squareSize)
-
+            
             // Perform the crop
             guard let cgImage = image.cgImage?.cropping(to: cropRect) else {
                 print("⚠️ Failed to crop image, returning original")
                 return image
             }
-
+            
             return UIImage(cgImage: cgImage, scale: image.scale, orientation: image.imageOrientation)
         }
-
+        
         // Return original if aspect ratio is acceptable
         return image
     }
-
+    
     private nonisolated func resizeImage(_ image: UIImage, to size: CGSize) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
             image.draw(in: CGRect(origin: .zero, size: size))
         }
     }
-
+    
     // Extract artwork from DSF file using ID3v2 APIC frames
     private nonisolated func extractDSFArtworkFromID3(data: Data, filename: String) -> UIImage? {
         // Validate DSF signature: 'D', 'S', 'D', ' ' (includes 1 space)
@@ -2409,17 +2408,17 @@ class PlayerEngine: NSObject, ObservableObject {
             print("⚠️ Invalid DSF signature in: \(filename)")
             return nil
         }
-
+        
         // Read metadata pointer from DSF header (little-endian at offset 20)
         let metadataPointer = readLittleEndianUInt64(from: data, offset: 20)
-
+        
         guard metadataPointer > 0 && metadataPointer < data.count else {
             print("⚠️ No metadata pointer in DSF file: \(filename)")
             return nil
         }
-
+        
         let metadataOffset = Int(metadataPointer)
-
+        
         // Check for ID3v2 signature at metadata pointer
         guard data.count >= metadataOffset + 10,
               data[metadataOffset] == 0x49, // 'I'
@@ -2428,31 +2427,31 @@ class PlayerEngine: NSObject, ObservableObject {
             print("⚠️ No ID3v2 tag found at metadata pointer in: \(filename)")
             return nil
         }
-
+        
         print("🏷️ Found ID3v2 tag in DSF file: \(filename)")
-
+        
         let id3Data = data.subdata(in: metadataOffset..<data.count)
         return extractArtworkFromID3v2(data: id3Data, filename: filename)
     }
-
+    
     // Extract artwork from ID3v2 APIC frame
     private nonisolated func extractArtworkFromID3v2(data: Data, filename: String) -> UIImage? {
         guard data.count >= 10 else { return nil }
-
+        
         // Read ID3v2 header
         let majorVersion = data[3]
         let tagSize = Int((UInt32(data[6]) << 21) | (UInt32(data[7]) << 14) | (UInt32(data[8]) << 7) | UInt32(data[9]))
-
+        
         print("🏷️ Searching for APIC frame in ID3v2.\(majorVersion) tag, size: \(tagSize) bytes")
-
+        
         // Parse frames to find APIC (attached picture)
         var offset = 10
         let endOffset = min(data.count, 10 + tagSize)
-
+        
         while offset < endOffset - 10 {
             // Read frame header (10 bytes for v2.3/v2.4)
             let frameId = String(data: data.subdata(in: offset..<offset+4), encoding: .ascii) ?? ""
-
+            
             let frameSize: Int
             if majorVersion >= 4 {
                 // ID3v2.4 uses synchsafe integers for frame size
@@ -2461,32 +2460,32 @@ class PlayerEngine: NSObject, ObservableObject {
                 // ID3v2.3 uses regular 32-bit big-endian integer
                 frameSize = Int((UInt32(data[offset+4]) << 24) | (UInt32(data[offset+5]) << 16) | (UInt32(data[offset+6]) << 8) | UInt32(data[offset+7]))
             }
-
+            
             // Move to frame data
             offset += 10
-
+            
             guard frameSize > 0 && offset + frameSize <= endOffset else {
                 break
             }
-
+            
             if frameId == "APIC" {
                 print("🎨 Found APIC frame in \(filename), size: \(frameSize) bytes")
-
+                
                 let frameData = data.subdata(in: offset..<offset+frameSize)
-
+                
                 // Parse APIC frame structure:
                 // [Encoding] [MIME type] [Picture type] [Description] [Picture data]
                 var frameOffset = 1 // Skip encoding byte
-
+                
                 // Skip MIME type (null-terminated string)
                 while frameOffset < frameData.count && frameData[frameOffset] != 0 {
                     frameOffset += 1
                 }
                 frameOffset += 1 // Skip null terminator
-
+                
                 // Skip picture type (1 byte)
                 frameOffset += 1
-
+                
                 // Skip description (null-terminated string, encoding-dependent)
                 let encoding = frameData[0]
                 if encoding == 1 || encoding == 2 { // UTF-16
@@ -2502,15 +2501,15 @@ class PlayerEngine: NSObject, ObservableObject {
                     }
                     frameOffset += 1 // Skip null terminator
                 }
-
+                
                 // Extract image data
                 guard frameOffset < frameData.count else {
                     print("⚠️ Invalid APIC frame structure in: \(filename)")
                     break
                 }
-
+                
                 let imageData = frameData.subdata(in: frameOffset..<frameData.count)
-
+                
                 if let image = UIImage(data: imageData) {
                     print("✅ Successfully extracted artwork from ID3v2 APIC frame: \(filename)")
                     return image
@@ -2518,21 +2517,21 @@ class PlayerEngine: NSObject, ObservableObject {
                     print("⚠️ Could not create UIImage from APIC data in: \(filename)")
                 }
             }
-
+            
             offset += frameSize
         }
-
+        
         print("⚠️ No APIC frame found in ID3v2 tag: \(filename)")
         return nil
     }
-
+    
     // Safe byte reading helper for DSF format (little-endian)
     private nonisolated func readLittleEndianUInt64(from data: Data, offset: Int) -> UInt64 {
         guard offset >= 0 && offset + 8 <= data.count else {
             print("⚠️ Invalid byte access in player: offset=\(offset), dataSize=\(data.count)")
             return 0
         }
-
+        
         let byte0 = UInt64(data[offset])
         let byte1 = UInt64(data[offset + 1]) << 8
         let byte2 = UInt64(data[offset + 2]) << 16
@@ -2541,13 +2540,13 @@ class PlayerEngine: NSObject, ObservableObject {
         let byte5 = UInt64(data[offset + 5]) << 40
         let byte6 = UInt64(data[offset + 6]) << 48
         let byte7 = UInt64(data[offset + 7]) << 56
-
+        
         return byte0 | byte1 | byte2 | byte3 | byte4 | byte5 | byte6 | byte7
     }
-
-
+    
+    
     // MARK: - State Persistence
-
+    
     func setupBackgroundSessionForSiri() {
         // When Siri launches the app, it bypasses normal lifecycle events
         // This method manually sets up the background session that would normally

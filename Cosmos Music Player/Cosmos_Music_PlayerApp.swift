@@ -191,9 +191,24 @@ struct Cosmos_Music_PlayerApp: App {
                 // Extract playlist ID from path
                 let playlistId = url.pathComponents.dropFirst().joined(separator: "/")
                 print("📋 Widget: Opening playlist - \(playlistId)")
-                // For now, just log that we received the deep link
-                // You can implement navigation logic here based on your app's navigation structure
-                print("📋 Widget: Would navigate to playlist with ID: \(playlistId)")
+
+                // Navigate to playlist
+                if let playlistIdInt = Int64(playlistId) {
+                    do {
+                        let playlists = try appCoordinator.databaseManager.getAllPlaylists()
+                        if let playlist = playlists.first(where: { $0.id == playlistIdInt }) {
+                            // Post notification to navigate to playlist
+                            NotificationCenter.default.post(
+                                name: NSNotification.Name("NavigateToPlaylist"),
+                                object: nil,
+                                userInfo: ["playlistId": playlistIdInt]
+                            )
+                            print("✅ Widget: Navigating to playlist \(playlist.title)")
+                        }
+                    } catch {
+                        print("❌ Widget: Failed to find playlist: \(error)")
+                    }
+                }
 
             default:
                 print("⚠️ Unknown URL host: \(url.host ?? "nil")")
