@@ -135,24 +135,38 @@ struct PlaylistCard: View {
     var body: some View {
         Link(destination: URL(string: "cosmos-music://playlist/\(playlist.id)")!) {
             VStack(spacing: 8) {
-                // Album cover mashup (2x2 grid) - matching app's design
-                VStack(spacing: 2) {
-                    HStack(spacing: 2) {
-                        // Top left
-                        artworkTile(index: 0, opacity: 0.6)
-                        // Top right
-                        artworkTile(index: 1, opacity: 0.5)
+                // Show custom cover if available, otherwise show album cover mashup (2x2 grid)
+                if let customPath = playlist.customCoverImagePath,
+                   !customPath.isEmpty,
+                   let customCoverData = loadArtworkFromFile(customPath),
+                   let customCoverImage = UIImage(data: customCoverData) {
+                    // Custom cover image
+                    Image(uiImage: customCoverImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 100, height: 100)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 5)
+                } else {
+                    // Album cover mashup (2x2 grid) - matching app's design
+                    VStack(spacing: 2) {
+                        HStack(spacing: 2) {
+                            // Top left
+                            artworkTile(index: 0, opacity: 0.6)
+                            // Top right
+                            artworkTile(index: 1, opacity: 0.5)
+                        }
+                        HStack(spacing: 2) {
+                            // Bottom left
+                            artworkTile(index: 2, opacity: 0.45)
+                            // Bottom right
+                            artworkTile(index: 3, opacity: 0.55)
+                        }
                     }
-                    HStack(spacing: 2) {
-                        // Bottom left
-                        artworkTile(index: 2, opacity: 0.45)
-                        // Bottom right
-                        artworkTile(index: 3, opacity: 0.55)
-                    }
+                    .frame(width: 100, height: 100)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 5)
                 }
-                .frame(width: 100, height: 100)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 5)
 
                 // Playlist title and song count
                 VStack(spacing: 2) {

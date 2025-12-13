@@ -1735,10 +1735,13 @@ class AudioMetadataParser {
             let pngSignature = Data([0x89, 0x50, 0x4E, 0x47])
 
             if ext == "opus" || ext == "ogg" {
-                // Search in first 64KB of file for image data
-                let searchRange = 0..<min(data.count, 65536)
-                return data.range(of: jpegSignature, in: searchRange) != nil ||
-                       data.range(of: pngSignature, in: searchRange) != nil
+                // OGG/Opus files use Vorbis Comments with base64-encoded METADATA_BLOCK_PICTURE
+                // Search for "METADATA_BLOCK_PICTURE=" tag
+                if let pictureTag = "METADATA_BLOCK_PICTURE=".data(using: .utf8),
+                   data.range(of: pictureTag) != nil {
+                    return true
+                }
+                return false
             } else if ext == "dsf" {
                 // DSF files: artwork is typically stored after the format chunk
                 // DSF signature: "DSD " (44 53 44 20)

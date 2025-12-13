@@ -207,6 +207,15 @@ class DatabaseManager: @unchecked Sendable {
                 // Column may already exist, which is fine
                 print("ℹ️ Database migration: last_folder_sync column already exists or migration failed: \(error)")
             }
+
+            // Migration: Add custom_cover_image_path column to playlist table
+            do {
+                try db.execute(sql: "ALTER TABLE playlist ADD COLUMN custom_cover_image_path TEXT")
+                print("✅ Database: Added custom_cover_image_path column to playlist table")
+            } catch {
+                // Column may already exist, which is fine
+                print("ℹ️ Database migration: custom_cover_image_path column already exists or migration failed: \(error)")
+            }
         }
     }
 
@@ -656,12 +665,22 @@ class DatabaseManager: @unchecked Sendable {
             // Insert at the destination position
             mutableItems.insert(movedItem, at: destinationIndex)
 
-            // Update all positions in the database
+            // Two-phase update to avoid UNIQUE constraint violations:
+            // Phase 1: Shift all positions by +10000 (temporary offset)
+            print("🔄 Phase 1: Shifting positions to avoid conflicts")
             for (index, item) in mutableItems.enumerated() {
                 _ = try PlaylistItem
                     .filter(Column("playlist_id") == playlistId &&
-                           Column("track_stable_id") == item.trackStableId &&
-                           Column("position") == item.position)
+                           Column("track_stable_id") == item.trackStableId)
+                    .updateAll(db, Column("position").set(to: index + 10000))
+            }
+
+            // Phase 2: Set final positions
+            print("🔄 Phase 2: Setting final positions")
+            for (index, item) in mutableItems.enumerated() {
+                _ = try PlaylistItem
+                    .filter(Column("playlist_id") == playlistId &&
+                           Column("track_stable_id") == item.trackStableId)
                     .updateAll(db, Column("position").set(to: index))
             }
 
@@ -779,6 +798,20 @@ class DatabaseManager: @unchecked Sendable {
                 .updateAll(db, Column("last_played_at").set(to: now))
         }
         print("🎵 Database: Updated \(updatedCount) playlist(s) last played time")
+    }
+
+    func updatePlaylistCustomCover(playlistId: Int64, imagePath: String?) throws {
+        print("🎨 Database: Updating playlist \(playlistId) custom cover to '\(imagePath ?? "nil")'")
+        let now = Int64(Date().timeIntervalSince1970)
+        let updatedCount = try write { db in
+            return try Playlist
+                .filter(Column("id") == playlistId)
+                .updateAll(db,
+                    Column("custom_cover_image_path").set(to: imagePath),
+                    Column("updated_at").set(to: now)
+                )
+        }
+        print("🎨 Database: Updated \(updatedCount) playlist(s) custom cover")
     }
 
     // MARK: - EQ Operations

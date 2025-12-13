@@ -166,13 +166,15 @@ public struct WidgetPlaylistData: Codable {
     public let trackCount: Int
     public let colorHex: String
     public let artworkPaths: [String] // Filenames of artwork files in shared container
+    public let customCoverImagePath: String? // Custom user-selected cover image
 
-    public init(id: String, name: String, trackCount: Int, colorHex: String, artworkPaths: [String]) {
+    public init(id: String, name: String, trackCount: Int, colorHex: String, artworkPaths: [String], customCoverImagePath: String? = nil) {
         self.id = id
         self.name = name
         self.trackCount = trackCount
         self.colorHex = colorHex
         self.artworkPaths = artworkPaths
+        self.customCoverImagePath = customCoverImagePath
     }
 }
 

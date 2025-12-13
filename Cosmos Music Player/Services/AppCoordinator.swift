@@ -781,7 +781,8 @@ class AppCoordinator: ObservableObject {
                     name: playlist.title,
                     trackCount: orderedTracks.count,
                     colorHex: colorHex,
-                    artworkPaths: artworkPaths
+                    artworkPaths: artworkPaths,
+                    customCoverImagePath: playlist.customCoverImagePath
                 )
                 widgetPlaylists.append(widgetPlaylist)
 

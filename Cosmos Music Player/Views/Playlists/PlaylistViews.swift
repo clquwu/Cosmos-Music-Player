@@ -1,5 +1,7 @@
 import SwiftUI
 import GRDB
+import PhotosUI
+import WidgetKit
 
 
 struct PlaylistsScreen: View {
@@ -166,6 +168,9 @@ struct PlaylistCardView: View {
     let onDelete: (() -> Void)?
     @StateObject private var artworkManager = ArtworkManager.shared
     @State private var artworks: [UIImage] = []
+    @State private var customCoverImage: UIImage?
+    @State private var showingImagePicker = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
 
     init(playlist: Playlist, allTracks: [Track], isEditMode: Bool = false, onEdit: (() -> Void)? = nil, onDelete: (() -> Void)? = nil) {
         self.playlist = playlist
@@ -220,13 +225,34 @@ struct PlaylistCardView: View {
                             .buttonStyle(PlainButtonStyle())
                         }
                         Spacer()
+
+                        // Centered photo icon for changing cover
+                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                            Image(systemName: "photo")
+                                .font(.system(size: 32, weight: .light))
+                                .foregroundColor(.white)
+                                .frame(width: 64, height: 64)
+                                .background(Color.black.opacity(0.6))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(PlainButtonStyle())
+
+                        Spacer()
                     }
                     .padding(8)
                     .zIndex(1000)
                 }
                 
                 // Artwork content - same in both edit and normal mode
-                if allTracks.count >= 4 {
+                // Show custom cover if available, otherwise show auto-generated mashup
+                if let customCover = customCoverImage {
+                    Image(uiImage: customCover)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(1, contentMode: .fit)
+                        .clipped()
+                } else if allTracks.count >= 4 {
                     // 2x2 mashup for 4+ songs
                     GeometryReader { geometry in
                         let size = (geometry.size.width - 2) / 2
@@ -268,7 +294,16 @@ struct PlaylistCardView: View {
             }
         }
         .task {
+            await loadCustomCover()
             await loadArtworks()
+        }
+        .onChange(of: selectedPhotoItem) { newItem in
+            Task {
+                if let data = try? await newItem?.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    await saveCustomCover(image)
+                }
+            }
         }
     }
     
@@ -296,15 +331,82 @@ struct PlaylistCardView: View {
     private func loadArtworks() async {
         var loadedArtworks: [UIImage] = []
         let tracksToLoad = Array(allTracks.prefix(4))
-        
+
         for track in tracksToLoad {
             if let artwork = await artworkManager.getArtwork(for: track) {
                 loadedArtworks.append(artwork)
             }
         }
-        
+
         await MainActor.run {
             artworks = loadedArtworks
+        }
+    }
+
+    private func loadCustomCover() async {
+        // Check if playlist has a custom cover path
+        guard let customPath = playlist.customCoverImagePath,
+              !customPath.isEmpty else { return }
+
+        // Load image from shared container
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
+        ) else { return }
+
+        let fileURL = containerURL.appendingPathComponent(customPath)
+        if let data = try? Data(contentsOf: fileURL),
+           let image = UIImage(data: data) {
+            await MainActor.run {
+                customCoverImage = image
+            }
+        }
+    }
+
+    @MainActor
+    private func saveCustomCover(_ image: UIImage) async {
+        guard let playlistId = playlist.id else { return }
+
+        // Get shared container
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
+        ) else {
+            print("❌ Failed to get shared container URL")
+            return
+        }
+
+        // Create unique filename for this playlist cover
+        let filename = "playlist_cover_\(playlistId).jpg"
+        let fileURL = containerURL.appendingPathComponent(filename)
+
+        // Convert image to JPEG data with compression
+        guard let jpegData = image.jpegData(compressionQuality: 0.8) else {
+            print("❌ Failed to convert image to JPEG")
+            return
+        }
+
+        do {
+            // Save image to shared container
+            try jpegData.write(to: fileURL)
+            print("✅ Saved custom cover to \(filename)")
+
+            // Update database with custom cover path
+            try DatabaseManager.shared.updatePlaylistCustomCover(
+                playlistId: playlistId,
+                imagePath: filename
+            )
+
+            // Update UI
+            customCoverImage = image
+
+            // Notify widgets to refresh
+            WidgetCenter.shared.reloadAllTimelines()
+
+            // Refresh the playlist list
+            NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+
+            print("✅ Custom cover saved and database updated")
+        } catch {
+            print("❌ Failed to save custom cover: \(error)")
         }
     }
 }
@@ -316,10 +418,14 @@ struct PlaylistDetailScreen: View {
     @State private var isEditMode: Bool = false
     @State private var artworks: [UIImage] = []
     @State private var settings = DeleteSettings.load()
-    @State private var sortOption: TrackSortOption = .dateNewest
+    @State private var sortOption: TrackSortOption = .playlistOrder
     @State private var showSortMenu = false
     @State private var recentlyActedTracks: Set<String> = []
     @StateObject private var artworkManager = ArtworkManager.shared
+    @State private var showingImagePicker = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var customCoverImage: UIImage?
+    @State private var showCoverOptions = false
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
@@ -347,6 +453,9 @@ struct PlaylistDetailScreen: View {
         }
 
         switch sortOption {
+        case .playlistOrder:
+            // Respect the playlist position order (tracks are already loaded in position order)
+            return filteredTracks
         case .dateNewest:
             return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
         case .dateOldest:
@@ -376,7 +485,14 @@ struct PlaylistDetailScreen: View {
                                 .fill(Color.gray.opacity(0.2))
                                 .frame(width: 250, height: 250)
 
-                            if tracks.count >= 4 {
+                            // Show custom cover if available, otherwise show auto-generated mashup
+                            if let customCover = customCoverImage {
+                                Image(uiImage: customCover)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: 250, height: 250)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            } else if tracks.count >= 4 {
                                 // 2x2 mashup for 4+ songs
                                 VStack(spacing: 2) {
                                     HStack(spacing: 2) {
@@ -398,6 +514,30 @@ struct PlaylistDetailScreen: View {
                                 Image(systemName: "music.note.list")
                                     .font(.system(size: 50))
                                     .foregroundColor(.secondary)
+                            }
+
+                            // Edit mode: Show large centered photo icon
+                            if isEditMode {
+                                VStack {
+                                    Spacer()
+                                    HStack {
+                                        Spacer()
+                                        Button(action: {
+                                            showCoverOptions = true
+                                        }) {
+                                            Image(systemName: "photo")
+                                                .font(.system(size: 40, weight: .light))
+                                                .foregroundColor(.white)
+                                                .frame(width: 80, height: 80)
+                                                .background(Color.black.opacity(0.6))
+                                                .clipShape(Circle())
+                                        }
+                                        .buttonStyle(PlainButtonStyle())
+                                        Spacer()
+                                    }
+                                    Spacer()
+                                }
+                                .frame(width: 250, height: 250)
                             }
                         }
                         .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
@@ -468,10 +608,9 @@ struct PlaylistDetailScreen: View {
                 // Track list section
                 if !sortedTracks.isEmpty {
                     Section {
-                        ForEach(Array(sortedTracks.enumerated()), id: \.offset) { index, track in
+                        ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { index, track in
                             PlaylistTrackRowView(
                                 track: track,
-                                trackNumber: index + 1,
                                 playlist: playlist,
                                 isEditMode: isEditMode,
                                 onTap: {
@@ -509,7 +648,7 @@ struct PlaylistDetailScreen: View {
                             .listRowSeparator(index < sortedTracks.count - 1 ? .visible : .hidden)
                             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         }
-                        .onMove { source, destination in
+                        .onMove(perform: sortOption == .playlistOrder ? { source, destination in
                             guard let playlistId = playlist.id else { return }
                             do {
                                 // Calculate actual destination index
@@ -527,7 +666,7 @@ struct PlaylistDetailScreen: View {
                             } catch {
                                 print("Failed to reorder tracks: \(error)")
                             }
-                        }
+                        } : nil)
                     } header: {
                         HStack {
                             Text(Localized.songs)
@@ -598,12 +737,34 @@ struct PlaylistDetailScreen: View {
         .onAppear {
             loadPlaylistTracks()
             loadSortPreference()
+            loadCustomCover()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
             loadPlaylistTracks()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
             settings = DeleteSettings.load()
+        }
+        .confirmationDialog("Playlist Cover", isPresented: $showCoverOptions) {
+            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                Text("Change Cover Image")
+            }
+
+            if customCoverImage != nil {
+                Button("Remove Custom Cover", role: .destructive) {
+                    removeCustomCover()
+                }
+            }
+
+            Button("Cancel", role: .cancel) { }
+        }
+        .onChange(of: selectedPhotoItem) { newItem in
+            Task {
+                if let data = try? await newItem?.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    await saveCustomCover(image)
+                }
+            }
         }
     }
 
@@ -676,143 +837,262 @@ struct PlaylistDetailScreen: View {
         let key = "sortPreference_playlist_\(playlistId)"
         UserDefaults.standard.set(sortOption.rawValue, forKey: key)
     }
+
+    private func loadCustomCover() {
+        // Check if playlist has a custom cover path
+        guard let customPath = playlist.customCoverImagePath,
+              !customPath.isEmpty else { return }
+
+        // Load image from shared container
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
+        ) else {
+            print("❌ Failed to get shared container URL")
+            return
+        }
+
+        let fileURL = containerURL.appendingPathComponent(customPath)
+        if let data = try? Data(contentsOf: fileURL),
+           let image = UIImage(data: data) {
+            customCoverImage = image
+            print("✅ Loaded custom playlist cover from \(customPath)")
+        }
+    }
+
+    @MainActor
+    private func saveCustomCover(_ image: UIImage) async {
+        guard let playlistId = playlist.id else { return }
+
+        // Get shared container
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
+        ) else {
+            print("❌ Failed to get shared container URL")
+            return
+        }
+
+        // Create unique filename for this playlist cover
+        let filename = "playlist_cover_\(playlistId).jpg"
+        let fileURL = containerURL.appendingPathComponent(filename)
+
+        // Convert image to JPEG data with compression
+        guard let jpegData = image.jpegData(compressionQuality: 0.8) else {
+            print("❌ Failed to convert image to JPEG")
+            return
+        }
+
+        do {
+            // Save image to shared container
+            try jpegData.write(to: fileURL)
+            print("✅ Saved custom cover to \(filename)")
+
+            // Update database with custom cover path
+            try appCoordinator.databaseManager.updatePlaylistCustomCover(
+                playlistId: playlistId,
+                imagePath: filename
+            )
+
+            // Update UI
+            customCoverImage = image
+
+            // Notify widgets to refresh
+            WidgetCenter.shared.reloadAllTimelines()
+
+            print("✅ Custom cover saved and database updated")
+        } catch {
+            print("❌ Failed to save custom cover: \(error)")
+        }
+    }
+
+    private func removeCustomCover() {
+        guard let playlistId = playlist.id else { return }
+
+        // Remove from database
+        do {
+            try appCoordinator.databaseManager.updatePlaylistCustomCover(
+                playlistId: playlistId,
+                imagePath: nil
+            )
+
+            // Remove file from shared container if it exists
+            if let customPath = playlist.customCoverImagePath,
+               !customPath.isEmpty,
+               let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
+               ) {
+                let fileURL = containerURL.appendingPathComponent(customPath)
+                try? FileManager.default.removeItem(at: fileURL)
+                print("✅ Removed custom cover file")
+            }
+
+            // Update UI
+            customCoverImage = nil
+
+            // Notify widgets to refresh
+            WidgetCenter.shared.reloadAllTimelines()
+
+            print("✅ Custom cover removed")
+        } catch {
+            print("❌ Failed to remove custom cover: \(error)")
+        }
+    }
 }
 
 struct PlaylistTrackRowView: View {
     let track: Track
-    let trackNumber: Int
     let playlist: Playlist?
     let isEditMode: Bool
     let onTap: () -> Void
     @EnvironmentObject private var appCoordinator: AppCoordinator
+    @StateObject private var playerEngine = PlayerEngine.shared
     @State private var isFavorite = false
     @State private var showPlaylistDialog = false
     @State private var showDeleteConfirmation = false
     @State private var deleteSettings = DeleteSettings.load()
+    @State private var artworkImage: UIImage?
+    @StateObject private var artworkManager = ArtworkManager.shared
+
+    // Check if this track is currently playing
+    private var isCurrentlyPlaying: Bool {
+        playerEngine.currentTrack?.stableId == track.stableId
+    }
 
     var body: some View {
-        Button(action: {
-            if !isEditMode {
-                onTap()
-            }
-        }) {
-            HStack(spacing: 8) {
-                // Track number
-                Text("\(trackNumber)")
-                    .font(.body)
-                    .fontWeight(.medium)
-                    .foregroundColor(.secondary)
-                    .frame(width: 20, alignment: .leading)
+        HStack(spacing: 0) {
+            // MARK: - Tappable Content Area
+            HStack(spacing: 12) {
+                // Album artwork thumbnail (matching TrackRowView exactly)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.gray.opacity(0.2))
+                        .frame(width: 60, height: 60)
 
-                // Track info
+                    if let image = artworkImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 60, height: 60)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
+                        Image(systemName: "music.note")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Stroke when playing (matching TrackRowView)
+                    if isCurrentlyPlaying {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(deleteSettings.backgroundColorChoice.color, lineWidth: 2)
+                            .frame(width: 60, height: 60)
+                    }
+                }
+
+                // Track info (matching TrackRowView exactly)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(track.title)
-                        .font(.body)
+                        .font(.title3)
                         .fontWeight(.medium)
-                        .foregroundColor(.primary)
+                        .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color : .primary)
                         .lineLimit(1)
-                        .multilineTextAlignment(.leading)
 
-                    HStack(spacing: 0) {
-                        if let artistId = track.artistId,
-                           let artist = try? DatabaseManager.shared.read({ db in
-                               try Artist.fetchOne(db, key: artistId)
-                           }) {
-                            Text(artist.name)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            if track.durationMs != nil {
-                                Text(" • ")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        if let duration = track.durationMs {
-                            Text(formatDuration(duration))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    if let artistId = track.artistId,
+                       let artist = try? DatabaseManager.shared.read({ db in
+                           try Artist.fetchOne(db, key: artistId)
+                       }) {
+                        Text(artist.name)
+                            .font(.body)
+                            .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color.opacity(0.8) : .secondary)
+                            .lineLimit(1)
                     }
                 }
 
                 Spacer()
 
-                // Show delete button in edit mode, otherwise menu
-                if isEditMode, let playlist = playlist {
-                    Button(action: {
-                        removeFromPlaylist()
-                    }) {
-                        Image(systemName: "trash")
-                            .font(.title3)
-                            .foregroundColor(.red)
-                            .frame(width: 36, height: 36)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(.red.opacity(0.3), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                } else {
-                    Menu {
-                        Button(action: {
-                            do {
-                                try appCoordinator.toggleFavorite(trackStableId: track.stableId)
-                                isFavorite.toggle()
-                            } catch {
-                                print("Failed to toggle favorite: \(error)")
-                            }
-                        }) {
-                            HStack {
-                                Image(systemName: isFavorite ? "heart.slash" : "heart")
-                                    .foregroundColor(isFavorite ? .red : .primary)
-                                Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
-                                    .foregroundColor(.primary)
-                            }
-                        }
-
-                        if let artistId = track.artistId,
-                           let artist = try? DatabaseManager.shared.read({ db in
-                               try Artist.fetchOne(db, key: artistId)
-                           }),
-                           let allArtistTracks = try? DatabaseManager.shared.read({ db in
-                               try Track.filter(Column("artist_id") == artistId).fetchAll(db)
-                           }) {
-                            NavigationLink(destination: ArtistDetailScreenWrapper(artistName: artist.name, allTracks: allArtistTracks)) {
-                                Label(Localized.showArtistPage, systemImage: "person.circle")
-                            }
-                        }
-
-                        Button(action: {
-                            showPlaylistDialog = true
-                        }) {
-                            Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
-                        }
-
-                        Button(action: {
-                            showDeleteConfirmation = true
-                        }) {
-                            Label(Localized.deleteFile, systemImage: "trash")
-                        }
-                        .foregroundColor(.red)
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .foregroundColor(.secondary)
-                            .frame(width: 24, height: 30)
-                    }
-                    .buttonStyle(PlainButtonStyle())
+                // Equalizer animation when playing (matching TrackRowView)
+                if isCurrentlyPlaying {
+                    EqualizerBarsExact(
+                        color: deleteSettings.backgroundColorChoice.color,
+                        isActive: playerEngine.isPlaying && isCurrentlyPlaying,
+                        isLarge: true,
+                        trackId: playerEngine.currentTrack?.stableId
+                    )
+                    .id("\(playerEngine.isPlaying && isCurrentlyPlaying)-\(playerEngine.currentTrack?.stableId ?? "")")
+                    .padding(.trailing, 8)
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
             .contentShape(Rectangle())
+            .onTapGesture {
+                if !isEditMode {
+                    onTap()
+                }
+            }
+
+            // MARK: - Menu / Action Area
+            // Show delete button in edit mode, otherwise menu
+            if isEditMode, let playlist = playlist {
+                Button(action: {
+                    removeFromPlaylist()
+                }) {
+                    Image(systemName: "trash")
+                        .font(.title2)
+                        .foregroundColor(.red)
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(.red.opacity(0.3), lineWidth: 1))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.leading, 8)
+            } else {
+                Menu {
+                    Button(action: {
+                        do {
+                            try appCoordinator.toggleFavorite(trackStableId: track.stableId)
+                            isFavorite.toggle()
+                        } catch {
+                            print("Failed to toggle favorite: \(error)")
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: isFavorite ? "heart.slash" : "heart")
+                            Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
+                        }
+                    }
+
+                    if let artistId = track.artistId,
+                       let artist = try? DatabaseManager.shared.read({ db in
+                               try Artist.fetchOne(db, key: artistId)
+                           }),
+                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
+                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
+                       }) {
+                        NavigationLink(destination: ArtistDetailScreenWrapper(artistName: artist.name, allTracks: allArtistTracks)) {
+                            Label(Localized.showArtistPage, systemImage: "person.circle")
+                        }
+                    }
+
+                    Button(action: {
+                        showPlaylistDialog = true
+                    }) {
+                        Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
+                    }
+
+                    Button(action: {
+                        showDeleteConfirmation = true
+                    }) {
+                        Label(Localized.deleteFile, systemImage: "trash")
+                    }
+                    .foregroundColor(.red)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundColor(.secondary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
         }
-        .buttonStyle(.plain)
-        .onAppear {
-            checkFavoriteStatus()
-        }
+        .frame(height: 80)
+        .padding(.horizontal, 12)
         .sheet(isPresented: $showPlaylistDialog) {
             PlaylistSelectionView(track: track)
                 .accentColor(deleteSettings.backgroundColorChoice.color)
@@ -825,21 +1105,16 @@ struct PlaylistTrackRowView: View {
         } message: {
             Text(Localized.deleteFileConfirmation(track.title))
         }
-    }
-
-    private func checkFavoriteStatus() {
-        do {
-            isFavorite = try DatabaseManager.shared.isFavorite(trackStableId: track.stableId)
-        } catch {
-            print("Failed to check favorite status: \(error)")
+        .onAppear {
+            isFavorite = (try? appCoordinator.isFavorite(trackStableId: track.stableId)) ?? false
+            if artworkImage == nil { loadArtwork() }
         }
     }
 
-    private func formatDuration(_ milliseconds: Int) -> String {
-        let seconds = milliseconds / 1000
-        let minutes = seconds / 60
-        let remainingSeconds = seconds % 60
-        return String(format: "%d:%02d", minutes, remainingSeconds)
+    private func loadArtwork() {
+        Task {
+            artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+        }
     }
 
     private func deleteFile() {
@@ -847,9 +1122,7 @@ struct PlaylistTrackRowView: View {
             do {
                 let url = URL(fileURLWithPath: track.path)
                 try FileManager.default.removeItem(at: url)
-                print("🗑️ Deleted file from storage: \(track.title)")
                 try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
-                print("✅ Database deletion completed successfully")
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
                 print("❌ Failed to delete file: \(error)")
@@ -858,15 +1131,10 @@ struct PlaylistTrackRowView: View {
     }
 
     private func removeFromPlaylist() {
-        guard let playlist = playlist, let playlistId = playlist.id else {
-            print("❌ No playlist or playlist ID available")
-            return
-        }
-
+        guard let playlist = playlist, let playlistId = playlist.id else { return }
         Task {
             do {
                 try appCoordinator.removeFromPlaylist(playlistId: playlistId, trackStableId: track.stableId)
-                print("✅ Removed '\(track.title)' from playlist '\(playlist.title)'")
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
                 print("❌ Failed to remove from playlist: \(error)")

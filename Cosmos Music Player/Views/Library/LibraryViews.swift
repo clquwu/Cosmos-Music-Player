@@ -717,6 +717,7 @@ struct LikedSongsScreen: View {
 }
 
 enum TrackSortOption: String, CaseIterable {
+    case playlistOrder
     case dateNewest
     case dateOldest
     case nameAZ
@@ -726,6 +727,7 @@ enum TrackSortOption: String, CaseIterable {
 
     var localizedString: String {
         switch self {
+        case .playlistOrder: return "Manual Order"
         case .dateNewest: return Localized.sortDateNewest
         case .dateOldest: return Localized.sortDateOldest
         case .nameAZ: return Localized.sortNameAZ
@@ -777,12 +779,13 @@ struct TrackListView: View {
         }
         
         switch sortOption {
-        case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
-        case .dateOldest: return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
-        case .nameAZ: return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
-        case .nameZA: return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
-        case .sizeLargest: return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
-        case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
+            case .playlistOrder: return filteredTracks
+            case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+            case .dateOldest: return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+            case .nameAZ: return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
+            case .nameZA: return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+            case .sizeLargest: return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
+            case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
         }
     }
     

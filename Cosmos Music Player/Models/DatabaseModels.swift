@@ -101,6 +101,7 @@ struct Playlist: Codable, FetchableRecord, PersistableRecord {
     var folderPath: String? // Path to the folder this playlist syncs with
     var isFolderSynced: Bool // Whether this playlist is synced with a folder
     var lastFolderSync: Int64? // Last time folder sync was performed
+    var customCoverImagePath: String? // Custom user-selected cover image
 
     static let databaseTableName = "playlist"
 
@@ -114,6 +115,7 @@ struct Playlist: Codable, FetchableRecord, PersistableRecord {
         case folderPath = "folder_path"
         case isFolderSynced = "is_folder_synced"
         case lastFolderSync = "last_folder_sync"
+        case customCoverImagePath = "custom_cover_image_path"
     }
 }
 

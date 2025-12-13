@@ -1990,13 +1990,33 @@ class PlayerEngine: NSObject, ObservableObject {
     
     private func loadAndCacheArtwork(track: Track) async {
         guard track.hasEmbeddedArt else { return }
-        
+
         do {
             // Ensure file is local first
             let url = URL(fileURLWithPath: track.path)
             try await cloudDownloadManager.ensureLocal(url)
-            
-            // Load artwork using NSFileCoordinator with proper async handling
+
+            // Special handling for Opus/OGG files - use ArtworkManager directly
+            let fileExtension = url.pathExtension.lowercased()
+            if fileExtension == "opus" || fileExtension == "ogg" {
+                if let uiImage = await ArtworkManager.shared.getArtwork(for: track) {
+                    print("✅ Loaded Opus/OGG artwork via ArtworkManager")
+
+                    // Cache the artwork and update now playing info
+                    await MainActor.run {
+                        let artwork = self.convertUIImageToMPMediaItemArtwork(uiImage)
+                        self.cachedArtwork = artwork
+                        self.cachedArtworkTrackId = track.stableId
+                        self.updateNowPlayingInfoWithCachedArtwork()
+                        print("🎨 Cached and updated artwork for: \(track.title)")
+                    }
+                } else {
+                    print("⚠️ No artwork found in Opus/OGG file: \(url.lastPathComponent)")
+                }
+                return
+            }
+
+            // Load artwork using NSFileCoordinator with proper async handling for other formats
             let artwork = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<MPMediaItemArtwork?, Error>) in
                 DispatchQueue.global(qos: .background).async {
                     var coordinatorError: NSError?
@@ -2041,14 +2061,14 @@ class PlayerEngine: NSObject, ObservableObject {
                                     continuation.resume(returning: artwork)
                                     return
                                 }
-                                
+
                                 // If AVAsset fails, try direct FLAC metadata reading
                                 if let artwork = self.loadArtworkFromFLACMetadata(url: freshURL) {
                                     print("✅ Loaded FLAC artwork via direct metadata reading")
                                     continuation.resume(returning: artwork)
                                     return
                                 }
-                                
+
                                 print("⚠️ No artwork found in FLAC file: \(freshURL.lastPathComponent)")
                                 continuation.resume(returning: nil)
                             } else {
@@ -2258,13 +2278,19 @@ class PlayerEngine: NSObject, ObservableObject {
         guard let track = currentTrack,
               let cachedArtwork = cachedArtwork,
               cachedArtworkTrackId == track.stableId else { return }
-        
+
         // Get current now playing info and add artwork
         var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
         nowPlayingInfo[MPMediaItemPropertyArtwork] = cachedArtwork
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
-    
+
+    private nonisolated func convertUIImageToMPMediaItemArtwork(_ image: UIImage) -> MPMediaItemArtwork? {
+        return MPMediaItemArtwork(boundsSize: image.size) { _ in
+            return image
+        }
+    }
+
     private nonisolated func loadArtworkFromSFBAudioEngine(url: URL) -> MPMediaItemArtwork? {
         do {
             // Try to use SFBAudioEngine to extract artwork
