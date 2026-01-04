@@ -722,6 +722,8 @@ enum TrackSortOption: String, CaseIterable {
     case dateOldest
     case nameAZ
     case nameZA
+    case artistAZ
+    case artistZA
     case sizeLargest
     case sizeSmallest
 
@@ -732,6 +734,8 @@ enum TrackSortOption: String, CaseIterable {
         case .dateOldest: return Localized.sortDateOldest
         case .nameAZ: return Localized.sortNameAZ
         case .nameZA: return Localized.sortNameZA
+        case .artistAZ: return "Artist A-Z"
+        case .artistZA: return "Artist Z-A"
         case .sizeLargest: return Localized.sortSizeLargest
         case .sizeSmallest: return Localized.sortSizeSmallest
         }
@@ -777,16 +781,53 @@ struct TrackListView: View {
         } else {
             filteredTracks = tracks
         }
-        
+
         switch sortOption {
             case .playlistOrder: return filteredTracks
             case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
             case .dateOldest: return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
             case .nameAZ: return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
             case .nameZA: return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+            case .artistAZ:
+                // Pre-fetch all artist names for performance
+                let artistCache = buildArtistCache(for: filteredTracks)
+                return filteredTracks.sorted { track1, track2 in
+                    let artist1 = artistCache[track1.artistId ?? -1] ?? ""
+                    let artist2 = artistCache[track2.artistId ?? -1] ?? ""
+                    return artist1.lowercased() < artist2.lowercased()
+                }
+            case .artistZA:
+                // Pre-fetch all artist names for performance
+                let artistCache = buildArtistCache(for: filteredTracks)
+                return filteredTracks.sorted { track1, track2 in
+                    let artist1 = artistCache[track1.artistId ?? -1] ?? ""
+                    let artist2 = artistCache[track2.artistId ?? -1] ?? ""
+                    return artist1.lowercased() > artist2.lowercased()
+                }
             case .sizeLargest: return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
             case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
         }
+    }
+
+    private func buildArtistCache(for tracks: [Track]) -> [Int64: String] {
+        // Get unique artist IDs
+        let artistIds = Set(tracks.compactMap { $0.artistId })
+
+        // Fetch all artists in one query
+        var cache: [Int64: String] = [:]
+        do {
+            try DatabaseManager.shared.read { db in
+                let artists = try Artist.filter(artistIds.contains(Column("id"))).fetchAll(db)
+                for artist in artists {
+                    if let id = artist.id {
+                        cache[id] = artist.name
+                    }
+                }
+            }
+        } catch {
+            print("Failed to build artist cache: \(error)")
+        }
+        return cache
     }
     
     // Bulk Helpers

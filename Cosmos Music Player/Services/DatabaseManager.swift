@@ -10,28 +10,93 @@ import Foundation
 
 class DatabaseManager: @unchecked Sendable {
     static let shared = DatabaseManager()
-    
+
     private var dbWriter: DatabaseWriter!
-    
+    private let maxRetries = 3
+    private let retryDelay: UInt64 = 500_000_000 // 0.5 seconds in nanoseconds
+
     private init() {
-        setupDatabase()
+        setupDatabaseWithRetry()
     }
-    
-    private func setupDatabase() {
+
+    private func setupDatabaseWithRetry() {
+        var lastError: Error?
+
+        for attempt in 1...maxRetries {
+            do {
+                try setupDatabase()
+                print("✅ Database initialized successfully on attempt \(attempt)")
+                return
+            } catch {
+                lastError = error
+                print("⚠️ Database setup failed on attempt \(attempt)/\(maxRetries): \(error)")
+
+                if attempt < maxRetries {
+                    // Wait before retrying
+                    Thread.sleep(forTimeInterval: Double(retryDelay) / 1_000_000_000.0)
+                }
+            }
+        }
+
+        // If all retries failed, try to recover
+        if let error = lastError {
+            print("❌ Database setup failed after \(maxRetries) attempts. Attempting recovery...")
+            attemptDatabaseRecovery(error: error)
+        }
+    }
+
+    private func setupDatabase() throws {
+        let databaseURL = try getDatabaseURL()
+
+        // Use DatabasePool instead of DatabaseQueue to support concurrent reads
+        // This is essential for CarPlay and other multi-threaded scenarios
+        var configuration = Configuration()
+        configuration.prepareDatabase { db in
+            // Enable foreign key constraints
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+
+        dbWriter = try DatabasePool(path: databaseURL.path, configuration: configuration)
+        try createTables()
+        try migrateDatabaseIfNeeded()
+    }
+
+    private func attemptDatabaseRecovery(error: Error) {
+        print("🔧 Attempting database recovery...")
+
         do {
             let databaseURL = try getDatabaseURL()
-            // Use DatabasePool instead of DatabaseQueue to support concurrent reads
-            // This is essential for CarPlay and other multi-threaded scenarios
-            var configuration = Configuration()
-            configuration.prepareDatabase { db in
-                // Enable foreign key constraints
-                try db.execute(sql: "PRAGMA foreign_keys = ON")
+            let backupURL = databaseURL.deletingLastPathComponent()
+                .appendingPathComponent("cosmos_music_backup_\(Int(Date().timeIntervalSince1970)).db")
+
+            // Try to backup the corrupted database
+            if FileManager.default.fileExists(atPath: databaseURL.path) {
+                try? FileManager.default.moveItem(at: databaseURL, to: backupURL)
+                print("📦 Backed up corrupted database to: \(backupURL.path)")
             }
-            dbWriter = try DatabasePool(path: databaseURL.path, configuration: configuration)
-            try createTables()
-            try migrateDatabaseIfNeeded()
+
+            // Try to create a fresh database
+            try setupDatabase()
+            print("✅ Database recovery successful - created fresh database")
         } catch {
-            fatalError("Failed to setup database: \(error)")
+            // Last resort: create an in-memory database to prevent crashes
+            print("❌ Database recovery failed: \(error)")
+            print("⚠️ Creating in-memory database as fallback")
+
+            do {
+                var configuration = Configuration()
+                configuration.prepareDatabase { db in
+                    try db.execute(sql: "PRAGMA foreign_keys = ON")
+                }
+
+                // Create in-memory database
+                dbWriter = try DatabaseQueue(configuration: configuration)
+                try createTables()
+                print("✅ In-memory database created successfully")
+            } catch {
+                // Absolute last resort - this should never happen
+                fatalError("Critical error: Unable to initialize any database: \(error)")
+            }
         }
     }
     
@@ -117,7 +182,14 @@ class DatabaseManager: @unchecked Sendable {
                     PRIMARY KEY (playlist_id, position)
                 )
             """)
-            
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS deleted_folder_playlist (
+                    folder_path TEXT PRIMARY KEY,
+                    deleted_at INTEGER NOT NULL
+                )
+            """)
+
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_album ON track(album_id)")
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist ON track(artist_id)")
 
@@ -215,6 +287,19 @@ class DatabaseManager: @unchecked Sendable {
             } catch {
                 // Column may already exist, which is fine
                 print("ℹ️ Database migration: custom_cover_image_path column already exists or migration failed: \(error)")
+            }
+
+            // Migration: Create deleted_folder_playlist table to prevent recreation of deleted folder playlists
+            do {
+                try db.execute(sql: """
+                    CREATE TABLE IF NOT EXISTS deleted_folder_playlist (
+                        folder_path TEXT PRIMARY KEY,
+                        deleted_at INTEGER NOT NULL
+                    )
+                """)
+                print("✅ Database: Created deleted_folder_playlist table")
+            } catch {
+                print("ℹ️ Database migration: deleted_folder_playlist table already exists or migration failed: \(error)")
             }
         }
     }
@@ -571,6 +656,22 @@ class DatabaseManager: @unchecked Sendable {
 
     func createFolderPlaylist(title: String, folderPath: String) throws -> Playlist {
         return try write { db in
+            // Normalize folder path by using just the folder name for comparison
+            // This avoids issues with changing container UUIDs
+            let folderName = URL(fileURLWithPath: folderPath).lastPathComponent
+
+            // Check if this folder was previously deleted by the user
+            let count = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM deleted_folder_playlist WHERE folder_path = ?",
+                arguments: [folderName]
+            ) ?? 0
+
+            if count > 0 {
+                print("⛔ Folder playlist '\(folderName)' was previously deleted by user, skipping recreation")
+                throw DatabaseError.folderPlaylistDeleted
+            }
+
             let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
             let now = Int64(Date().timeIntervalSince1970)
 
@@ -595,7 +696,11 @@ class DatabaseManager: @unchecked Sendable {
             return try playlist.insertAndFetch(db)!
         }
     }
-    
+
+    enum DatabaseError: Error {
+        case folderPlaylistDeleted
+    }
+
     func getAllPlaylists() throws -> [Playlist] {
         return try read { db in
             return try Playlist.order(Column("last_played_at").desc, Column("updated_at").desc).fetchAll(db)
@@ -708,6 +813,22 @@ class DatabaseManager: @unchecked Sendable {
     func deletePlaylist(playlistId: Int64) throws {
         print("🗑️ Database: Deleting playlist with ID - \(playlistId)")
         let deletedCount = try write { db in
+            // Check if this is a folder-synced playlist
+            if let playlist = try Playlist.filter(Column("id") == playlistId).fetchOne(db),
+               let folderPath = playlist.folderPath,
+               playlist.isFolderSynced {
+                // Normalize to just the folder name to avoid container UUID issues
+                let folderName = URL(fileURLWithPath: folderPath).lastPathComponent
+
+                // Add to deleted folder playlists table to prevent recreation
+                let now = Int64(Date().timeIntervalSince1970)
+                try db.execute(
+                    sql: "INSERT OR REPLACE INTO deleted_folder_playlist (folder_path, deleted_at) VALUES (?, ?)",
+                    arguments: [folderName, now]
+                )
+                print("📝 Marked folder playlist '\(folderName)' as deleted to prevent recreation")
+            }
+
             return try Playlist.filter(Column("id") == playlistId).deleteAll(db)
         }
         print("🗑️ Database: Deleted \(deletedCount) playlist(s)")

@@ -159,6 +159,17 @@ struct AlbumDetailScreen: View {
             return albumTracks
         }
     }
+
+    private var groupedByDisc: [(discNumber: Int, tracks: [Track])] {
+        let grouped = Dictionary(grouping: filteredAlbumTracks) { track in
+            track.discNo ?? 1
+        }
+        return grouped.sorted(by: { $0.key < $1.key }).map { (discNumber: $0.key, tracks: $0.value) }
+    }
+
+    private var hasMultipleDiscs: Bool {
+        return groupedByDisc.count > 1
+    }
     
     private var albumArtist: String {
         if let artistId = album.artistId,
@@ -270,19 +281,38 @@ struct AlbumDetailScreen: View {
                         .padding(.bottom, 12)
 
                         LazyVStack(spacing: 0) {
-                            ForEach(Array(filteredAlbumTracks.enumerated()), id: \.offset) { index, track in
-                                AlbumTrackRowView(
-                                    track: track,
-                                    trackNumber: track.trackNo ?? (index + 1),
-                                    onTap: {
-                                        Task {
-                                            await playerEngine.playTrack(track, queue: filteredAlbumTracks)
-                                        }
+                            ForEach(groupedByDisc, id: \.discNumber) { disc in
+                                // Disc header (only show if multiple discs)
+                                if hasMultipleDiscs {
+                                    HStack {
+                                        Text("Disc \(disc.discNumber)")
+                                            .font(.headline)
+                                            .foregroundColor(.secondary)
+                                        Spacer()
                                     }
-                                )
+                                    .padding(.horizontal)
+                                    .padding(.top, disc.discNumber > 1 ? 16 : 0)
+                                    .padding(.bottom, 8)
+                                }
 
-                                if index < filteredAlbumTracks.count - 1 {
-                                    Divider().padding(.leading, 60)
+                                // Tracks for this disc
+                                ForEach(Array(disc.tracks.enumerated()), id: \.offset) { index, track in
+                                    AlbumTrackRowView(
+                                        track: track,
+                                        trackNumber: track.trackNo ?? (index + 1),
+                                        onTap: {
+                                            Task {
+                                                await playerEngine.playTrack(track, queue: filteredAlbumTracks)
+                                            }
+                                        }
+                                    )
+
+                                    // Add divider between tracks (not after last track of last disc)
+                                    let isLastTrackOfDisc = index == disc.tracks.count - 1
+                                    let isLastDisc = disc.discNumber == groupedByDisc.last?.discNumber
+                                    if !isLastTrackOfDisc || !isLastDisc {
+                                        Divider().padding(.leading, 60)
+                                    }
                                 }
                             }
                         }
