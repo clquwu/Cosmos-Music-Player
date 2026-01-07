@@ -217,15 +217,42 @@ class StateManager: @unchecked Sendable {
         guard let appFolderURL = getAppFolderURL() else {
             throw StateManagerError.iCloudNotAvailable
         }
-        
+
         let playlistsFolder = appFolderURL.appendingPathComponent("playlists", isDirectory: true)
         let playlistURL = playlistsFolder.appendingPathComponent("playlist-\(slug).json")
-        
+
         guard FileManager.default.fileExists(atPath: playlistURL.path) else {
             return nil
         }
-        
-        let data = try Data(contentsOf: playlistURL)
+
+        do {
+            let data = try Data(contentsOf: playlistURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let playlist = try decoder.decode(PlaylistState.self, from: data)
+            return playlist
+        } catch {
+            print("⚠️ Failed to load playlist '\(slug)': \(error)")
+            // Try to load from local backup
+            if let localPlaylist = try? loadPlaylistFromLocalDocuments(slug: slug) {
+                print("✅ Recovered playlist '\(slug)' from local backup")
+                return localPlaylist
+            }
+            print("❌ Unable to recover playlist '\(slug)' from local backup")
+            throw error
+        }
+    }
+
+    private func loadPlaylistFromLocalDocuments(slug: String) throws -> PlaylistState? {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let localPlaylistsFolder = documentsURL.appendingPathComponent("cosmos-playlists", isDirectory: true)
+        let localPlaylistURL = localPlaylistsFolder.appendingPathComponent("playlist-\(slug).json")
+
+        guard FileManager.default.fileExists(atPath: localPlaylistURL.path) else {
+            return nil
+        }
+
+        let data = try Data(contentsOf: localPlaylistURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(PlaylistState.self, from: data)
@@ -246,8 +273,10 @@ class StateManager: @unchecked Sendable {
                                                                        includingPropertiesForKeys: nil)
         
         var playlists: [PlaylistState] = []
+        var corruptedFiles: [URL] = []
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+
         for fileURL in playlistFiles where fileURL.pathExtension == "json" {
             do {
                 let data = try Data(contentsOf: fileURL)
@@ -262,11 +291,43 @@ class StateManager: @unchecked Sendable {
                     }
                 }
                 print("⚠️ Failed to read playlist file \(fileURL.lastPathComponent): \(error)")
-                // Continue with other files
+
+                // Try to recover from local backup
+                let slug = fileURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "playlist-", with: "")
+                if let recoveredPlaylist = try? loadPlaylistFromLocalDocuments(slug: slug) {
+                    print("✅ Recovered playlist from local backup: \(slug)")
+                    playlists.append(recoveredPlaylist)
+                    // Try to repair cloud file
+                    try? savePlaylist(recoveredPlaylist)
+                } else {
+                    corruptedFiles.append(fileURL)
+                    print("❌ Unable to recover playlist: \(fileURL.lastPathComponent)")
+                }
             }
         }
-        
+
+        // Move corrupted files to a quarantine folder
+        if !corruptedFiles.isEmpty {
+            try? quarantineCorruptedFiles(corruptedFiles, in: playlistsFolder)
+        }
+
         return playlists.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func quarantineCorruptedFiles(_ files: [URL], in folder: URL) throws {
+        let quarantineFolder = folder.appendingPathComponent("corrupted", isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: quarantineFolder.path) {
+            try FileManager.default.createDirectory(at: quarantineFolder,
+                                                 withIntermediateDirectories: true,
+                                                 attributes: nil)
+        }
+
+        for file in files {
+            let destination = quarantineFolder.appendingPathComponent(file.lastPathComponent)
+            try? FileManager.default.moveItem(at: file, to: destination)
+            print("🗄️ Moved corrupted file to quarantine: \(file.lastPathComponent)")
+        }
     }
     
     func deletePlaylist(slug: String) throws {

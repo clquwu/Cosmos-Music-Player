@@ -580,17 +580,66 @@ class DatabaseManager: @unchecked Sendable {
         return favorites
     }
     
+    func cleanupOrphanedPlaylistItems() throws {
+        print("🧹 Cleaning up orphaned playlist items...")
+
+        // SAFETY CHECK: Verify database is healthy before cleanup
+        let trackCount = try read { db in
+            try Track.fetchCount(db)
+        }
+
+        if trackCount == 0 {
+            print("⚠️ SAFETY: Skipping playlist cleanup - no tracks in database (possible database error)")
+            print("⚠️ This prevents accidental deletion of all playlist items")
+            return
+        }
+
+        let deletedCount = try write { db in
+            // Get all playlist items
+            let allItems = try PlaylistItem.fetchAll(db)
+            var orphanedCount = 0
+
+            print("🔍 Checking \(allItems.count) playlist items against \(trackCount) tracks")
+
+            for item in allItems {
+                // Check if track still exists
+                let trackExists = try Track.filter(Column("stable_id") == item.trackStableId).fetchOne(db) != nil
+
+                if !trackExists {
+                    // Remove orphaned item
+                    try PlaylistItem
+                        .filter(Column("playlist_id") == item.playlistId && Column("track_stable_id") == item.trackStableId)
+                        .deleteAll(db)
+                    orphanedCount += 1
+                    print("🗑️ Removed orphaned playlist item: \(item.trackStableId)")
+                }
+            }
+
+            return orphanedCount
+        }
+
+        if deletedCount > 0 {
+            print("✅ Cleaned up \(deletedCount) orphaned playlist items")
+        } else {
+            print("✅ No orphaned playlist items found")
+        }
+    }
+
     func deleteTrack(byStableId stableId: String) throws {
         print("🗃️ Database: Deleting track with stable ID - \(stableId)")
         let deletedCount = try write { db in
+            // Remove from playlist items first
+            let playlistItemsDeleted = try PlaylistItem.filter(Column("track_stable_id") == stableId).deleteAll(db)
+            if playlistItemsDeleted > 0 {
+                print("🗑️ Removed track from \(playlistItemsDeleted) playlist position(s)")
+            }
+
             // Remove from favorites if it exists
             let favoritesDeleted = try Favorite.filter(Column("track_stable_id") == stableId).deleteAll(db)
             if favoritesDeleted > 0 {
                 print("🗃️ Database: Removed \(favoritesDeleted) favorite entries for track")
             }
 
-            // Remove from playlists
-            let playlistItemsDeleted = try PlaylistItem.filter(Column("track_stable_id") == stableId).deleteAll(db)
             if playlistItemsDeleted > 0 {
                 print("🗃️ Database: Removed \(playlistItemsDeleted) playlist entries for track")
             }
@@ -679,6 +728,27 @@ class DatabaseManager: @unchecked Sendable {
             if let existingPlaylist = try Playlist.filter(Column("folder_path") == folderPath).fetchOne(db) {
                 print("📁 Folder playlist already exists: \(existingPlaylist.title)")
                 return existingPlaylist
+            }
+
+            // CRITICAL: Check if a manual playlist with the same title/slug already exists
+            // This prevents data loss by not overwriting user-created playlists
+            if let existingManualPlaylist = try Playlist.filter(Column("slug") == slug).fetchOne(db) {
+                if !existingManualPlaylist.isFolderSynced {
+                    print("⚠️ Manual playlist '\(title)' already exists - converting to folder-synced playlist")
+                    // Update the existing playlist to be folder-synced
+                    var updatedPlaylist = existingManualPlaylist
+                    updatedPlaylist.folderPath = folderPath
+                    updatedPlaylist.isFolderSynced = true
+                    updatedPlaylist.lastFolderSync = now
+                    updatedPlaylist.updatedAt = now
+                    try updatedPlaylist.update(db)
+                    print("✅ Converted manual playlist '\(title)' to folder-synced")
+                    return updatedPlaylist
+                } else {
+                    // Another folder playlist with same name but different path
+                    print("⚠️ Folder playlist '\(title)' already exists with different path")
+                    return existingManualPlaylist
+                }
             }
 
             let playlist = Playlist(

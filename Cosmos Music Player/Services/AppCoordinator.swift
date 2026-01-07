@@ -355,6 +355,17 @@ class AppCoordinator: ObservableObject {
             // Try playlist restoration again after relationships are fixed
             await retryPlaylistRestoration()
 
+            // Clean up orphaned playlist items
+            do {
+                try databaseManager.cleanupOrphanedPlaylistItems()
+            } catch {
+                print("⚠️ Failed to cleanup orphaned playlist items: \(error)")
+            }
+
+            // Mark initial indexing as complete
+            hasCompletedInitialIndexing = true
+            print("✅ Initial indexing completed - playlist sync enabled")
+
             // Update widget with playlists
             syncPlaylistsToCloud()
 
@@ -404,16 +415,50 @@ class AppCoordinator: ObservableObject {
             for playlistState in playlistStates {
                 // Check if playlist already exists in database
                 let existingPlaylists = try databaseManager.getAllPlaylists()
-                let playlistExists = existingPlaylists.contains { $0.slug == playlistState.slug }
-                
-                if !playlistExists {
-                    print("➕ Restoring playlist: \(playlistState.title)")
-                    // Create playlist in database
+
+                if let existingPlaylist = existingPlaylists.first(where: { $0.slug == playlistState.slug }) {
+                    // Playlist exists - sync tracks from cloud to database
+                    print("🔄 Syncing existing playlist from cloud: \(playlistState.title)")
+
+                    guard let playlistId = existingPlaylist.id else { continue }
+
+                    // Skip folder-synced playlists - they manage their own content
+                    if existingPlaylist.isFolderSynced {
+                        print("📁 Skipping folder-synced playlist: \(playlistState.title)")
+                        continue
+                    }
+
+                    // Get current tracks in database
+                    let currentItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
+                    let currentTrackIds = Set(currentItems.map { $0.trackStableId })
+                    let cloudTrackIds = Set(playlistState.items.map { $0.trackId })
+
+                    // Only add tracks that are in cloud but not in database
+                    // This prevents removing tracks user added locally
+                    let tracksToAdd = cloudTrackIds.subtracting(currentTrackIds)
+
+                    if !tracksToAdd.isEmpty {
+                        print("➕ Adding \(tracksToAdd.count) missing tracks from cloud to '\(playlistState.title)'")
+                        for trackId in tracksToAdd {
+                            // Check if track exists in database
+                            if let _ = try databaseManager.getTrack(byStableId: trackId) {
+                                try databaseManager.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
+                                print("✅ Added track to playlist: \(trackId)")
+                            } else {
+                                print("⚠️ Track not found in database: \(trackId)")
+                            }
+                        }
+                    } else {
+                        print("✅ Playlist '\(playlistState.title)' is already in sync")
+                    }
+                } else {
+                    // Playlist doesn't exist - create it
+                    print("➕ Restoring new playlist: \(playlistState.title)")
                     let playlist = try databaseManager.createPlaylist(title: playlistState.title)
-                    
+
                     // Add tracks to playlist if they exist in the database
                     guard let playlistId = playlist.id else { continue }
-                    
+
                     for item in playlistState.items {
                         // Check if track exists in database
                         if let _ = try databaseManager.getTrack(byStableId: item.trackId) {
@@ -423,8 +468,6 @@ class AppCoordinator: ObservableObject {
                             print("⚠️ Track not found in database: \(item.trackId)")
                         }
                     }
-                } else {
-                    print("⚡ Playlist already exists: \(playlistState.title)")
                 }
             }
             print("✅ Playlist restoration completed")
@@ -687,8 +730,27 @@ class AppCoordinator: ObservableObject {
         syncPlaylistsToCloud()
     }
     
+    private var isSyncingPlaylists = false
+    private var hasCompletedInitialIndexing = false
+
     private func syncPlaylistsToCloud() {
-        Task {
+        Task { @MainActor in
+            // Prevent concurrent sync operations
+            guard !isSyncingPlaylists else {
+                print("⏭️ Skipping playlist sync - already in progress")
+                return
+            }
+
+            // Safety: Don't sync until initial indexing is complete
+            // This prevents overwriting cloud data with incomplete local data
+            guard hasCompletedInitialIndexing else {
+                print("⏳ Skipping playlist sync - waiting for initial indexing to complete")
+                return
+            }
+
+            isSyncingPlaylists = true
+            defer { isSyncingPlaylists = false }
+
             do {
                 let playlists = try databaseManager.getAllPlaylists()
 
@@ -698,8 +760,28 @@ class AppCoordinator: ObservableObject {
 
                     // Get playlist items from database
                     let dbPlaylistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
-                    let stateItems = dbPlaylistItems.map { item in
-                        (item.trackStableId, Date()) // Use current date as addedAt since we don't track that yet
+
+                    // Validate that tracks still exist before syncing
+                    var validItems: [(String, Date)] = []
+                    for item in dbPlaylistItems {
+                        if let _ = try? databaseManager.getTrack(byStableId: item.trackStableId) {
+                            validItems.append((item.trackStableId, Date()))
+                        } else {
+                            print("⚠️ Skipping orphaned track in playlist '\(playlist.title)': \(item.trackStableId)")
+                        }
+                    }
+                    let stateItems = validItems
+
+                    // SAFETY CHECK: Don't overwrite cloud data with empty playlists for non-folder-synced playlists
+                    // This prevents data loss if database gets corrupted
+                    if !playlist.isFolderSynced && stateItems.isEmpty {
+                        // Check if cloud has data for this playlist
+                        if let existingCloudPlaylist = try? stateManager.loadPlaylist(slug: playlist.slug),
+                           !existingCloudPlaylist.items.isEmpty {
+                            print("⚠️ Skipping sync for '\(playlist.title)' - database is empty but cloud has \(existingCloudPlaylist.items.count) tracks")
+                            print("🛡️ This prevents accidental data loss. The cloud version is preserved.")
+                            continue
+                        }
                     }
 
                     let playlistState = PlaylistState(
