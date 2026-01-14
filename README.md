@@ -552,10 +552,11 @@ DISCOGS_CONSUMER_SECRET=your_discogs_consumer_secret
 
 ## Appendix 📋
 
-We use Spotify and Discogs to fetch artist details. We are not related to either of their services in any financial way - we just want to offer you the best experience possible.
+We use Spotify and Discogs to fetch artist details, and LRCLIB for synchronized lyrics. We are not related to any of these services in any financial way - we just want to offer you the best experience possible.
 
 ### Credits 🎨
 
+- **Lyrics Api**: Special thanks to the [LRCLIB](https://github.com/tranxuanthang/lrclib) project by tranxuanthang
 - **Logo Design**: Created by **Zerrotic** (zerrotic on Discord)
 - **App Store Screenshots**: Designed by **MrVedakkaN** (mrvedakkan on Discord)
 
