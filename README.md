@@ -557,7 +557,7 @@ We use Spotify and Discogs to fetch artist details. We are not related to either
 ### Credits 🎨
 
 - **Logo Design**: Created by **Zerrotic** (zerrotic on Discord)
-- **App Store Screenshots**: Designed by **[Your Graphist's Name]** ([contact/portfolio link if available])
+- **App Store Screenshots**: Designed by **MrVedakkaN** (mrvedakkan on Discord)
 
 ## Authors 👥
 
