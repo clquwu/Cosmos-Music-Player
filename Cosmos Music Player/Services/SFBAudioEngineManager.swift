@@ -24,6 +24,11 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     private var updateTimer: Timer?
     private var eqAttachmentFailed = false
 
+    // Gapless playback support
+    var nextTrackURL: URL?
+    var onTrackNearingEnd: (() -> Void)?
+    private var hasTriggeredNearEnd = false
+
         nonisolated private func configureDefaultSFBBands(for equalizer: AVAudioUnitEQ) {
             let numberOfBands = equalizer.bands.count
             let minFreq = 20.0

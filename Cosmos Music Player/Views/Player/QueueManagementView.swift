@@ -58,7 +58,10 @@ struct QueueManagementView: View {
                                     track: track,
                                     index: index,
                                     isCurrentTrack: index == playerEngine.currentIndex,
-                                    isDragging: draggedTrack?.stableId == track.stableId
+                                    isDragging: draggedTrack?.stableId == track.stableId,
+                                    onTap: {
+                                        jumpToTrack(at: index)
+                                    }
                                 )
                                 .listRowBackground(Color.clear)
                                 .listRowSeparator(.hidden)
@@ -84,17 +87,17 @@ struct QueueManagementView: View {
     private func moveItems(from source: IndexSet, to destination: Int) {
         var newQueue = playerEngine.playbackQueue
         var newCurrentIndex = playerEngine.currentIndex
-        
+
         // Get the source index (should be only one item)
         guard let sourceIndex = source.first else { return }
-        
+
         // Calculate the actual destination index
         let actualDestination = sourceIndex < destination ? destination - 1 : destination
-        
+
         // Move the item
         let movedTrack = newQueue.remove(at: sourceIndex)
         newQueue.insert(movedTrack, at: actualDestination)
-        
+
         // Update current playing index
         if sourceIndex == playerEngine.currentIndex {
             // The currently playing track was moved
@@ -106,10 +109,25 @@ struct QueueManagementView: View {
             // Track moved from after current to before current
             newCurrentIndex += 1
         }
-        
+
         // Apply changes
         playerEngine.playbackQueue = newQueue
         playerEngine.currentIndex = newCurrentIndex
+    }
+
+    private func jumpToTrack(at index: Int) {
+        guard index >= 0 && index < playerEngine.playbackQueue.count else { return }
+
+        Task {
+            playerEngine.currentIndex = index
+            let track = playerEngine.playbackQueue[index]
+            await playerEngine.loadTrack(track, preservePlaybackTime: false)
+
+            // Start playback
+            DispatchQueue.main.async {
+                self.playerEngine.play()
+            }
+        }
     }
 }
 
@@ -118,7 +136,8 @@ struct QueueTrackRow: View {
     let index: Int
     let isCurrentTrack: Bool
     let isDragging: Bool
-    
+    let onTap: () -> Void
+
     @State private var artworkImage: UIImage?
     @State private var settings = DeleteSettings.load()
     
@@ -186,6 +205,10 @@ struct QueueTrackRow: View {
         .opacity(isDragging ? 0.8 : 1.0)
         .scaleEffect(isDragging ? 1.05 : 1.0)
         .animation(.easeInOut(duration: 0.2), value: isDragging)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onTap()
+        }
         .onAppear {
             loadArtwork()
         }

@@ -40,7 +40,13 @@ class PlayerEngine: NSObject, ObservableObject {
     private var audioFile: AVAudioFile?
     private var playbackStrategy: PlaybackRouter.PlaybackStrategy?
     private var playbackTimer: Timer?
-    
+
+    // Gapless playback support
+    private var nextAudioFile: AVAudioFile?
+    private var nextTrack: Track?
+    private var isPreloadingNext = false
+    private var gaplessScheduled = false
+
     // SFBAudioEngine integration
     private lazy var sfbAudioManager = SFBAudioEngineManager.shared
     private var usingSFBEngine = false

@@ -594,8 +594,10 @@ class LibraryIndexer: NSObject, ObservableObject {
     func generateStableId(for url: URL) throws -> String {
         // Use full path to ensure uniqueness even when filenames are identical
         // This prevents duplicate songs with same name from colliding
-        let fullPath = url.path
-        let digest = SHA256.hash(data: fullPath.data(using: .utf8) ?? Data())
+        // Normalize path to handle /private/var/mobile vs /var/mobile symlink differences
+        let normalizedPath = url.path
+            .replacingOccurrences(of: "/private/var/mobile", with: "/var/mobile")
+        let digest = SHA256.hash(data: normalizedPath.data(using: .utf8) ?? Data())
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
     

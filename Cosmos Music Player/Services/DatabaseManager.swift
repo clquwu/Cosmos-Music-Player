@@ -310,9 +310,10 @@ class DatabaseManager: @unchecked Sendable {
                 var updatedCount = 0
 
                 for track in tracks {
-                    // Generate new stable ID based on full path
-                    let fullPath = track.path
-                    let newStableId = SHA256.hash(data: fullPath.data(using: .utf8) ?? Data())
+                    // Generate new stable ID based on full path (normalized to handle symlinks)
+                    let normalizedPath = track.path
+                        .replacingOccurrences(of: "/private/var/mobile", with: "/var/mobile")
+                    let newStableId = SHA256.hash(data: normalizedPath.data(using: .utf8) ?? Data())
                         .compactMap { String(format: "%02x", $0) }.joined()
 
                     // Only update if stable ID changed
@@ -652,14 +653,16 @@ class DatabaseManager: @unchecked Sendable {
         print("🔍 Checking for duplicate tracks by path...")
 
         let duplicatesRemoved = try write { db in
-            // Find all tracks grouped by path
+            // Find all tracks grouped by normalized path (handle /private/var/mobile symlink)
             let allTracks = try Track.fetchAll(db)
-            let groupedByPath = Dictionary(grouping: allTracks, by: { $0.path })
+            let groupedByPath = Dictionary(grouping: allTracks, by: { track in
+                track.path.replacingOccurrences(of: "/private/var/mobile", with: "/var/mobile")
+            })
 
             var removedCount = 0
 
             for (path, tracks) in groupedByPath where tracks.count > 1 {
-                print("⚠️ Found \(tracks.count) duplicates for: \(path)")
+                print("⚠️ Found \(tracks.count) duplicates for normalized path: \(path)")
 
                 // Keep the most recent one (highest ID = most recently added)
                 let sorted = tracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
