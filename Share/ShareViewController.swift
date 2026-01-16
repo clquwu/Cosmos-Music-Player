@@ -256,6 +256,12 @@ class ShareViewController: SLComposeServiceViewController {
     private func storeSharedURL(_ url: URL) {
         print("💾 Attempting to store shared URL: \(url.lastPathComponent)")
 
+        // Reject network URLs
+        if let scheme = url.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
+            print("❌ Rejected network URL: \(url.absoluteString)")
+            return
+        }
+
         guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
             print("❌ Failed to get shared container URL")
             return

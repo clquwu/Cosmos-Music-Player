@@ -111,6 +111,12 @@ struct LibraryView: View {
             var processedCount = 0
 
             for url in urls {
+                // Reject network URLs
+                if let scheme = url.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
+                    print("❌ Rejected network URL: \(url.absoluteString)")
+                    continue
+                }
+
                 // Start accessing security-scoped resource
                 guard url.startAccessingSecurityScopedResource() else {
                     print("Failed to access security scoped resource for: \(url.lastPathComponent)")

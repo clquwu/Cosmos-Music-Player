@@ -355,13 +355,6 @@ class AppCoordinator: ObservableObject {
             // Try playlist restoration again after relationships are fixed
             await retryPlaylistRestoration()
 
-            // Deduplicate tracks by path (for users who already upgraded with duplicates)
-            do {
-                try databaseManager.deduplicateTracksByPath()
-            } catch {
-                print("⚠️ Failed to deduplicate tracks: \(error)")
-            }
-
             // Deduplicate playlist items (fixes folder-synced playlists with duplicate entries)
             do {
                 try databaseManager.deduplicatePlaylistItems()

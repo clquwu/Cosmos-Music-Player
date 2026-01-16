@@ -139,6 +139,12 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
 
     func processExternalFile(_ fileURL: URL) async {
+        // Reject network URLs
+        if let scheme = fileURL.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
+            print("❌ Rejected network URL: \(fileURL.absoluteString)")
+            return
+        }
+
         do {
             print("🎵 Starting to process external file: \(fileURL.lastPathComponent)")
             print("📱 Processing external file from: \(fileURL.path)")
@@ -592,12 +598,8 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
     
     func generateStableId(for url: URL) throws -> String {
-        // Use full path to ensure uniqueness even when filenames are identical
-        // This prevents duplicate songs with same name from colliding
-        // Normalize path to handle /private/var/mobile vs /var/mobile symlink differences
-        let normalizedPath = url.path
-            .replacingOccurrences(of: "/private/var/mobile", with: "/var/mobile")
-        let digest = SHA256.hash(data: normalizedPath.data(using: .utf8) ?? Data())
+        let filename = url.lastPathComponent
+        let digest = SHA256.hash(data: filename.data(using: .utf8) ?? Data())
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
     
@@ -746,6 +748,12 @@ class LibraryIndexer: NSObject, ObservableObject {
 
                     if isStale {
                         print("⚠️ Bookmark is stale for: \(filename)")
+                        continue
+                    }
+
+                    // Reject network URLs
+                    if let scheme = url.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
+                        print("❌ Rejected network URL: \(url.absoluteString)")
                         continue
                     }
 
@@ -951,6 +959,12 @@ class LibraryIndexer: NSObject, ObservableObject {
 
                     if isStale {
                         print("⚠️ Bookmark is stale for stableId: \(stableId)")
+                        continue
+                    }
+
+                    // Reject network URLs
+                    if let scheme = resolvedURL.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
+                        print("❌ Rejected network URL: \(resolvedURL.absoluteString)")
                         continue
                     }
 

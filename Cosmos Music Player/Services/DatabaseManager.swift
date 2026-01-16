@@ -303,17 +303,78 @@ class DatabaseManager: @unchecked Sendable {
                 print("ℹ️ Database migration: deleted_folder_playlist table already exists or migration failed: \(error)")
             }
 
-            // Migration: Update stable IDs from filename-based to full-path-based
-            // This prevents duplicates when stable ID generation changed
+            // First, deduplicate by filename before updating stable IDs
+            do {
+                let allTracks = try Track.fetchAll(db)
+
+                // Group by filename (what the new stable_id will be)
+                let groupedByFilename = Dictionary(grouping: allTracks, by: { track -> String in
+                    let url = URL(fileURLWithPath: track.path)
+                    return url.lastPathComponent
+                })
+
+                var removedCount = 0
+
+                for (filename, duplicates) in groupedByFilename where duplicates.count > 1 {
+                    print("⚠️ Found \(duplicates.count) tracks with same filename: \(filename)")
+
+                    // Keep the most recent one (highest ID = most recently added)
+                    let sorted = duplicates.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+                    let keep = sorted.first!
+                    let remove = Array(sorted.dropFirst())
+
+                    print("✅ Keeping track ID \(keep.id ?? 0): \(keep.title)")
+
+                    for duplicate in remove {
+                        // Transfer favorites to the kept track
+                        try db.execute(
+                            sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
+                            arguments: [keep.stableId, duplicate.stableId]
+                        )
+
+                        // Transfer playlist items to the kept track
+                        try db.execute(
+                            sql: "UPDATE OR IGNORE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
+                            arguments: [keep.stableId, duplicate.stableId]
+                        )
+
+                        // Delete remaining orphaned references
+                        try db.execute(
+                            sql: "DELETE FROM favorite WHERE track_stable_id = ?",
+                            arguments: [duplicate.stableId]
+                        )
+                        try db.execute(
+                            sql: "DELETE FROM playlist_item WHERE track_stable_id = ?",
+                            arguments: [duplicate.stableId]
+                        )
+
+                        // Delete the duplicate track
+                        try Track.filter(Column("id") == duplicate.id).deleteAll(db)
+                        print("🗑️ Removed duplicate track ID \(duplicate.id ?? 0): \(duplicate.title)")
+                        removedCount += 1
+                    }
+                }
+
+                if removedCount > 0 {
+                    print("✅ Removed \(removedCount) duplicate tracks by filename")
+                } else {
+                    print("ℹ️ No duplicate tracks found by filename")
+                }
+
+            } catch {
+                print("⚠️ Filename deduplication failed: \(error)")
+            }
+
+            // Now update stable IDs from path-based to filename-based
             do {
                 let tracks = try Track.fetchAll(db)
                 var updatedCount = 0
 
                 for track in tracks {
-                    // Generate new stable ID based on full path (normalized to handle symlinks)
-                    let normalizedPath = track.path
-                        .replacingOccurrences(of: "/private/var/mobile", with: "/var/mobile")
-                    let newStableId = SHA256.hash(data: normalizedPath.data(using: .utf8) ?? Data())
+                    // Generate new stable ID based on filename only
+                    let url = URL(fileURLWithPath: track.path)
+                    let filename = url.lastPathComponent
+                    let newStableId = SHA256.hash(data: filename.data(using: .utf8) ?? Data())
                         .compactMap { String(format: "%02x", $0) }.joined()
 
                     // Only update if stable ID changed
@@ -341,13 +402,21 @@ class DatabaseManager: @unchecked Sendable {
                 }
 
                 if updatedCount > 0 {
-                    print("✅ Database: Migrated \(updatedCount) stable IDs from filename-based to full-path-based")
+                    print("✅ Database: Migrated \(updatedCount) stable IDs from path-based to filename-based")
                 } else {
-                    print("ℹ️ Database: Stable IDs already up to date")
+                    print("ℹ️ Database: Stable IDs already filename-based")
                 }
             } catch {
                 print("⚠️ Database migration: Stable ID migration failed: \(error)")
                 // Don't throw - allow app to continue and re-index will handle it
+            }
+
+            // Add UNIQUE constraint to stable_id to prevent duplicates
+            do {
+                try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_track_stable_id ON track(stable_id)")
+                print("✅ Database: Created UNIQUE index on track.stable_id")
+            } catch {
+                print("⚠️ Database migration: Failed to create UNIQUE index on stable_id: \(error)")
             }
         }
     }
@@ -647,68 +716,6 @@ class DatabaseManager: @unchecked Sendable {
         }
         print("🗃️ Database: Retrieved \(favorites.count) favorites - \(favorites)")
         return favorites
-    }
-    
-    func deduplicateTracksByPath() throws {
-        print("🔍 Checking for duplicate tracks by path...")
-
-        let duplicatesRemoved = try write { db in
-            // Find all tracks grouped by normalized path (handle /private/var/mobile symlink)
-            let allTracks = try Track.fetchAll(db)
-            let groupedByPath = Dictionary(grouping: allTracks, by: { track in
-                track.path.replacingOccurrences(of: "/private/var/mobile", with: "/var/mobile")
-            })
-
-            var removedCount = 0
-
-            for (path, tracks) in groupedByPath where tracks.count > 1 {
-                print("⚠️ Found \(tracks.count) duplicates for normalized path: \(path)")
-
-                // Keep the most recent one (highest ID = most recently added)
-                let sorted = tracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
-                let keep = sorted.first!
-                let remove = Array(sorted.dropFirst())
-
-                print("✅ Keeping track ID \(keep.id ?? 0) with stable_id: \(keep.stableId)")
-
-                for duplicate in remove {
-                    // Transfer favorites to the kept track
-                    try db.execute(
-                        sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [keep.stableId, duplicate.stableId]
-                    )
-
-                    // Transfer playlist items to the kept track
-                    try db.execute(
-                        sql: "UPDATE OR IGNORE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [keep.stableId, duplicate.stableId]
-                    )
-
-                    // Delete remaining orphaned references
-                    try db.execute(
-                        sql: "DELETE FROM favorite WHERE track_stable_id = ?",
-                        arguments: [duplicate.stableId]
-                    )
-                    try db.execute(
-                        sql: "DELETE FROM playlist_item WHERE track_stable_id = ?",
-                        arguments: [duplicate.stableId]
-                    )
-
-                    // Delete the duplicate track
-                    try Track.filter(Column("id") == duplicate.id).deleteAll(db)
-                    print("🗑️ Removed duplicate track ID \(duplicate.id ?? 0)")
-                    removedCount += 1
-                }
-            }
-
-            return removedCount
-        }
-
-        if duplicatesRemoved > 0 {
-            print("✅ Removed \(duplicatesRemoved) duplicate tracks")
-        } else {
-            print("✅ No duplicate tracks found")
-        }
     }
 
     func deduplicatePlaylistItems() throws {
