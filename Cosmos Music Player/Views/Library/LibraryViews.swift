@@ -1,6 +1,7 @@
 import SwiftUI
 import GRDB
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Responsive Font Helper
 extension View {
@@ -1239,6 +1240,7 @@ struct SearchView: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
+    @State private var debouncedSearchText = ""
     @State private var selectedCategory = SearchCategory.all
     @State private var settings = DeleteSettings.load()
     @FocusState private var isSearchFocused: Bool
@@ -1262,12 +1264,16 @@ struct SearchView: View {
     }
     
     private var searchResults: SearchResults {
-        if searchText.isEmpty {
+        if debouncedSearchText.isEmpty {
             return SearchResults()
         }
-        
-        let lowercasedQuery = searchText.lowercased()
-        
+
+        let lowercasedQuery = debouncedSearchText.lowercased()
+
+        // Build caches once for all searches
+        let artistCache = buildArtistNameCache()
+        let albumCache = buildAlbumTitleCache()
+
         // Search songs
         let songs = allTracks.filter { track in
             // Search by title
@@ -1275,21 +1281,17 @@ struct SearchView: View {
                 return true
             }
             
-            // Search by artist name
+            // Search by artist name (using cache)
             if let artistId = track.artistId,
-               let artist = try? DatabaseManager.shared.read({ db in
-                   try Artist.fetchOne(db, key: artistId)
-               }),
-               artist.name.lowercased().contains(lowercasedQuery) {
+               let artistName = artistCache[artistId],
+               artistName.lowercased().contains(lowercasedQuery) {
                 return true
             }
             
-            // Search by album name
+            // Search by album name (using cache)
             if let albumId = track.albumId,
-               let album = try? DatabaseManager.shared.read({ db in
-                   try Album.fetchOne(db, key: albumId)
-               }),
-               album.title.lowercased().contains(lowercasedQuery) {
+               let albumTitle = albumCache[albumId],
+               albumTitle.lowercased().contains(lowercasedQuery) {
                 return true
             }
             
@@ -1316,12 +1318,10 @@ struct SearchView: View {
                         return true
                     }
                     
-                    // Search by artist name
+                    // Search by artist name (using cache)
                     if let artistId = album.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }),
-                       artist.name.lowercased().contains(lowercasedQuery) {
+                       let artistName = artistCache[artistId],
+                       artistName.lowercased().contains(lowercasedQuery) {
                         return true
                     }
                     
@@ -1342,9 +1342,48 @@ struct SearchView: View {
             }
         }()
         
-        return SearchResults(songs: songs, artists: artists, albums: albums, playlists: playlists)
+        return SearchResults(
+            songs: Array(songs.prefix(50)),
+            artists: Array(artists.prefix(20)),
+            albums: Array(albums.prefix(30)),
+            playlists: Array(playlists.prefix(15))
+        )
     }
-    
+
+    private func buildArtistNameCache() -> [Int64: String] {
+        var cache: [Int64: String] = [:]
+        do {
+            try DatabaseManager.shared.read { db in
+                let artists = try Artist.fetchAll(db)
+                for artist in artists {
+                    if let id = artist.id {
+                        cache[id] = artist.name
+                    }
+                }
+            }
+        } catch {
+            print("Failed to build artist cache: \(error)")
+        }
+        return cache
+    }
+
+    private func buildAlbumTitleCache() -> [Int64: String] {
+        var cache: [Int64: String] = [:]
+        do {
+            try DatabaseManager.shared.read { db in
+                let albums = try Album.fetchAll(db)
+                for album in albums {
+                    if let id = album.id {
+                        cache[id] = album.title
+                    }
+                }
+            }
+        } catch {
+            print("Failed to build album cache: \(error)")
+        }
+        return cache
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -1439,6 +1478,12 @@ struct SearchView: View {
                         .foregroundColor(settings.backgroundColorChoice.color)
                     }
                 }
+            }
+            .onReceive(
+                Just(searchText)
+                    .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            ) { value in
+                debouncedSearchText = value
             }
             .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
                 settings = DeleteSettings.load()
