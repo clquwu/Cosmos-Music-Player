@@ -1244,6 +1244,9 @@ struct SearchView: View {
     @State private var selectedCategory = SearchCategory.all
     @State private var settings = DeleteSettings.load()
     @FocusState private var isSearchFocused: Bool
+    @State private var debounceTask: Task<Void, Never>?
+    @State private var artistCache: [Int64: String] = [:]
+    @State private var albumCache: [Int64: String] = [:]
     
     enum SearchCategory: String, CaseIterable {
         case all = "All"
@@ -1268,33 +1271,43 @@ struct SearchView: View {
             return SearchResults()
         }
 
-        let lowercasedQuery = debouncedSearchText.lowercased()
-
-        // Build caches once for all searches
-        let artistCache = buildArtistNameCache()
-        let albumCache = buildAlbumTitleCache()
+        // Normalize query: lowercase and remove diacritics for fuzzy matching
+        let normalizedQuery = debouncedSearchText
+            .lowercased()
+            .folding(options: .diacriticInsensitive, locale: .current)
 
         // Search songs
         let songs = allTracks.filter { track in
-            // Search by title
-            if track.title.lowercased().contains(lowercasedQuery) {
+            // Search by title (diacritic-insensitive)
+            let normalizedTitle = track.title
+                .lowercased()
+                .folding(options: .diacriticInsensitive, locale: .current)
+            if normalizedTitle.contains(normalizedQuery) {
                 return true
             }
-            
-            // Search by artist name (using cache)
+
+            // Search by artist name (using cache, diacritic-insensitive)
             if let artistId = track.artistId,
-               let artistName = artistCache[artistId],
-               artistName.lowercased().contains(lowercasedQuery) {
-                return true
+               let artistName = artistCache[artistId] {
+                let normalizedArtist = artistName
+                    .lowercased()
+                    .folding(options: .diacriticInsensitive, locale: .current)
+                if normalizedArtist.contains(normalizedQuery) {
+                    return true
+                }
             }
-            
-            // Search by album name (using cache)
+
+            // Search by album name (using cache, diacritic-insensitive)
             if let albumId = track.albumId,
-               let albumTitle = albumCache[albumId],
-               albumTitle.lowercased().contains(lowercasedQuery) {
-                return true
+               let albumTitle = albumCache[albumId] {
+                let normalizedAlbum = albumTitle
+                    .lowercased()
+                    .folding(options: .diacriticInsensitive, locale: .current)
+                if normalizedAlbum.contains(normalizedQuery) {
+                    return true
+                }
             }
-            
+
             return false
         }
         
@@ -1302,41 +1315,58 @@ struct SearchView: View {
         let artists: [Artist] = {
             do {
                 let allArtists = try appCoordinator.databaseManager.getAllArtists()
-                return allArtists.filter { $0.name.lowercased().contains(lowercasedQuery) }
+                return allArtists.filter { artist in
+                    let normalizedName = artist.name
+                        .lowercased()
+                        .folding(options: .diacriticInsensitive, locale: .current)
+                    return normalizedName.contains(normalizedQuery)
+                }
             } catch {
                 return []
             }
         }()
-        
+
         // Search albums
         let albums: [Album] = {
             do {
                 let allAlbums = try appCoordinator.getAllAlbums()
                 return allAlbums.filter { album in
-                    // Search by album title
-                    if album.title.lowercased().contains(lowercasedQuery) {
+                    // Search by album title (diacritic-insensitive)
+                    let normalizedTitle = album.title
+                        .lowercased()
+                        .folding(options: .diacriticInsensitive, locale: .current)
+                    if normalizedTitle.contains(normalizedQuery) {
                         return true
                     }
-                    
-                    // Search by artist name (using cache)
+
+                    // Search by artist name (using cache, diacritic-insensitive)
                     if let artistId = album.artistId,
-                       let artistName = artistCache[artistId],
-                       artistName.lowercased().contains(lowercasedQuery) {
-                        return true
+                       let artistName = artistCache[artistId] {
+                        let normalizedArtist = artistName
+                            .lowercased()
+                            .folding(options: .diacriticInsensitive, locale: .current)
+                        if normalizedArtist.contains(normalizedQuery) {
+                            return true
+                        }
                     }
-                    
+
                     return false
                 }
             } catch {
                 return []
             }
         }()
-        
+
         // Search playlists
         let playlists: [Playlist] = {
             do {
                 let allPlaylists = try appCoordinator.databaseManager.getAllPlaylists()
-                return allPlaylists.filter { $0.title.lowercased().contains(lowercasedQuery) }
+                return allPlaylists.filter { playlist in
+                    let normalizedTitle = playlist.title
+                        .lowercased()
+                        .folding(options: .diacriticInsensitive, locale: .current)
+                    return normalizedTitle.contains(normalizedQuery)
+                }
             } catch {
                 return []
             }
@@ -1440,7 +1470,7 @@ struct SearchView: View {
                     .padding(.top, 12)
                     
                     // Results
-                    if searchText.isEmpty {
+                    if debouncedSearchText.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 40))
@@ -1479,19 +1509,32 @@ struct SearchView: View {
                     }
                 }
             }
-            .onReceive(
-                Just(searchText)
-                    .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            ) { value in
-                debouncedSearchText = value
+            .onChange(of: searchText) { newValue in
+                // Cancel any existing debounce task
+                debounceTask?.cancel()
+
+                // Create new debounce task
+                debounceTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                    if !Task.isCancelled {
+                        debouncedSearchText = newValue
+                    }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
                 settings = DeleteSettings.load()
             }
             .onAppear {
+                // Build caches once when view appears
+                artistCache = buildArtistNameCache()
+                albumCache = buildAlbumTitleCache()
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     isSearchFocused = true
                 }
+            }
+            .onDisappear {
+                debounceTask?.cancel()
             }
         }
     }
