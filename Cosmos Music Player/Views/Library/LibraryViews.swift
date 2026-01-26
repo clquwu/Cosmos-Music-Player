@@ -1,6 +1,7 @@
 import SwiftUI
 import GRDB
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Responsive Font Helper
 extension View {
@@ -105,50 +106,50 @@ struct LibraryView: View {
         newTracksFoundCount = 0
         syncCompleted = false
     }
-
+    
     private func importMusicFiles(_ urls: [URL]) {
         Task {
             var processedCount = 0
-
+            
             for url in urls {
                 // Reject network URLs
                 if let scheme = url.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
                     print("❌ Rejected network URL: \(url.absoluteString)")
                     continue
                 }
-
+                
                 // Start accessing security-scoped resource
                 guard url.startAccessingSecurityScopedResource() else {
                     print("Failed to access security scoped resource for: \(url.lastPathComponent)")
                     continue
                 }
-
+                
                 defer {
                     url.stopAccessingSecurityScopedResource()
                 }
-
+                
                 do {
                     // Create bookmark data for persistent access
                     let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
-
+                    
                     // Store bookmark data for this file
                     await storeBookmarkData(bookmarkData, for: url)
-
+                    
                     // Process the file directly from its original location
                     await libraryIndexer.processExternalFile(url)
                     processedCount += 1
                     print("Processed and bookmarked file from original location: \(url.lastPathComponent)")
-
+                    
                 } catch {
                     print("Failed to create bookmark for \(url.lastPathComponent): \(error)")
-
+                    
                     // Still try to process the file even if bookmark creation fails
                     await libraryIndexer.processExternalFile(url)
                     processedCount += 1
                     print("Processed file from original location (no bookmark): \(url.lastPathComponent)")
                 }
             }
-
+            
             // Show feedback
             await MainActor.run {
                 if processedCount > 0 {
@@ -159,11 +160,11 @@ struct LibraryView: View {
                     } else {
                         syncToastMessage = "\(processedCount) songs processed"
                     }
-
+                    
                     withAnimation(.easeInOut(duration: 0.2)) {
                         showSyncToast = true
                     }
-
+                    
                     // Auto-hide toast after 3 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                         withAnimation(.easeInOut(duration: 0.3)) {
@@ -172,18 +173,18 @@ struct LibraryView: View {
                     }
                 }
             }
-
+            
             // Trigger library refresh to update UI
             if processedCount > 0, let onManualSync = onManualSync {
                 _ = await onManualSync()
             }
         }
     }
-
+    
     private func storeBookmarkData(_ bookmarkData: Data, for url: URL) async {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
+        
         do {
             // Load existing bookmarks or create new dictionary
             var bookmarks: [String: Data] = [:]
@@ -193,260 +194,260 @@ struct LibraryView: View {
                     bookmarks = plist
                 }
             }
-
+            
             // Generate stableId for this file
             let stableId = try libraryIndexer.generateStableId(for: url)
-
+            
             // Store bookmark using stableId as key (survives file moves)
             bookmarks[stableId] = bookmarkData
-
+            
             // Save updated bookmarks
             let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
             try plistData.write(to: bookmarksURL)
-
+            
             print("Stored bookmark for external file: \(url.lastPathComponent) with stableId: \(stableId)")
         } catch {
             print("Failed to store bookmark data: \(error)")
         }
     }
-
-
+    
+    
     var body: some View {
         NavigationStack {
-                ZStack {
-                    ScreenSpecificBackgroundView(screen: .library)
+            ZStack {
+                ScreenSpecificBackgroundView(screen: .library)
+                
+                VStack(spacing: 0) {
                     
-                    VStack(spacing: 0) {
-                
-                // Compact processing status at the top of library
-                if libraryIndexer.isIndexing && !libraryIndexer.currentlyProcessing.isEmpty {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 12, height: 12)
-                        
-                        Text("\(Localized.processing): \(libraryIndexer.currentlyProcessing)")
-                            .font(.caption2)
-                            .foregroundColor(settings.backgroundColorChoice.color)
-                            .lineLimit(1)
-                        
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .background(settings.backgroundColorChoice.color.opacity(0.05))
-                }
-                
-                // Large section rows
-                ScrollView {
-                    VStack(spacing: 16) {
-                        // Library title with icons that scrolls with content
-                        HStack(alignment: .center) {
-                            Text(Localized.library)
-                                .responsiveLibraryTitleFont()
-                                .foregroundColor(.primary)
+                    // Compact processing status at the top of library
+                    if libraryIndexer.isIndexing && !libraryIndexer.currentlyProcessing.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                                .frame(width: 12, height: 12)
+                            
+                            Text("\(Localized.processing): \(libraryIndexer.currentlyProcessing)")
+                                .font(.caption2)
+                                .foregroundColor(settings.backgroundColorChoice.color)
+                                .lineLimit(1)
                             
                             Spacer()
-                            
-                            HStack(spacing: 20) {
-                                // Sync button (if available)
-                                if let onManualSync = onManualSync {
-                                    Button(action: {
-                                        guard !isRefreshing else { return }
-                                        
-                                        // Provide immediate haptic feedback
-                                        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                                        impactFeedback.impactOccurred()
-                                        
-                                        withAnimation(.easeInOut(duration: 0.1)) {
-                                            isRefreshing = true
-                                        }
-                                        
-                                        Task {
-                                            // Wait for any ongoing indexing to complete first
-                                            while libraryIndexer.isIndexing {
-                                                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(settings.backgroundColorChoice.color.opacity(0.05))
+                    }
+                    
+                    // Large section rows
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            // Library title with icons that scrolls with content
+                            HStack(alignment: .center) {
+                                Text(Localized.library)
+                                    .responsiveLibraryTitleFont()
+                                    .foregroundColor(.primary)
+                                
+                                Spacer()
+                                
+                                HStack(spacing: 20) {
+                                    // Sync button (if available)
+                                    if let onManualSync = onManualSync {
+                                        Button(action: {
+                                            guard !isRefreshing else { return }
+                                            
+                                            // Provide immediate haptic feedback
+                                            let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                                            impactFeedback.impactOccurred()
+                                            
+                                            withAnimation(.easeInOut(duration: 0.1)) {
+                                                isRefreshing = true
                                             }
                                             
-                                            let result = await onManualSync()
-                                            
-                                            await MainActor.run {
-                                                isRefreshing = false
-                                                showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+                                            Task {
+                                                // Wait for any ongoing indexing to complete first
+                                                while libraryIndexer.isIndexing {
+                                                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                                                }
+                                                
+                                                let result = await onManualSync()
+                                                
+                                                await MainActor.run {
+                                                    isRefreshing = false
+                                                    showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+                                                }
                                             }
-                                        }
-                                    }) {
-                                        ZStack {
-                                            if isRefreshing {
-                                                ProgressView()
-                                                    .scaleEffect(0.8)
-                                                    .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
-                                            } else {
-                                                Image(systemName: "arrow.clockwise")
-                                                    .font(.system(size: 26, weight: .medium))
-                                                    .foregroundColor(settings.backgroundColorChoice.color)
+                                        }) {
+                                            ZStack {
+                                                if isRefreshing {
+                                                    ProgressView()
+                                                        .scaleEffect(0.8)
+                                                        .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
+                                                } else {
+                                                    Image(systemName: "arrow.clockwise")
+                                                        .font(.system(size: 26, weight: .medium))
+                                                        .foregroundColor(settings.backgroundColorChoice.color)
+                                                }
                                             }
+                                            .padding(.bottom, 4)
+                                            .scaleEffect(isRefreshing ? 0.9 : 1.0)
+                                            .animation(.easeInOut(duration: 0.2), value: isRefreshing)
                                         }
-                                        .padding(.bottom, 4)
-                                        .scaleEffect(isRefreshing ? 0.9 : 1.0)
-                                        .animation(.easeInOut(duration: 0.2), value: isRefreshing)
+                                        .disabled(isRefreshing)
                                     }
-                                    .disabled(isRefreshing)
-                                }
-                                
-                                // Search button (center)
-                                Button(action: {
-                                    showSearch = true
-                                }) {
-                                    Image(systemName: "magnifyingglass")
-                                        .font(.system(size: 26, weight: .medium))
-                                        .foregroundColor(settings.backgroundColorChoice.color)
-                                }
-                                
-                                // Settings button
-                                Button(action: {
-                                    showSettings = true
-                                }) {
-                                    Image(systemName: "gearshape")
-                                        .font(.system(size: 26, weight: .medium))
-                                        .foregroundColor(settings.backgroundColorChoice.color)
+                                    
+                                    // Search button (center)
+                                    Button(action: {
+                                        showSearch = true
+                                    }) {
+                                        Image(systemName: "magnifyingglass")
+                                            .font(.system(size: 26, weight: .medium))
+                                            .foregroundColor(settings.backgroundColorChoice.color)
+                                    }
+                                    
+                                    // Settings button
+                                    Button(action: {
+                                        showSettings = true
+                                    }) {
+                                        Image(systemName: "gearshape")
+                                            .font(.system(size: 26, weight: .medium))
+                                            .foregroundColor(settings.backgroundColorChoice.color)
+                                    }
                                 }
                             }
+                            .padding(.leading, 4)
+                            .padding(.trailing, 4)
+                            NavigationLink {
+                                AllSongsScreen(tracks: tracks)
+                            } label: {
+                                LibrarySectionRowView(
+                                    title: Localized.allSongs,
+                                    subtitle: Localized.songsCountOnly(tracks.count),
+                                    icon: "music.note",
+                                    color: settings.backgroundColorChoice.color
+                                )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            
+                            NavigationLink {
+                                LikedSongsScreen(allTracks: tracks)
+                            } label: {
+                                LibrarySectionRowView(
+                                    title: Localized.likedSongs,
+                                    subtitle: Localized.yourFavorites,
+                                    icon: "heart.fill",
+                                    color: .red
+                                )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            
+                            NavigationLink {
+                                PlaylistsScreen()
+                            } label: {
+                                LibrarySectionRowView(
+                                    title: Localized.playlists,
+                                    subtitle: Localized.yourPlaylists,
+                                    icon: "music.note.list",
+                                    color: .green
+                                )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            
+                            NavigationLink {
+                                ArtistsScreen(allTracks: tracks)
+                            } label: {
+                                LibrarySectionRowView(
+                                    title: Localized.artists,
+                                    subtitle: Localized.browseByArtist,
+                                    icon: "person.2.fill",
+                                    color: .purple
+                                )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            
+                            NavigationLink {
+                                AlbumsScreen(allTracks: tracks)
+                            } label: {
+                                LibrarySectionRowView(
+                                    title: Localized.albums,
+                                    subtitle: Localized.browseByAlbum,
+                                    icon: "opticaldisc.fill",
+                                    color: .orange
+                                )
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            
+                            Button(action: {
+                                showMusicPicker = true
+                            }) {
+                                LibrarySectionRowView(
+                                    title: Localized.addSongs,
+                                    subtitle: Localized.importMusicFiles,
+                                    icon: "plus.circle.fill",
+                                    color: .blue
+                                )
+                            }
+                            .buttonStyle(PlainButtonStyle())
                         }
-                        .padding(.leading, 4)
-                        .padding(.trailing, 4)
-                        NavigationLink {
-                            AllSongsScreen(tracks: tracks)
-                        } label: {
-                            LibrarySectionRowView(
-                                title: Localized.allSongs,
-                                subtitle: Localized.songsCountOnly(tracks.count),
-                                icon: "music.note",
-                                color: settings.backgroundColorChoice.color
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        
-                        NavigationLink {
-                            LikedSongsScreen(allTracks: tracks)
-                        } label: {
-                            LibrarySectionRowView(
-                                title: Localized.likedSongs,
-                                subtitle: Localized.yourFavorites,
-                                icon: "heart.fill",
-                                color: .red
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        
-                        NavigationLink {
-                            PlaylistsScreen()
-                        } label: {
-                            LibrarySectionRowView(
-                                title: Localized.playlists,
-                                subtitle: Localized.yourPlaylists,
-                                icon: "music.note.list",
-                                color: .green
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        
-                        NavigationLink {
-                            ArtistsScreen(allTracks: tracks)
-                        } label: {
-                            LibrarySectionRowView(
-                                title: Localized.artists,
-                                subtitle: Localized.browseByArtist,
-                                icon: "person.2.fill",
-                                color: .purple
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        
-                        NavigationLink {
-                            AlbumsScreen(allTracks: tracks)
-                        } label: {
-                            LibrarySectionRowView(
-                                title: Localized.albums,
-                                subtitle: Localized.browseByAlbum,
-                                icon: "opticaldisc.fill",
-                                color: .orange
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        
-                        Button(action: {
-                            showMusicPicker = true
-                        }) {
-                            LibrarySectionRowView(
-                                title: Localized.addSongs,
-                                subtitle: Localized.importMusicFiles,
-                                icon: "plus.circle.fill",
-                                color: .blue
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
+                        .padding(16)
+                        .padding(.bottom, 100) // Add padding for mini player
                     }
-                    .padding(16)
-                    .padding(.bottom, 100) // Add padding for mini player
                 }
-            }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.large)
-            .refreshable {
-                // Prevent multiple concurrent refreshes
-                guard !isRefreshing else { return }
-                
-                // Provide haptic feedback for pull-to-refresh
-                let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                impactFeedback.impactOccurred()
-                
-                // Wait for any ongoing indexing to complete before starting sync
-                while libraryIndexer.isIndexing {
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.large)
+                .refreshable {
+                    // Prevent multiple concurrent refreshes
+                    guard !isRefreshing else { return }
+                    
+                    // Provide haptic feedback for pull-to-refresh
+                    let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                    impactFeedback.impactOccurred()
+                    
+                    // Wait for any ongoing indexing to complete before starting sync
+                    while libraryIndexer.isIndexing {
+                        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                    }
+                    
+                    // For pull-to-refresh, use manual sync if available, otherwise just refresh
+                    let result = if let onManualSync = onManualSync {
+                        await onManualSync() // Full sync + refresh
+                    } else {
+                        await onRefresh()    // Just refresh
+                    }
+                    
+                    // Show feedback after sync/refresh is complete
+                    await MainActor.run {
+                        showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+                    }
                 }
                 
-                // For pull-to-refresh, use manual sync if available, otherwise just refresh
-                let result = if let onManualSync = onManualSync {
-                    await onManualSync() // Full sync + refresh
-                } else {
-                    await onRefresh()    // Just refresh
+                // Hidden NavigationLink for programmatic navigation from player
+                NavigationLink(
+                    destination: artistToNavigate.map { artist in
+                        ArtistDetailScreenWrapper(artistName: artist.name, allTracks: artistAllTracks)
+                    },
+                    isActive: Binding(
+                        get: { artistToNavigate != nil },
+                        set: { if !$0 { artistToNavigate = nil } }
+                    )
+                ) {
+                    EmptyView()
                 }
+                .hidden()
                 
-                // Show feedback after sync/refresh is complete
-                await MainActor.run {
-                    showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+                // Hidden NavigationLink for album navigation from player
+                NavigationLink(
+                    destination: albumToNavigate.map { album in
+                        AlbumDetailScreen(album: album, allTracks: albumAllTracks)
+                    },
+                    isActive: Binding(
+                        get: { albumToNavigate != nil },
+                        set: { if !$0 { albumToNavigate = nil } }
+                    )
+                ) {
+                    EmptyView()
                 }
-            }
-            
-            // Hidden NavigationLink for programmatic navigation from player
-            NavigationLink(
-                destination: artistToNavigate.map { artist in
-                    ArtistDetailScreenWrapper(artistName: artist.name, allTracks: artistAllTracks)
-                },
-                isActive: Binding(
-                    get: { artistToNavigate != nil },
-                    set: { if !$0 { artistToNavigate = nil } }
-                )
-            ) {
-                EmptyView()
-            }
-            .hidden()
-
-            // Hidden NavigationLink for album navigation from player
-            NavigationLink(
-                destination: albumToNavigate.map { album in
-                    AlbumDetailScreen(album: album, allTracks: albumAllTracks)
-                },
-                isActive: Binding(
-                    get: { albumToNavigate != nil },
-                    set: { if !$0 { albumToNavigate = nil } }
-                )
-            ) {
-                EmptyView()
-            }
-            .hidden()
-
+                .hidden()
+                
             }
             .navigationDestination(isPresented: Binding(
                 get: { searchArtistToNavigate != nil },
@@ -545,7 +546,7 @@ struct LibraryView: View {
                     }
                 }
             }
-            .animation(.easeInOut(duration: 0.3), value: showSyncToast)
+                .animation(.easeInOut(duration: 0.3), value: showSyncToast)
         )
         .sheet(isPresented: $showSearch) {
             SearchView(
@@ -640,7 +641,7 @@ struct AllSongsScreen: View {
     let tracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var settings = DeleteSettings.load()
-
+    
     var body: some View {
         TrackListView(tracks: tracks, listIdentifier: "all_songs")
             .background(ScreenSpecificBackgroundView(screen: .allSongs))
@@ -661,7 +662,7 @@ struct AllSongsScreen: View {
                 settings = DeleteSettings.load()
             }
     }
-
+    
     private func shuffleAllSongs() {
         guard !tracks.isEmpty else { return }
         let shuffled = tracks.shuffled()
@@ -676,7 +677,7 @@ struct LikedSongsScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var likedTracks: [Track] = []
     @State private var settings = DeleteSettings.load()
-
+    
     var body: some View {
         TrackListView(tracks: likedTracks, listIdentifier: "liked_songs", isLikedSongsScreen: true)
             .background(ScreenSpecificBackgroundView(screen: .likedSongs))
@@ -695,15 +696,15 @@ struct LikedSongsScreen: View {
             }
             .onAppear {
                 loadLikedTracks()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
-            loadLikedTracks()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-            settings = DeleteSettings.load()
-        }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+                loadLikedTracks()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+                settings = DeleteSettings.load()
+            }
     }
-
+    
     private func shuffleLikedSongs() {
         guard !likedTracks.isEmpty else { return }
         let shuffled = likedTracks.shuffled()
@@ -711,7 +712,7 @@ struct LikedSongsScreen: View {
             await appCoordinator.playTrack(shuffled[0], queue: shuffled)
         }
     }
-
+    
     private func loadLikedTracks() {
         do {
             let favoriteIds = try appCoordinator.getFavorites()
@@ -732,7 +733,7 @@ enum TrackSortOption: String, CaseIterable {
     case artistZA
     case sizeLargest
     case sizeSmallest
-
+    
     var localizedString: String {
         switch self {
         case .playlistOrder: return "Manual Order"
@@ -787,38 +788,38 @@ struct TrackListView: View {
         } else {
             filteredTracks = tracks
         }
-
+        
         switch sortOption {
-            case .playlistOrder: return filteredTracks
-            case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
-            case .dateOldest: return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
-            case .nameAZ: return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
-            case .nameZA: return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
-            case .artistAZ:
-                // Pre-fetch all artist names for performance
-                let artistCache = buildArtistCache(for: filteredTracks)
-                return filteredTracks.sorted { track1, track2 in
-                    let artist1 = artistCache[track1.artistId ?? -1] ?? ""
-                    let artist2 = artistCache[track2.artistId ?? -1] ?? ""
-                    return artist1.lowercased() < artist2.lowercased()
-                }
-            case .artistZA:
-                // Pre-fetch all artist names for performance
-                let artistCache = buildArtistCache(for: filteredTracks)
-                return filteredTracks.sorted { track1, track2 in
-                    let artist1 = artistCache[track1.artistId ?? -1] ?? ""
-                    let artist2 = artistCache[track2.artistId ?? -1] ?? ""
-                    return artist1.lowercased() > artist2.lowercased()
-                }
-            case .sizeLargest: return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
-            case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
+        case .playlistOrder: return filteredTracks
+        case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+        case .dateOldest: return filteredTracks.sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+        case .nameAZ: return filteredTracks.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        case .nameZA: return filteredTracks.sorted { $0.title.lowercased() > $1.title.lowercased() }
+        case .artistAZ:
+            // Pre-fetch all artist names for performance
+            let artistCache = buildArtistCache(for: filteredTracks)
+            return filteredTracks.sorted { track1, track2 in
+                let artist1 = artistCache[track1.artistId ?? -1] ?? ""
+                let artist2 = artistCache[track2.artistId ?? -1] ?? ""
+                return artist1.lowercased() < artist2.lowercased()
+            }
+        case .artistZA:
+            // Pre-fetch all artist names for performance
+            let artistCache = buildArtistCache(for: filteredTracks)
+            return filteredTracks.sorted { track1, track2 in
+                let artist1 = artistCache[track1.artistId ?? -1] ?? ""
+                let artist2 = artistCache[track2.artistId ?? -1] ?? ""
+                return artist1.lowercased() > artist2.lowercased()
+            }
+        case .sizeLargest: return filteredTracks.sorted { ($0.fileSize ?? 0) > ($1.fileSize ?? 0) }
+        case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
         }
     }
-
+    
     private func buildArtistCache(for tracks: [Track]) -> [Int64: String] {
         // Get unique artist IDs
         let artistIds = Set(tracks.compactMap { $0.artistId })
-
+        
         // Fetch all artists in one query
         var cache: [Int64: String] = [:]
         do {
@@ -1097,7 +1098,7 @@ struct BulkPlaylistSelectionView: View {
     @State private var showCreatePlaylist = false
     @State private var newPlaylistName = ""
     @State private var settings = DeleteSettings.load()
-
+    
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
@@ -1105,21 +1106,21 @@ struct BulkPlaylistSelectionView: View {
                     Text(Localized.addToPlaylist)
                         .font(.title2)
                         .fontWeight(.semibold)
-
+                    
                     Text(Localized.songsCountOnly(trackIds.count))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
-
+                
                 if playlists.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "music.note.list")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
-
+                        
                         Text(Localized.noPlaylistsYet)
                             .font(.headline)
-
+                        
                         Text(Localized.createFirstPlaylist)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -1134,12 +1135,12 @@ struct BulkPlaylistSelectionView: View {
                                 HStack {
                                     Image(systemName: "music.note.list")
                                         .foregroundColor(settings.backgroundColorChoice.color)
-
+                                    
                                     Text(playlist.title)
                                         .foregroundColor(.primary)
-
+                                    
                                     Spacer()
-
+                                    
                                     Image(systemName: "plus.circle")
                                         .foregroundColor(settings.backgroundColorChoice.color)
                                 }
@@ -1148,7 +1149,7 @@ struct BulkPlaylistSelectionView: View {
                         }
                     }
                 }
-
+                
                 Button(Localized.createNewPlaylist) {
                     showCreatePlaylist = true
                 }
@@ -1179,7 +1180,7 @@ struct BulkPlaylistSelectionView: View {
             loadPlaylists()
         }
     }
-
+    
     private func loadPlaylists() {
         do {
             playlists = try DatabaseManager.shared.getAllPlaylists()
@@ -1187,40 +1188,40 @@ struct BulkPlaylistSelectionView: View {
             print("Failed to load playlists: \(error)")
         }
     }
-
+    
     private func createPlaylist() {
         guard !newPlaylistName.isEmpty else { return }
-
+        
         do {
             let playlist = try appCoordinator.createPlaylist(title: newPlaylistName)
             playlists.append(playlist)
             newPlaylistName = ""
-
+            
             // Automatically add the tracks to the new playlist
             if let playlistId = playlist.id {
                 for trackId in trackIds {
                     try? appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
                 }
             }
-
+            
             onComplete()
             dismiss()
         } catch {
             print("Failed to create playlist: \(error)")
         }
     }
-
+    
     private func addToPlaylist(_ playlist: Playlist) {
         do {
             guard let playlistId = playlist.id else {
                 print("Error: Playlist has no ID")
                 return
             }
-
+            
             for trackId in trackIds {
                 try? appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
             }
-
+            
             onComplete()
             dismiss()
         } catch {
@@ -1239,10 +1240,15 @@ struct SearchView: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
+    @State private var debouncedSearchText = ""
     @State private var selectedCategory = SearchCategory.all
     @State private var settings = DeleteSettings.load()
     @FocusState private var isSearchFocused: Bool
-    
+    @State private var debounceTask: Task<Void, Never>?
+    @State private var searchTask: Task<Void, Never>?
+    @State private var searchResults = SearchResults()
+    @State private var isSearching = false
+
     enum SearchCategory: String, CaseIterable {
         case all = "All"
         case songs = "Songs"
@@ -1261,88 +1267,58 @@ struct SearchView: View {
         }
     }
     
-    private var searchResults: SearchResults {
-        if searchText.isEmpty {
-            return SearchResults()
+    private func performSearch(query: String) {
+        // Cancel any existing search task
+        searchTask?.cancel()
+
+        guard !query.isEmpty else {
+            searchResults = SearchResults()
+            isSearching = false
+            return
         }
-        
-        let lowercasedQuery = searchText.lowercased()
-        
-        // Search songs
-        let songs = allTracks.filter { track in
-            // Search by title
-            if track.title.lowercased().contains(lowercasedQuery) {
-                return true
-            }
-            
-            // Search by artist name
-            if let artistId = track.artistId,
-               let artist = try? DatabaseManager.shared.read({ db in
-                   try Artist.fetchOne(db, key: artistId)
-               }),
-               artist.name.lowercased().contains(lowercasedQuery) {
-                return true
-            }
-            
-            // Search by album name
-            if let albumId = track.albumId,
-               let album = try? DatabaseManager.shared.read({ db in
-                   try Album.fetchOne(db, key: albumId)
-               }),
-               album.title.lowercased().contains(lowercasedQuery) {
-                return true
-            }
-            
-            return false
-        }
-        
-        // Search artists
-        let artists: [Artist] = {
-            do {
-                let allArtists = try appCoordinator.databaseManager.getAllArtists()
-                return allArtists.filter { $0.name.lowercased().contains(lowercasedQuery) }
-            } catch {
-                return []
-            }
-        }()
-        
-        // Search albums
-        let albums: [Album] = {
-            do {
-                let allAlbums = try appCoordinator.getAllAlbums()
-                return allAlbums.filter { album in
-                    // Search by album title
-                    if album.title.lowercased().contains(lowercasedQuery) {
-                        return true
-                    }
-                    
-                    // Search by artist name
-                    if let artistId = album.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }),
-                       artist.name.lowercased().contains(lowercasedQuery) {
-                        return true
-                    }
-                    
-                    return false
+
+        isSearching = true
+
+        searchTask = Task {
+            // Normalize query for better matching
+            let normalizedQuery = query
+                .lowercased()
+                .folding(options: .diacriticInsensitive, locale: .current)
+
+            // Run database queries on background thread
+            let results = await Task.detached(priority: .userInitiated) {
+                var songs: [Track] = []
+                var artists: [Artist] = []
+                var albums: [Album] = []
+                var playlists: [Playlist] = []
+
+                do {
+                    // Use optimized database-level search
+                    songs = try DatabaseManager.shared.searchTracks(query: normalizedQuery, limit: 50)
+                    artists = try DatabaseManager.shared.searchArtists(query: normalizedQuery, limit: 20)
+                    albums = try DatabaseManager.shared.searchAlbums(query: normalizedQuery, limit: 30)
+                    playlists = try DatabaseManager.shared.searchPlaylists(query: normalizedQuery, limit: 15)
+                } catch {
+                    print("Search error: \(error)")
                 }
-            } catch {
-                return []
+
+                return SearchResults(
+                    songs: songs,
+                    artists: artists,
+                    albums: albums,
+                    playlists: playlists
+                )
+            }.value
+
+            // Check if task was cancelled
+            guard !Task.isCancelled else { return }
+
+            // Update UI on main thread
+            await MainActor.run {
+                self.searchResults = results
+                self.isSearching = false
             }
-        }()
-        
-        // Search playlists
-        let playlists: [Playlist] = {
-            do {
-                let allPlaylists = try appCoordinator.databaseManager.getAllPlaylists()
-                return allPlaylists.filter { $0.title.lowercased().contains(lowercasedQuery) }
-            } catch {
-                return []
-            }
-        }()
-        
-        return SearchResults(songs: songs, artists: artists, albums: albums, playlists: playlists)
+        }
     }
     
     var body: some View {
@@ -1401,19 +1377,30 @@ struct SearchView: View {
                     .padding(.top, 12)
                     
                     // Results
-                    if searchText.isEmpty {
+                    if debouncedSearchText.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 40))
                                 .foregroundColor(.secondary)
-                            
+
                             Text(Localized.searchYourMusicLibrary)
                                 .font(.headline)
-                            
+
                             Text(Localized.findSongsArtistsAlbumsPlaylists)
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if isSearching {
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .scaleEffect(1.2)
+                                .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
+
+                            Text("Searching...")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
@@ -1440,6 +1427,19 @@ struct SearchView: View {
                     }
                 }
             }
+            .onChange(of: searchText) { newValue in
+                // Cancel any existing debounce task
+                debounceTask?.cancel()
+
+                // Create new debounce task
+                debounceTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                    if !Task.isCancelled {
+                        debouncedSearchText = newValue
+                        performSearch(query: newValue)
+                    }
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
                 settings = DeleteSettings.load()
             }
@@ -1447,6 +1447,10 @@ struct SearchView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     isSearchFocused = true
                 }
+            }
+            .onDisappear {
+                debounceTask?.cancel()
+                searchTask?.cancel()
             }
         }
     }
@@ -1528,18 +1532,18 @@ struct SearchView: View {
                                 
                                 ForEach(results.artists, id: \.id) { artist in
                                     SearchArtistRowView(
-                                        artist: artist, 
-                                        allTracks: allTracks, 
+                                        artist: artist,
+                                        allTracks: allTracks,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToArtist
                                     )
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 12)
-                                                .fill(.ultraThinMaterial)
-                                                .opacity(0.7)
-                                        )
-                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                        .padding(.horizontal, 16)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(.ultraThinMaterial)
+                                            .opacity(0.7)
+                                    )
+                                    .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                    .padding(.horizontal, 16)
                                 }
                             }
                         }
@@ -1553,18 +1557,18 @@ struct SearchView: View {
                                 
                                 ForEach(results.albums, id: \.id) { album in
                                     SearchAlbumRowView(
-                                        album: album, 
-                                        allTracks: allTracks, 
+                                        album: album,
+                                        allTracks: allTracks,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToAlbum
                                     )
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 12)
-                                                .fill(.ultraThinMaterial)
-                                                .opacity(0.7)
-                                        )
-                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                        .padding(.horizontal, 16)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(.ultraThinMaterial)
+                                            .opacity(0.7)
+                                    )
+                                    .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                    .padding(.horizontal, 16)
                                 }
                             }
                         }
@@ -1578,17 +1582,17 @@ struct SearchView: View {
                                 
                                 ForEach(results.playlists, id: \.id) { playlist in
                                     SearchPlaylistRowView(
-                                        playlist: playlist, 
+                                        playlist: playlist,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToPlaylist
                                     )
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 12)
-                                                .fill(.ultraThinMaterial)
-                                                .opacity(0.7)
-                                        )
-                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                        .padding(.horizontal, 16)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(.ultraThinMaterial)
+                                            .opacity(0.7)
+                                    )
+                                    .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                    .padding(.horizontal, 16)
                                 }
                             }
                         }
@@ -1902,60 +1906,59 @@ struct SearchView: View {
 
 struct MusicFilePicker: UIViewControllerRepresentable {
     let onFilesPicked: ([URL]) -> Void
-
+    
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [
             UTType.audio,
             UTType("public.mp3")!,
             UTType("org.xiph.flac")!
         ])
-
+        
         picker.delegate = context.coordinator
         picker.allowsMultipleSelection = true
         picker.modalPresentationStyle = .formSheet
-
+        
         // Store reference to prevent premature deallocation
         context.coordinator.picker = picker
-
+        
         return picker
     }
-
+    
     func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-
+    
     static func dismantleUIViewController(_ uiViewController: UIDocumentPickerViewController, coordinator: Coordinator) {
         // Clean up to prevent DocumentManager crash
         uiViewController.delegate = nil
         coordinator.picker = nil
     }
-
+    
     func makeCoordinator() -> Coordinator {
         Coordinator(onFilesPicked: onFilesPicked)
     }
-
+    
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         let onFilesPicked: ([URL]) -> Void
         weak var picker: UIDocumentPickerViewController?
-
+        
         init(onFilesPicked: @escaping ([URL]) -> Void) {
             self.onFilesPicked = onFilesPicked
             super.init()
         }
-
+        
         deinit {
             // Ensure delegate is cleared on deallocation
             picker?.delegate = nil
         }
-
+        
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             onFilesPicked(urls)
             // Clean up delegate to prevent DocumentManager issues
             controller.delegate = nil
         }
-
+        
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             // User cancelled, clean up delegate
             controller.delegate = nil
         }
     }
 }
-

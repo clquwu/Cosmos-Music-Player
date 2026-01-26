@@ -488,6 +488,17 @@ class DatabaseManager: @unchecked Sendable {
             return try Artist.order(Column("name")).fetchAll(db)
         }
     }
+
+    func searchArtists(query: String, limit: Int = 20) throws -> [Artist] {
+        return try read { db in
+            let pattern = "%\(query)%"
+            return try Artist
+                .filter(Column("name").like(pattern))
+                .order(Column("name"))
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
     
     // MARK: - Album operations
     
@@ -594,6 +605,17 @@ class DatabaseManager: @unchecked Sendable {
     func getAllAlbums() throws -> [Album] {
         return try read { db in
             return try Album.order(Column("title")).fetchAll(db)
+        }
+    }
+
+    func searchAlbums(query: String, limit: Int = 30) throws -> [Album] {
+        return try read { db in
+            let pattern = "%\(query)%"
+            return try Album
+                .filter(Column("title").like(pattern))
+                .order(Column("title"))
+                .limit(limit)
+                .fetchAll(db)
         }
     }
 
@@ -979,6 +1001,28 @@ class DatabaseManager: @unchecked Sendable {
     func getAllPlaylists() throws -> [Playlist] {
         return try read { db in
             return try Playlist.order(Column("last_played_at").desc, Column("updated_at").desc).fetchAll(db)
+        }
+    }
+
+    func searchPlaylists(query: String, limit: Int = 15) throws -> [Playlist] {
+        return try read { db in
+            let pattern = "%\(query)%"
+            return try Playlist
+                .filter(Column("title").like(pattern))
+                .order(Column("title"))
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    func searchTracks(query: String, limit: Int = 50) throws -> [Track] {
+        return try read { db in
+            let pattern = "%\(query)%"
+            return try Track
+                .filter(Column("title").like(pattern))
+                .order(Column("title"))
+                .limit(limit)
+                .fetchAll(db)
         }
     }
 

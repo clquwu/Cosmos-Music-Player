@@ -53,7 +53,7 @@ struct QueueManagementView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List {
-                            ForEach(Array(playerEngine.playbackQueue.enumerated()), id: \.offset) { index, track in
+                            ForEach(Array(playerEngine.playbackQueue.enumerated()), id: \.element.stableId) { index, track in
                                 QueueTrackRow(
                                     track: track,
                                     index: index,
@@ -85,20 +85,19 @@ struct QueueManagementView: View {
     }
     
     private func moveItems(from source: IndexSet, to destination: Int) {
-        var newQueue = playerEngine.playbackQueue
-        var newCurrentIndex = playerEngine.currentIndex
-
         // Get the source index (should be only one item)
         guard let sourceIndex = source.first else { return }
 
         // Calculate the actual destination index
         let actualDestination = sourceIndex < destination ? destination - 1 : destination
 
-        // Move the item
+        // Create new queue with the move applied
+        var newQueue = playerEngine.playbackQueue
         let movedTrack = newQueue.remove(at: sourceIndex)
         newQueue.insert(movedTrack, at: actualDestination)
 
-        // Update current playing index
+        // Calculate new current index
+        var newCurrentIndex = playerEngine.currentIndex
         if sourceIndex == playerEngine.currentIndex {
             // The currently playing track was moved
             newCurrentIndex = actualDestination
@@ -110,9 +109,11 @@ struct QueueManagementView: View {
             newCurrentIndex += 1
         }
 
-        // Apply changes
-        playerEngine.playbackQueue = newQueue
-        playerEngine.currentIndex = newCurrentIndex
+        // Apply changes on main thread
+        DispatchQueue.main.async {
+            self.playerEngine.playbackQueue = newQueue
+            self.playerEngine.currentIndex = newCurrentIndex
+        }
     }
 
     private func jumpToTrack(at index: Int) {
