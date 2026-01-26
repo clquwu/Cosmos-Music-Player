@@ -1,6 +1,7 @@
 import SwiftUI
 import GRDB
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Responsive Font Helper
 extension View {
@@ -1239,9 +1240,13 @@ struct SearchView: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
+    @State private var debouncedSearchText = ""
     @State private var selectedCategory = SearchCategory.all
     @State private var settings = DeleteSettings.load()
     @FocusState private var isSearchFocused: Bool
+    @State private var debounceTask: Task<Void, Never>?
+    @State private var artistCache: [Int64: String] = [:]
+    @State private var albumCache: [Int64: String] = [:]
     
     enum SearchCategory: String, CaseIterable {
         case all = "All"
@@ -1262,37 +1267,47 @@ struct SearchView: View {
     }
     
     private var searchResults: SearchResults {
-        if searchText.isEmpty {
+        if debouncedSearchText.isEmpty {
             return SearchResults()
         }
-        
-        let lowercasedQuery = searchText.lowercased()
-        
+
+        // Normalize query: lowercase and remove diacritics for fuzzy matching
+        let normalizedQuery = debouncedSearchText
+            .lowercased()
+            .folding(options: .diacriticInsensitive, locale: .current)
+
         // Search songs
         let songs = allTracks.filter { track in
-            // Search by title
-            if track.title.lowercased().contains(lowercasedQuery) {
+            // Search by title (diacritic-insensitive)
+            let normalizedTitle = track.title
+                .lowercased()
+                .folding(options: .diacriticInsensitive, locale: .current)
+            if normalizedTitle.contains(normalizedQuery) {
                 return true
             }
-            
-            // Search by artist name
+
+            // Search by artist name (using cache, diacritic-insensitive)
             if let artistId = track.artistId,
-               let artist = try? DatabaseManager.shared.read({ db in
-                   try Artist.fetchOne(db, key: artistId)
-               }),
-               artist.name.lowercased().contains(lowercasedQuery) {
-                return true
+               let artistName = artistCache[artistId] {
+                let normalizedArtist = artistName
+                    .lowercased()
+                    .folding(options: .diacriticInsensitive, locale: .current)
+                if normalizedArtist.contains(normalizedQuery) {
+                    return true
+                }
             }
-            
-            // Search by album name
+
+            // Search by album name (using cache, diacritic-insensitive)
             if let albumId = track.albumId,
-               let album = try? DatabaseManager.shared.read({ db in
-                   try Album.fetchOne(db, key: albumId)
-               }),
-               album.title.lowercased().contains(lowercasedQuery) {
-                return true
+               let albumTitle = albumCache[albumId] {
+                let normalizedAlbum = albumTitle
+                    .lowercased()
+                    .folding(options: .diacriticInsensitive, locale: .current)
+                if normalizedAlbum.contains(normalizedQuery) {
+                    return true
+                }
             }
-            
+
             return false
         }
         
@@ -1300,51 +1315,105 @@ struct SearchView: View {
         let artists: [Artist] = {
             do {
                 let allArtists = try appCoordinator.databaseManager.getAllArtists()
-                return allArtists.filter { $0.name.lowercased().contains(lowercasedQuery) }
+                return allArtists.filter { artist in
+                    let normalizedName = artist.name
+                        .lowercased()
+                        .folding(options: .diacriticInsensitive, locale: .current)
+                    return normalizedName.contains(normalizedQuery)
+                }
             } catch {
                 return []
             }
         }()
-        
+
         // Search albums
         let albums: [Album] = {
             do {
                 let allAlbums = try appCoordinator.getAllAlbums()
                 return allAlbums.filter { album in
-                    // Search by album title
-                    if album.title.lowercased().contains(lowercasedQuery) {
+                    // Search by album title (diacritic-insensitive)
+                    let normalizedTitle = album.title
+                        .lowercased()
+                        .folding(options: .diacriticInsensitive, locale: .current)
+                    if normalizedTitle.contains(normalizedQuery) {
                         return true
                     }
-                    
-                    // Search by artist name
+
+                    // Search by artist name (using cache, diacritic-insensitive)
                     if let artistId = album.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }),
-                       artist.name.lowercased().contains(lowercasedQuery) {
-                        return true
+                       let artistName = artistCache[artistId] {
+                        let normalizedArtist = artistName
+                            .lowercased()
+                            .folding(options: .diacriticInsensitive, locale: .current)
+                        if normalizedArtist.contains(normalizedQuery) {
+                            return true
+                        }
                     }
-                    
+
                     return false
                 }
             } catch {
                 return []
             }
         }()
-        
+
         // Search playlists
         let playlists: [Playlist] = {
             do {
                 let allPlaylists = try appCoordinator.databaseManager.getAllPlaylists()
-                return allPlaylists.filter { $0.title.lowercased().contains(lowercasedQuery) }
+                return allPlaylists.filter { playlist in
+                    let normalizedTitle = playlist.title
+                        .lowercased()
+                        .folding(options: .diacriticInsensitive, locale: .current)
+                    return normalizedTitle.contains(normalizedQuery)
+                }
             } catch {
                 return []
             }
         }()
         
-        return SearchResults(songs: songs, artists: artists, albums: albums, playlists: playlists)
+        return SearchResults(
+            songs: Array(songs.prefix(50)),
+            artists: Array(artists.prefix(20)),
+            albums: Array(albums.prefix(30)),
+            playlists: Array(playlists.prefix(15))
+        )
     }
-    
+
+    private func buildArtistNameCache() -> [Int64: String] {
+        var cache: [Int64: String] = [:]
+        do {
+            try DatabaseManager.shared.read { db in
+                let artists = try Artist.fetchAll(db)
+                for artist in artists {
+                    if let id = artist.id {
+                        cache[id] = artist.name
+                    }
+                }
+            }
+        } catch {
+            print("Failed to build artist cache: \(error)")
+        }
+        return cache
+    }
+
+    private func buildAlbumTitleCache() -> [Int64: String] {
+        var cache: [Int64: String] = [:]
+        do {
+            try DatabaseManager.shared.read { db in
+                let albums = try Album.fetchAll(db)
+                for album in albums {
+                    if let id = album.id {
+                        cache[id] = album.title
+                    }
+                }
+            }
+        } catch {
+            print("Failed to build album cache: \(error)")
+        }
+        return cache
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -1401,7 +1470,7 @@ struct SearchView: View {
                     .padding(.top, 12)
                     
                     // Results
-                    if searchText.isEmpty {
+                    if debouncedSearchText.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 40))
@@ -1440,13 +1509,32 @@ struct SearchView: View {
                     }
                 }
             }
+            .onChange(of: searchText) { newValue in
+                // Cancel any existing debounce task
+                debounceTask?.cancel()
+
+                // Create new debounce task
+                debounceTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                    if !Task.isCancelled {
+                        debouncedSearchText = newValue
+                    }
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
                 settings = DeleteSettings.load()
             }
             .onAppear {
+                // Build caches once when view appears
+                artistCache = buildArtistNameCache()
+                albumCache = buildAlbumTitleCache()
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     isSearchFocused = true
                 }
+            }
+            .onDisappear {
+                debounceTask?.cancel()
             }
         }
     }
@@ -1528,8 +1616,8 @@ struct SearchView: View {
                                 
                                 ForEach(results.artists, id: \.id) { artist in
                                     SearchArtistRowView(
-                                        artist: artist, 
-                                        allTracks: allTracks, 
+                                        artist: artist,
+                                        allTracks: allTracks,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToArtist
                                     )
@@ -1553,8 +1641,8 @@ struct SearchView: View {
                                 
                                 ForEach(results.albums, id: \.id) { album in
                                     SearchAlbumRowView(
-                                        album: album, 
-                                        allTracks: allTracks, 
+                                        album: album,
+                                        allTracks: allTracks,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToAlbum
                                     )
@@ -1578,7 +1666,7 @@ struct SearchView: View {
                                 
                                 ForEach(results.playlists, id: \.id) { playlist in
                                     SearchPlaylistRowView(
-                                        playlist: playlist, 
+                                        playlist: playlist,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToPlaylist
                                     )
