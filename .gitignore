@@ -100,5 +100,8 @@ api-keys.json
 secrets.plist
 Config.plist
 
+# Bundle ID Configuration
+Config.xcconfig
+
 # macOS
 .DS_Store

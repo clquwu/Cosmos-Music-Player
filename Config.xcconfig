@@ -1,0 +1,6 @@
+// Configuration settings for Cosmos Music Player
+// Bundle identifier configuration
+
+BUNDLE_ID_PREFIX = dev.clq.Cosmos-Music-Player
+APP_GROUP_ID = group.$(BUNDLE_ID_PREFIX)
+DEVELOPMENT_TEAM = PC237X7NGJ
