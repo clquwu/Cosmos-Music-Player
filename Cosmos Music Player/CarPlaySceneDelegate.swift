@@ -359,17 +359,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         return !incompatibleFormats.contains(ext)
     }
 
-    private func configureArtwork(for item: CPListItem, track: Track, index: Int) {
-        if index >= maxArtworkItems {
-            item.setImage(createPlaceholderImage())
-            return
-        }
-
+    private func configureArtwork(for item: CPListItem, track: Track, index _: Int) {
+        item.setImage(createPlaceholderImage())
         Task { @MainActor in
             if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
                 item.setImage(resizeImageForCarPlay(artwork, rounded: true))
-            } else {
-                item.setImage(createPlaceholderImage())
             }
         }
     }
