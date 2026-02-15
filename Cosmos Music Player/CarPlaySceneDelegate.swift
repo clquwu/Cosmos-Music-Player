@@ -3,37 +3,60 @@ import UIKit
 
 class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
-    var interfaceController: CPInterfaceController?
-    var allTracks: [Track] = []
-    var lastSelectedTabIndex: Int = 0
+    private var interfaceController: CPInterfaceController?
+    private var allSongsTemplate: CPListTemplate?
+    private var allSongsTracks: [Track] = []
+    private var artistNameCache: [Int64: String] = [:]
+
+    private let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+    private let maxArtworkItems = 50
+    private let carPlayPageSize = 200
+    private let maxQueueItems = 5000
+
+    private var allSongsOffset = 0
+    private var allSongsTotal = 0
 
     func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                  didConnect interfaceController: CPInterfaceController) {
         self.interfaceController = interfaceController
 
-        // Fetch all tracks and filter incompatible formats for CarPlay
-        let allFetchedTracks = (try? AppCoordinator.shared.getAllTracks()) ?? []
-        self.allTracks = allFetchedTracks.filter { track in
-            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
-            return !incompatibleFormats.contains(ext)
-        }
+        loadInitialCarPlayData()
 
         // Update SFBAudioEngine CarPlay status
         SFBAudioEngineManager.shared.updateCarPlayStatus()
 
-        // Create tab bar template with top tabs
-        let allSongsTemplate = createAllSongsTab(tracks: allTracks)
-        let favoritesTemplate = createFavoritesTab(tracks: allTracks)
+        let allSongsTemplate = createAllSongsTab()
+        self.allSongsTemplate = allSongsTemplate
+
+        let favoritesTemplate = createFavoritesTab()
         let playlistsTemplate = createPlaylistsTab()
-        let searchTemplate = createSearchTab(tracks: allTracks)
+        let browseTemplate = createBrowseTab()
 
-        let tabBarTemplate = CPTabBarTemplate(templates: [allSongsTemplate, favoritesTemplate, playlistsTemplate, searchTemplate])
-
+        let tabBarTemplate = CPTabBarTemplate(templates: [allSongsTemplate, favoritesTemplate, playlistsTemplate, browseTemplate])
         interfaceController.setRootTemplate(tabBarTemplate, animated: true, completion: nil)
 
-        // Observe player state changes for Now Playing updates
         setupPlayerStateObserver()
+    }
+
+    func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
+                                 didDisconnect interfaceController: CPInterfaceController) {
+        self.interfaceController = nil
+
+        print("🚗 CarPlay disconnected")
+        Task { @MainActor in
+            SFBAudioEngineManager.shared.updateCarPlayStatus()
+        }
+    }
+
+    private func loadInitialCarPlayData() {
+        artistNameCache = (try? DatabaseManager.shared.getAllArtistNamesById()) ?? [:]
+        allSongsTotal = (try? DatabaseManager.shared.getTrackCount(excludingFormats: incompatibleFormats)) ?? 0
+        allSongsTracks = (try? DatabaseManager.shared.getTracksPaginated(
+            limit: carPlayPageSize,
+            offset: 0,
+            excludingFormats: incompatibleFormats
+        )) ?? []
+        allSongsOffset = allSongsTracks.count
     }
 
     private func setupPlayerStateObserver() {
@@ -42,93 +65,94 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             object: nil,
             queue: .main
         ) { _ in
-            // CarPlay will automatically update based on MPNowPlayingInfoCenter playbackState
             print("🎛️ Player state changed - CarPlay will sync automatically")
         }
     }
 
     // MARK: - Tab Creation
 
-    private func createAllSongsTab(tracks: [Track]) -> CPListTemplate {
-        let songItems: [CPListItem] = tracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-
-            // Load cached artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
-
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: tracks)
-                }
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: songItems)
-        let template = CPListTemplate(title: Localized.allSongs, sections: [section])
+    private func createAllSongsTab() -> CPListTemplate {
+        let template = CPListTemplate(title: Localized.allSongs, sections: [buildAllSongsSection()])
         template.tabImage = UIImage(systemName: "music.note")
-
-        // Add Now Playing button to trailing bar
-        if let nowPlayingImage = UIImage(systemName: "play.circle.fill") {
-            let nowPlayingButton = CPBarButton(image: nowPlayingImage) { [weak self] _ in
-                self?.showNowPlaying()
-            }
-            template.trailingNavigationBarButtons = [nowPlayingButton]
-        }
-
+        addNowPlayingButton(to: template)
         return template
     }
 
-    private func createFavoritesTab(tracks: [Track]) -> CPListTemplate {
-        let favoriteIds = (try? AppCoordinator.shared.getFavorites()) ?? []
-        let likedTracks = tracks.filter { favoriteIds.contains($0.stableId) }
+    private func buildAllSongsSection() -> CPListSection {
+        let visibleIds = Array(allSongsTracks.prefix(maxArtworkItems)).map { $0.stableId }
+        let prefetchIds = Array(allSongsTracks.dropFirst(maxArtworkItems).prefix(20)).map { $0.stableId }
+        ArtworkManager.shared.updateVisibleArtworkWindow(visibleTrackIds: visibleIds, prefetchTrackIds: prefetchIds)
 
-        let songItems: [CPListItem] = likedTracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
+        var items: [CPListItem] = allSongsTracks.enumerated().map { index, track in
+            let item = CPListItem(text: track.title, detailText: getArtistName(for: track))
+            configureArtwork(for: item, track: track, index: index)
 
-            // Load cached artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
+            item.handler = { [weak self] _, completion in
+                guard let self else {
+                    completion()
+                    return
                 }
-            }
 
-            item.handler = { _, completion in
                 Task {
-                    await AppCoordinator.shared.playTrack(track, queue: likedTracks)
+                    let queue = self.queueForAllSongs(startingAt: index)
+                    await AppCoordinator.shared.playTrack(track, queue: queue)
                 }
                 completion()
             }
+
             return item
         }
 
-        let section = CPListSection(items: songItems)
-        let template = CPListTemplate(title: Localized.likedSongs, sections: [section])
-        template.tabImage = UIImage(systemName: "heart.fill")
-
-        // Add Now Playing button
-        if let nowPlayingImage = UIImage(systemName: "play.circle.fill") {
-            let nowPlayingButton = CPBarButton(image: nowPlayingImage) { [weak self] _ in
-                self?.showNowPlaying()
+        if allSongsOffset < allSongsTotal {
+            let remaining = allSongsTotal - allSongsOffset
+            let loadMoreItem = CPListItem(text: "Load More", detailText: "\(remaining) remaining")
+            loadMoreItem.handler = { [weak self] _, completion in
+                self?.loadMoreAllSongs()
+                completion()
             }
-            template.trailingNavigationBarButtons = [nowPlayingButton]
+            items.append(loadMoreItem)
         }
 
+        return CPListSection(items: items)
+    }
+
+    private func loadMoreAllSongs() {
+        guard allSongsOffset < allSongsTotal else { return }
+
+        let nextTracks = (try? DatabaseManager.shared.getTracksPaginated(
+            limit: carPlayPageSize,
+            offset: allSongsOffset,
+            excludingFormats: incompatibleFormats
+        )) ?? []
+
+        guard !nextTracks.isEmpty else { return }
+
+        allSongsTracks.append(contentsOf: nextTracks)
+        allSongsOffset += nextTracks.count
+        allSongsTemplate?.updateSections([buildAllSongsSection()])
+    }
+
+    private func createFavoritesTab() -> CPListTemplate {
+        let likedTracks = (try? DatabaseManager.shared.getFavoriteTracks(excludingFormats: incompatibleFormats)) ?? []
+
+        let items: [CPListItem] = likedTracks.enumerated().map { index, track in
+            let item = CPListItem(text: track.title, detailText: getArtistName(for: track))
+            configureArtwork(for: item, track: track, index: index)
+
+            item.handler = { _, completion in
+                Task {
+                    let queue = self.forwardQueue(from: likedTracks, startingAt: index)
+                    await AppCoordinator.shared.playTrack(track, queue: queue)
+                }
+                completion()
+            }
+
+            return item
+        }
+
+        let template = CPListTemplate(title: Localized.likedSongs, sections: [CPListSection(items: items)])
+        template.tabImage = UIImage(systemName: "heart.fill")
+        addNowPlayingButton(to: template)
         return template
     }
 
@@ -144,490 +168,220 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
             return item
         }
 
-        let section = CPListSection(items: playlistItems)
-        let template = CPListTemplate(title: Localized.playlists, sections: [section])
+        let template = CPListTemplate(title: Localized.playlists, sections: [CPListSection(items: playlistItems)])
         template.tabImage = UIImage(systemName: "music.note.list")
-
-        // Add Now Playing button
-        if let nowPlayingImage = UIImage(systemName: "play.circle.fill") {
-            let nowPlayingButton = CPBarButton(image: nowPlayingImage) { [weak self] _ in
-                self?.showNowPlaying()
-            }
-            template.trailingNavigationBarButtons = [nowPlayingButton]
-        }
-
+        addNowPlayingButton(to: template)
         return template
     }
 
-    private func createSearchTab(tracks: [Track]) -> CPListTemplate {
-        // Show browse categories
+    private func createBrowseTab() -> CPListTemplate {
         let artistsItem = CPListItem(text: Localized.artists, detailText: Localized.browseByArtist)
         artistsItem.handler = { [weak self] _, completion in
-            self?.showArtists(tracks: tracks)
+            self?.showArtists()
             completion()
         }
 
         let albumsItem = CPListItem(text: Localized.albums, detailText: Localized.browseByAlbum)
         albumsItem.handler = { [weak self] _, completion in
-            self?.showAlbums(tracks: tracks)
+            self?.showAlbums()
             completion()
         }
 
-        let section = CPListSection(items: [artistsItem, albumsItem])
-        let template = CPListTemplate(title: Localized.browse, sections: [section])
+        let template = CPListTemplate(title: Localized.browse, sections: [CPListSection(items: [artistsItem, albumsItem])])
         template.tabImage = UIImage(systemName: "magnifyingglass")
-
-        // Add Now Playing button
-        if let nowPlayingImage = UIImage(systemName: "play.circle.fill") {
-            let nowPlayingButton = CPBarButton(image: nowPlayingImage) { [weak self] _ in
-                self?.showNowPlaying()
-            }
-            template.trailingNavigationBarButtons = [nowPlayingButton]
-        }
-
+        addNowPlayingButton(to: template)
         return template
     }
 
-    // MARK: - Now Playing
+    // MARK: - Navigation Methods
+
+    private func showPlaylistDetail(playlist: Playlist) {
+        guard let playlistId = playlist.id else { return }
+
+        let playlistItems = (try? AppCoordinator.shared.databaseManager.getPlaylistItems(playlistId: playlistId)) ?? []
+        let trackIds = playlistItems.map { $0.trackStableId }
+        let allPlaylistTracks = (try? AppCoordinator.shared.databaseManager.getTracksByStableIdsPreservingOrder(trackIds)) ?? []
+        let tracks = allPlaylistTracks.filter(isCompatible)
+
+        let songItems: [CPListItem] = tracks.enumerated().map { index, track in
+            let item = CPListItem(text: track.title, detailText: getArtistName(for: track))
+            configureArtwork(for: item, track: track, index: index)
+            item.handler = { _, completion in
+                Task {
+                    let queue = self.forwardQueue(from: tracks, startingAt: index)
+                    await AppCoordinator.shared.playTrack(track, queue: queue)
+                }
+                completion()
+            }
+            return item
+        }
+
+        interfaceController?.pushTemplate(
+            CPListTemplate(title: playlist.title, sections: [CPListSection(items: songItems)]),
+            animated: true,
+            completion: nil
+        )
+    }
+
+    private func showArtists() {
+        let artists = (try? AppCoordinator.shared.databaseManager.getAllArtists()) ?? []
+
+        let artistItems: [CPListItem] = artists.map { artist in
+            let item = CPListItem(text: artist.name, detailText: Localized.artist)
+            item.handler = { [weak self] _, completion in
+                self?.showArtistDetail(artist: artist)
+                completion()
+            }
+            return item
+        }
+
+        interfaceController?.pushTemplate(
+            CPListTemplate(title: Localized.artists, sections: [CPListSection(items: artistItems)]),
+            animated: true,
+            completion: nil
+        )
+    }
+
+    private func showArtistDetail(artist: Artist) {
+        guard let artistId = artist.id else { return }
+
+        let tracks = ((try? AppCoordinator.shared.databaseManager.getTracksByArtistId(artistId)) ?? [])
+            .filter(isCompatible)
+
+        let songItems: [CPListItem] = tracks.enumerated().map { index, track in
+            let item = CPListItem(text: track.title, detailText: getArtistName(for: track))
+            configureArtwork(for: item, track: track, index: index)
+            item.handler = { _, completion in
+                Task {
+                    let queue = self.forwardQueue(from: tracks, startingAt: index)
+                    await AppCoordinator.shared.playTrack(track, queue: queue)
+                }
+                completion()
+            }
+            return item
+        }
+
+        interfaceController?.pushTemplate(
+            CPListTemplate(title: artist.name, sections: [CPListSection(items: songItems)]),
+            animated: true,
+            completion: nil
+        )
+    }
+
+    private func showAlbums() {
+        let albums = (try? AppCoordinator.shared.getAllAlbums()) ?? []
+
+        let albumItems: [CPListItem] = albums.map { album in
+            let item = CPListItem(text: album.title, detailText: getArtistNameForAlbum(album))
+            item.handler = { [weak self] _, completion in
+                self?.showAlbumDetail(album: album)
+                completion()
+            }
+            return item
+        }
+
+        interfaceController?.pushTemplate(
+            CPListTemplate(title: Localized.albums, sections: [CPListSection(items: albumItems)]),
+            animated: true,
+            completion: nil
+        )
+    }
+
+    private func showAlbumDetail(album: Album) {
+        guard let albumId = album.id else { return }
+
+        let tracks = ((try? AppCoordinator.shared.databaseManager.getTracksByAlbumId(albumId)) ?? [])
+            .filter(isCompatible)
+            .sorted {
+                let disc0 = $0.discNo ?? 1
+                let disc1 = $1.discNo ?? 1
+                if disc0 != disc1 { return disc0 < disc1 }
+                return ($0.trackNo ?? 0) < ($1.trackNo ?? 0)
+            }
+
+        let songItems: [CPListItem] = tracks.enumerated().map { index, track in
+            let item = CPListItem(text: track.title, detailText: getArtistName(for: track))
+            configureArtwork(for: item, track: track, index: index)
+            item.handler = { _, completion in
+                Task {
+                    let queue = self.forwardQueue(from: tracks, startingAt: index)
+                    await AppCoordinator.shared.playTrack(track, queue: queue)
+                }
+                completion()
+            }
+            return item
+        }
+
+        interfaceController?.pushTemplate(
+            CPListTemplate(title: album.title, sections: [CPListSection(items: songItems)]),
+            animated: true,
+            completion: nil
+        )
+    }
+
+    // MARK: - Helpers
+
+    private func addNowPlayingButton(to template: CPListTemplate) {
+        guard let nowPlayingImage = UIImage(systemName: "play.circle.fill") else { return }
+
+        let nowPlayingButton = CPBarButton(image: nowPlayingImage) { [weak self] _ in
+            self?.showNowPlaying()
+        }
+        template.trailingNavigationBarButtons = [nowPlayingButton]
+    }
 
     private func showNowPlaying() {
         let nowPlayingTemplate = CPNowPlayingTemplate.shared
         interfaceController?.pushTemplate(nowPlayingTemplate, animated: true, completion: nil)
     }
 
-    func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
-                                 didDisconnect interfaceController: CPInterfaceController) {
-        self.interfaceController = nil
+    private func queueForAllSongs(startingAt index: Int) -> [Track] {
+        if let paginatedQueue = try? DatabaseManager.shared.getTracksPaginated(
+            limit: maxQueueItems,
+            offset: index,
+            excludingFormats: incompatibleFormats
+        ), !paginatedQueue.isEmpty {
+            return paginatedQueue
+        }
 
-        // Update SFBAudioEngineManager's CarPlay status
-        print("🚗 CarPlay disconnected")
+        return forwardQueue(from: allSongsTracks, startingAt: index)
+    }
+
+    private func forwardQueue(from tracks: [Track], startingAt index: Int) -> [Track] {
+        guard !tracks.isEmpty else { return [] }
+        let safeIndex = max(0, min(index, tracks.count - 1))
+        let endIndex = min(safeIndex + maxQueueItems, tracks.count)
+        return Array(tracks[safeIndex..<endIndex])
+    }
+
+    private func isCompatible(track: Track) -> Bool {
+        let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+        return !incompatibleFormats.contains(ext)
+    }
+
+    private func configureArtwork(for item: CPListItem, track: Track, index: Int) {
+        if index >= maxArtworkItems {
+            item.setImage(createPlaceholderImage())
+            return
+        }
+
         Task { @MainActor in
-            SFBAudioEngineManager.shared.updateCarPlayStatus()
+            if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
+                item.setImage(resizeImageForCarPlay(artwork, rounded: true))
+            } else {
+                item.setImage(createPlaceholderImage())
+            }
         }
     }
-
-    // MARK: - Navigation Methods
-
-    private func showAllSongs(tracks: [Track]) {
-        let songItems: [CPListItem] = tracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-
-            // Add artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    // Set placeholder image
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
-
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: tracks)
-                }
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: songItems)
-        let listTemplate = CPListTemplate(title: Localized.allSongs, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showLikedSongs(tracks: [Track]) {
-        let favoriteIds = (try? AppCoordinator.shared.getFavorites()) ?? []
-        let likedTracks = tracks.filter { favoriteIds.contains($0.stableId) }
-
-        let songItems: [CPListItem] = likedTracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: likedTracks)
-                }
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: songItems)
-        let listTemplate = CPListTemplate(title: Localized.likedSongs, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showPlaylists() {
-        let playlists = (try? AppCoordinator.shared.databaseManager.getAllPlaylists()) ?? []
-
-        let playlistItems: [CPListItem] = playlists.map { playlist in
-            let item = CPListItem(text: playlist.title, detailText: nil)
-            item.handler = { [weak self] _, completion in
-                self?.showPlaylistDetail(playlist: playlist)
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: playlistItems)
-        let listTemplate = CPListTemplate(title: Localized.playlists, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showPlaylistDetail(playlist: Playlist) {
-        guard let playlistId = playlist.id else { return }
-
-        // Get playlist tracks using the same logic as PlaylistDetailScreen
-        let playlistItems = (try? AppCoordinator.shared.databaseManager.getPlaylistItems(playlistId: playlistId)) ?? []
-        let allTracks = (try? AppCoordinator.shared.getAllTracks()) ?? []
-        let allPlaylistTracks = playlistItems.compactMap { item in
-            allTracks.first { $0.stableId == item.trackStableId }
-        }
-
-        // Filter out incompatible formats for CarPlay
-        let tracks = allPlaylistTracks.filter { track in
-            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
-            return !incompatibleFormats.contains(ext)
-        }
-
-        let songItems: [CPListItem] = tracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-
-            // Load cached artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
-
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: tracks)
-                }
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: songItems)
-        let listTemplate = CPListTemplate(title: playlist.title, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showArtists(tracks: [Track]) {
-        let artists = (try? AppCoordinator.shared.databaseManager.getAllArtists()) ?? []
-
-        let artistItems: [CPListItem] = artists.map { artist in
-            let artistTracks = tracks.filter { $0.artistId == artist.id }
-            let item = CPListItem(text: artist.name, detailText: "\(artistTracks.count) songs")
-            item.handler = { [weak self] _, completion in
-                self?.showArtistDetail(artist: artist, tracks: artistTracks)
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: artistItems)
-        let listTemplate = CPListTemplate(title: Localized.artists, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showArtistDetail(artist: Artist, tracks: [Track]) {
-        // Filter out incompatible formats for CarPlay
-        let filteredTracks = tracks.filter { track in
-            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
-            return !incompatibleFormats.contains(ext)
-        }
-
-        let songItems: [CPListItem] = filteredTracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-
-            // Load cached artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
-
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: filteredTracks)
-                }
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: songItems)
-        let listTemplate = CPListTemplate(title: artist.name, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showAlbums(tracks: [Track]) {
-        let albums = (try? AppCoordinator.shared.getAllAlbums()) ?? []
-
-        let albumItems: [CPListItem] = albums.map { album in
-            let albumTracks = tracks.filter { $0.albumId == album.id }
-            let artistName = getArtistNameForAlbum(album)
-            let item = CPListItem(text: album.title, detailText: artistName)
-            item.handler = { [weak self] _, completion in
-                self?.showAlbumDetail(album: album, tracks: albumTracks)
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: albumItems)
-        let listTemplate = CPListTemplate(title: Localized.albums, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    private func showAlbumDetail(album: Album, tracks: [Track]) {
-        // Filter out incompatible formats for CarPlay
-        let filteredTracks = tracks.filter { track in
-            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-            let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
-            return !incompatibleFormats.contains(ext)
-        }
-
-        // Sort by disc number first, then track number
-        let sortedTracks = filteredTracks.sorted {
-            let disc0 = $0.discNo ?? 1
-            let disc1 = $1.discNo ?? 1
-
-            if disc0 != disc1 {
-                return disc0 < disc1
-            }
-
-            return ($0.trackNo ?? 0) < ($1.trackNo ?? 0)
-        }
-
-        let songItems: [CPListItem] = sortedTracks.map { track in
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-
-            // Load cached artwork asynchronously
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
-
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: sortedTracks)
-                }
-                completion()
-            }
-            return item
-        }
-
-        let section = CPListSection(items: songItems)
-        let listTemplate = CPListTemplate(title: album.title, sections: [section])
-        interfaceController?.pushTemplate(listTemplate, animated: true, completion: nil)
-    }
-
-    // MARK: - Helper Methods
 
     private func getArtistName(for track: Track) -> String {
         guard let artistId = track.artistId else { return "" }
-        do {
-            if let artist = try DatabaseManager.shared.read({ db in
-                try Artist.fetchOne(db, key: artistId)
-            }) {
-                return artist.name
-            }
-        } catch {
-            print("Failed to fetch artist: \(error)")
-        }
-        return ""
+        return artistNameCache[artistId] ?? ""
     }
 
     private func getArtistNameForAlbum(_ album: Album) -> String {
         guard let artistId = album.artistId else { return "" }
-        do {
-            if let artist = try DatabaseManager.shared.read({ db in
-                try Artist.fetchOne(db, key: artistId)
-            }) {
-                return artist.name
-            }
-        } catch {
-            print("Failed to fetch artist for album: \(error)")
-        }
-        return ""
-    }
-}
-
-
-// MARK: - CPSearchTemplateDelegate
-
-extension CarPlaySceneDelegate: CPSearchTemplateDelegate {
-    func searchTemplate(_ searchTemplate: CPSearchTemplate, updatedSearchText searchText: String, completionHandler: @escaping ([CPListItem]) -> Void) {
-        guard !searchText.isEmpty else {
-            completionHandler([])
-            return
-        }
-
-        let lowercasedQuery = searchText.lowercased()
-        var items: [CPListItem] = []
-
-        // Search songs (by title, artist, album)
-        let matchingSongs = allTracks.filter { track in
-            // Search by title
-            if track.title.lowercased().contains(lowercasedQuery) {
-                return true
-            }
-
-            // Search by artist name
-            if let artistId = track.artistId,
-               let artist = try? DatabaseManager.shared.read({ db in
-                   try Artist.fetchOne(db, key: artistId)
-               }),
-               artist.name.lowercased().contains(lowercasedQuery) {
-                return true
-            }
-
-            // Search by album name
-            if let albumId = track.albumId,
-               let album = try? DatabaseManager.shared.read({ db in
-                   try Album.fetchOne(db, key: albumId)
-               }),
-               album.title.lowercased().contains(lowercasedQuery) {
-                return true
-            }
-
-            return false
-        }
-
-        // Add song results
-        for track in matchingSongs {
-            let artistName = getArtistName(for: track)
-            let item = CPListItem(text: track.title, detailText: artistName)
-
-            // Add artwork
-            Task { @MainActor in
-                if let artwork = await ArtworkManager.shared.getArtwork(for: track) {
-                    let resizedImage = resizeImageForCarPlay(artwork, rounded: true)
-                    item.setImage(resizedImage)
-                } else {
-                    let placeholder = createPlaceholderImage()
-                    item.setImage(placeholder)
-                }
-            }
-
-            item.handler = { _, completion in
-                Task {
-                    await AppCoordinator.shared.playTrack(track, queue: matchingSongs)
-                }
-                completion()
-            }
-            items.append(item)
-        }
-
-        // Search artists
-        if let allArtists = try? AppCoordinator.shared.databaseManager.getAllArtists() {
-            let matchingArtists = allArtists.filter { $0.name.lowercased().contains(lowercasedQuery) }
-
-            for artist in matchingArtists {
-                let artistTracks = allTracks.filter { $0.artistId == artist.id }
-                let item = CPListItem(text: "🎤 \(artist.name)", detailText: Localized.songsCount(artistTracks.count))
-                item.handler = { [weak self] _, completion in
-                    self?.showArtistDetail(artist: artist, tracks: artistTracks)
-                    completion()
-                }
-                items.append(item)
-            }
-        }
-
-        // Search albums
-        if let allAlbums = try? AppCoordinator.shared.getAllAlbums() {
-            let matchingAlbums = allAlbums.filter { album in
-                // Search by album title
-                if album.title.lowercased().contains(lowercasedQuery) {
-                    return true
-                }
-
-                // Search by artist name
-                if let artistId = album.artistId,
-                   let artist = try? DatabaseManager.shared.read({ db in
-                       try Artist.fetchOne(db, key: artistId)
-                   }),
-                   artist.name.lowercased().contains(lowercasedQuery) {
-                    return true
-                }
-
-                return false
-            }
-
-            for album in matchingAlbums {
-                let albumTracks = allTracks.filter { $0.albumId == album.id }
-                let artistName = getArtistNameForAlbum(album)
-                let item = CPListItem(text: "💿 \(album.title)", detailText: artistName)
-                item.handler = { [weak self] _, completion in
-                    self?.showAlbumDetail(album: album, tracks: albumTracks)
-                    completion()
-                }
-                items.append(item)
-            }
-        }
-
-        // Search playlists
-        if let allPlaylists = try? AppCoordinator.shared.databaseManager.getAllPlaylists() {
-            let matchingPlaylists = allPlaylists.filter { $0.title.lowercased().contains(lowercasedQuery) }
-
-            for playlist in matchingPlaylists {
-                let item = CPListItem(text: "📝 \(playlist.title)", detailText: Localized.playlist)
-                item.handler = { [weak self] _, completion in
-                    self?.showPlaylistDetail(playlist: playlist)
-                    completion()
-                }
-                items.append(item)
-            }
-        }
-
-        completionHandler(items)
-    }
-
-    func searchTemplate(_ searchTemplate: CPSearchTemplate, selectedResult item: CPListItem, completionHandler: @escaping () -> Void) {
-        completionHandler()
-    }
-}
-
-// Helper function to create colored SF Symbol icons
-private func createColoredIcon(systemName: String, color: UIColor, size: CGFloat = 480) -> UIImage {
-    let config = UIImage.SymbolConfiguration(pointSize: size, weight: .medium)
-    let image = UIImage(systemName: systemName, withConfiguration: config)!
-
-    let renderer = UIGraphicsImageRenderer(size: CGSize(width: 640, height: 640))
-    return renderer.image { context in
-        // Draw background with color opacity
-        let rect = CGRect(x: 20, y: 20, width: 600, height: 600)
-        let path = UIBezierPath(roundedRect: rect, cornerRadius: 80)
-        color.withAlphaComponent(0.2).setFill()
-        path.fill()
-
-        // Draw colored icon centered
-        color.setFill()
-        image.draw(in: CGRect(x: 100, y: 100, width: 440, height: 440))
+        return artistNameCache[artistId] ?? ""
     }
 }
 
@@ -636,19 +390,16 @@ private func createColoredIcon(systemName: String, color: UIColor, size: CGFloat
 private func resizeImageForCarPlay(_ image: UIImage, rounded: Bool = false) -> UIImage {
     let maxSize = CPListItem.maximumImageSize
 
-    // Use square size for list items
     let squareSize = min(maxSize.width, maxSize.height)
     let targetSize = CGSize(width: squareSize, height: squareSize)
 
     let renderer = UIGraphicsImageRenderer(size: targetSize)
-    return renderer.image { context in
+    return renderer.image { _ in
         if rounded {
-            // Create rounded square path
             let path = UIBezierPath(roundedRect: CGRect(origin: .zero, size: targetSize), cornerRadius: 8)
             path.addClip()
         }
 
-        // Calculate aspect-fill rect (crop to fill square without distortion)
         let imageSize = image.size
         let scale = max(targetSize.width / imageSize.width, targetSize.height / imageSize.height)
         let scaledWidth = imageSize.width * scale
@@ -660,24 +411,23 @@ private func resizeImageForCarPlay(_ image: UIImage, rounded: Bool = false) -> U
     }
 }
 
-// Helper function to create placeholder image for songs without artwork
 @MainActor
 private func createPlaceholderImage() -> UIImage {
     let size = CPListItem.maximumImageSize
     let renderer = UIGraphicsImageRenderer(size: size)
 
-    return renderer.image { context in
-        // Draw rounded square background
+    return renderer.image { _ in
         let path = UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 8)
         UIColor.systemGray5.setFill()
         path.fill()
 
-        // Draw music note icon
         let iconSize: CGFloat = size.width * 0.5
-        let iconRect = CGRect(x: (size.width - iconSize) / 2,
-                             y: (size.height - iconSize) / 2,
-                             width: iconSize,
-                             height: iconSize)
+        let iconRect = CGRect(
+            x: (size.width - iconSize) / 2,
+            y: (size.height - iconSize) / 2,
+            width: iconSize,
+            height: iconSize
+        )
 
         if let musicIcon = UIImage(systemName: "music.note")?.withConfiguration(
             UIImage.SymbolConfiguration(pointSize: iconSize * 0.6, weight: .medium)

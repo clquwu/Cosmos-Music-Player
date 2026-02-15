@@ -631,6 +631,75 @@ class DatabaseManager: @unchecked Sendable {
         }
     }
 
+    func getTracksByStableIdsPreservingOrder(_ stableIds: [String]) throws -> [Track] {
+        guard !stableIds.isEmpty else { return [] }
+
+        let tracks = try getTracksByStableIds(stableIds)
+        let tracksByStableId = Dictionary(uniqueKeysWithValues: tracks.map { ($0.stableId, $0) })
+        return stableIds.compactMap { tracksByStableId[$0] }
+    }
+
+    func getAllArtistNamesById() throws -> [Int64: String] {
+        return try read { db in
+            let artists = try Artist.fetchAll(db)
+            var result: [Int64: String] = [:]
+            result.reserveCapacity(artists.count)
+
+            for artist in artists {
+                if let id = artist.id {
+                    result[id] = artist.name
+                }
+            }
+
+            return result
+        }
+    }
+
+    func getFavoriteTracks(excludingFormats: [String] = []) throws -> [Track] {
+        let favoriteIds = try getFavorites()
+        let orderedTracks = try getTracksByStableIdsPreservingOrder(favoriteIds)
+        guard !excludingFormats.isEmpty else { return orderedTracks }
+
+        let excludedFormats = Set(excludingFormats.map { $0.lowercased() })
+        return orderedTracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            return !excludedFormats.contains(ext)
+        }
+    }
+
+    func getTracksPaginated(limit: Int, offset: Int, excludingFormats: [String] = []) throws -> [Track] {
+        return try read { db in
+            let sanitizedFormats = excludingFormats
+                .map { $0.lowercased().filter { $0.isLetter || $0.isNumber } }
+                .filter { !$0.isEmpty }
+
+            var sql = "SELECT * FROM track"
+            if !sanitizedFormats.isEmpty {
+                let formatClauses = sanitizedFormats.map { "LOWER(path) NOT LIKE '%.\($0)'" }
+                sql += " WHERE " + formatClauses.joined(separator: " AND ")
+            }
+
+            sql += " ORDER BY title LIMIT \(max(limit, 0)) OFFSET \(max(offset, 0))"
+            return try Track.fetchAll(db, sql: sql)
+        }
+    }
+
+    func getTrackCount(excludingFormats: [String] = []) throws -> Int {
+        return try read { db in
+            let sanitizedFormats = excludingFormats
+                .map { $0.lowercased().filter { $0.isLetter || $0.isNumber } }
+                .filter { !$0.isEmpty }
+
+            var sql = "SELECT COUNT(*) FROM track"
+            if !sanitizedFormats.isEmpty {
+                let formatClauses = sanitizedFormats.map { "LOWER(path) NOT LIKE '%.\($0)'" }
+                sql += " WHERE " + formatClauses.joined(separator: " AND ")
+            }
+
+            return try Int.fetchOne(db, sql: sql) ?? 0
+        }
+    }
+
     func getTracksByAlbumId(_ albumId: Int64) throws -> [Track] {
         return try read { db in
             // Fetch all tracks for this album

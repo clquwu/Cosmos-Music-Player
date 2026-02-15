@@ -27,7 +27,8 @@ class PlayerEngine: NSObject, ObservableObject {
     @Published var isShuffled = false
     @Published var isLoopingSong = false
     
-    private var originalQueue: [Track] = []
+    private var originalQueue: [String] = []
+    private let maxPersistedQueueSize = 2000
     
     // Generation token to prevent stale completion handlers from firing
     private var scheduleGeneration: UInt64 = 0
@@ -1656,7 +1657,7 @@ class PlayerEngine: NSObject, ObservableObject {
         currentTrack = track
         
         // Save original queue for shuffle functionality
-        originalQueue = playbackQueue
+        originalQueue = playbackQueue.map { $0.stableId }
         
         normalizeIndexAndTrack()
         
@@ -1771,7 +1772,7 @@ class PlayerEngine: NSObject, ObservableObject {
         
         if isShuffled {
             // Save original order and shuffle the queue
-            originalQueue = playbackQueue
+            originalQueue = playbackQueue.map { $0.stableId }
             shuffleQueue()
         } else {
             // Restore original order
@@ -1796,15 +1797,25 @@ class PlayerEngine: NSObject, ObservableObject {
     
     private func restoreOriginalQueue() {
         guard !originalQueue.isEmpty else { return }
-        
-        // Find current track in original queue
-        if let currentTrack = self.currentTrack,
-           let originalIndex = originalQueue.firstIndex(where: { $0.stableId == currentTrack.stableId }) {
-            playbackQueue = originalQueue
-            currentIndex = originalIndex
-            print("🔀 Original queue restored, current track at index \(originalIndex)")
+
+        do {
+            let restoredQueue = try databaseManager.getTracksByStableIdsPreservingOrder(originalQueue)
+            guard !restoredQueue.isEmpty else { return }
+
+            // Find current track in original queue
+            if let currentTrack = self.currentTrack,
+               let originalIndex = restoredQueue.firstIndex(where: { $0.stableId == currentTrack.stableId }) {
+                playbackQueue = restoredQueue
+                currentIndex = originalIndex
+                print("🔀 Original queue restored, current track at index \(originalIndex)")
+            } else {
+                playbackQueue = restoredQueue
+                currentIndex = min(currentIndex, max(0, restoredQueue.count - 1))
+            }
+        } catch {
+            print("❌ Failed to restore original queue: \(error)")
         }
-        
+
         normalizeIndexAndTrack()
     }
     
@@ -2628,23 +2639,51 @@ class PlayerEngine: NSObject, ObservableObject {
             print("🚫 No current track to save state for")
             return
         }
+
+        let playbackQueueTrackIds = playbackQueue.map { $0.stableId }
+        let (cappedQueueTrackIds, cappedCurrentIndex) = cappedTrackIdsForPersistence(
+            playbackQueueTrackIds,
+            currentIndex: currentIndex
+        )
+        let originalQueueCurrentIndex = originalQueue.firstIndex(of: currentTrack.stableId) ?? 0
+        let (cappedOriginalQueueTrackIds, _) = cappedTrackIdsForPersistence(
+            originalQueue,
+            currentIndex: originalQueueCurrentIndex
+        )
         
         let playerState: [String: Any] = [
             "currentTrackStableId": currentTrack.stableId,
             "playbackTime": playbackTime,
             "isPlaying": false, // Always save as paused to prevent auto-play on launch
-            "queueTrackIds": playbackQueue.map { $0.stableId },
-            "currentIndex": currentIndex,
+            "queueTrackIds": cappedQueueTrackIds,
+            "currentIndex": cappedCurrentIndex,
             "isRepeating": isRepeating,
             "isShuffled": isShuffled,
             "isLoopingSong": isLoopingSong,
-            "originalQueueTrackIds": originalQueue.map { $0.stableId },
+            "originalQueueTrackIds": cappedOriginalQueueTrackIds,
             "lastSavedAt": Date()
         ]
         
         UserDefaults.standard.set(playerState, forKey: "CosmosPlayerState")
         UserDefaults.standard.synchronize()
         print("✅ Player state saved to UserDefaults (offline, per-device)")
+    }
+
+    private func cappedTrackIdsForPersistence(_ trackIds: [String], currentIndex: Int) -> ([String], Int) {
+        guard !trackIds.isEmpty else { return ([], 0) }
+        guard trackIds.count > maxPersistedQueueSize else {
+            let safeIndex = max(0, min(currentIndex, trackIds.count - 1))
+            return (trackIds, safeIndex)
+        }
+
+        let halfWindow = maxPersistedQueueSize / 2
+        var start = max(0, currentIndex - halfWindow)
+        var end = min(trackIds.count, start + maxPersistedQueueSize)
+        start = max(0, end - maxPersistedQueueSize)
+
+        let cappedTrackIds = Array(trackIds[start..<end])
+        let adjustedIndex = max(0, min(currentIndex - start, cappedTrackIds.count - 1))
+        return (cappedTrackIds, adjustedIndex)
     }
     
     private func ensurePlayerStateRestored() async {
@@ -2706,22 +2745,13 @@ class PlayerEngine: NSObject, ObservableObject {
             let queueTrackIds = playerStateDict["queueTrackIds"] as? [String] ?? []
             let originalQueueTrackIds = playerStateDict["originalQueueTrackIds"] as? [String] ?? []
             
-            let queueTracks = try DatabaseManager.shared.read { db in
-                try queueTrackIds.compactMap { stableId in
-                    try Track.filter(Column("stable_id") == stableId).fetchOne(db)
-                }
-            }
-            
-            let originalQueueTracks = try DatabaseManager.shared.read { db in
-                try originalQueueTrackIds.compactMap { stableId in
-                    try Track.filter(Column("stable_id") == stableId).fetchOne(db)
-                }
-            }
+            let queueTracks = try DatabaseManager.shared.getTracksByStableIdsPreservingOrder(queueTrackIds)
+            let originalQueueTracks = try DatabaseManager.shared.getTracksByStableIdsPreservingOrder(originalQueueTrackIds)
             
             // Restore UI state only - no audio loading
             await MainActor.run {
                 self.playbackQueue = queueTracks.isEmpty ? [restoredTrack] : queueTracks
-                self.originalQueue = originalQueueTracks.isEmpty ? [restoredTrack] : originalQueueTracks
+                self.originalQueue = originalQueueTracks.isEmpty ? [restoredTrack.stableId] : originalQueueTracks.map { $0.stableId }
                 
                 let savedIndex = playerStateDict["currentIndex"] as? Int ?? 0
                 self.currentIndex = max(0, min(savedIndex, self.playbackQueue.count - 1))
@@ -2821,22 +2851,13 @@ class PlayerEngine: NSObject, ObservableObject {
             let queueTrackIds = playerStateDict["queueTrackIds"] as? [String] ?? []
             let originalQueueTrackIds = playerStateDict["originalQueueTrackIds"] as? [String] ?? []
             
-            let queueTracks = try DatabaseManager.shared.read { db in
-                try queueTrackIds.compactMap { stableId in
-                    try Track.filter(Column("stable_id") == stableId).fetchOne(db)
-                }
-            }
-            
-            let originalQueueTracks = try DatabaseManager.shared.read { db in
-                try originalQueueTrackIds.compactMap { stableId in
-                    try Track.filter(Column("stable_id") == stableId).fetchOne(db)
-                }
-            }
+            let queueTracks = try DatabaseManager.shared.getTracksByStableIdsPreservingOrder(queueTrackIds)
+            let originalQueueTracks = try DatabaseManager.shared.getTracksByStableIdsPreservingOrder(originalQueueTrackIds)
             
             // Restore player state
             await MainActor.run {
                 self.playbackQueue = queueTracks.isEmpty ? [restoredTrack] : queueTracks
-                self.originalQueue = originalQueueTracks.isEmpty ? [restoredTrack] : originalQueueTracks
+                self.originalQueue = originalQueueTracks.isEmpty ? [restoredTrack.stableId] : originalQueueTracks.map { $0.stableId }
                 
                 let savedIndex = playerStateDict["currentIndex"] as? Int ?? 0
                 self.currentIndex = max(0, min(savedIndex, self.playbackQueue.count - 1))

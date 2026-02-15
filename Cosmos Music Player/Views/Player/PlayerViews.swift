@@ -953,6 +953,7 @@ struct TrackRowView: View, @MainActor Equatable {
     let track: Track
     let activeTrackId: String?
     let isAudioPlaying: Bool
+    let artistName: String?
     
     let onTap: () -> Void
     let playlist: Playlist?
@@ -979,8 +980,20 @@ struct TrackRowView: View, @MainActor Equatable {
         return lhs.track.stableId == rhs.track.stableId &&
         lhs.activeTrackId == rhs.activeTrackId &&
         lhs.isAudioPlaying == rhs.isAudioPlaying &&
+        lhs.artistName == rhs.artistName &&
         lhs.isFavorite == rhs.isFavorite &&
         lhs.playlist?.id == rhs.playlist?.id
+    }
+
+    private func resolvedArtistName() -> String? {
+        if let artistName, !artistName.isEmpty {
+            return artistName
+        }
+
+        guard let artistId = track.artistId else { return nil }
+        return try? DatabaseManager.shared.read { db in
+            try Artist.fetchOne(db, key: artistId)?.name
+        }
     }
     
     var body: some View {
@@ -1019,11 +1032,8 @@ struct TrackRowView: View, @MainActor Equatable {
                         .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color : .primary)
                         .lineLimit(1)
                     
-                    if let artistId = track.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }) {
-                        Text(artist.name)
+                    if let resolvedArtistName = resolvedArtistName() {
+                        Text(resolvedArtistName)
                             .font(.body)
                             .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color.opacity(0.8) : .secondary)
                             .lineLimit(1)

@@ -15,7 +15,9 @@ class ArtworkManager: ObservableObject {
     static let shared = ArtworkManager()
 
     // Memory cache for quick access
-    private var memoryCache: [String: UIImage] = [:]
+    private let memoryCache = NSCache<NSString, UIImage>()
+    private var cachedTrackIds: Set<String> = []
+    private var notificationObservers: [NSObjectProtocol] = []
 
     // Persistent disk cache directory
     private let diskCacheURL: URL
@@ -26,17 +28,43 @@ class ArtworkManager: ObservableObject {
     // In-memory mapping cache
     private var artworkMapping: [String: String] = [:]
 
+    private let maxMemoryCacheItems = 250
+    private let maxMemoryCacheCost = 40 * 1024 * 1024
+
     private init() {
         // Create artwork cache directory
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         diskCacheURL = documentsURL.appendingPathComponent("ArtworkCache", isDirectory: true)
         mappingFileURL = documentsURL.appendingPathComponent("ArtworkMapping.plist")
 
+        memoryCache.countLimit = maxMemoryCacheItems
+        memoryCache.totalCostLimit = maxMemoryCacheCost
+
         // Create directory if needed
         try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
 
         // Load mapping
         loadMapping()
+
+        let notificationCenter = NotificationCenter.default
+        notificationObservers.append(
+            notificationCenter.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.clearCache()
+            }
+        )
+        notificationObservers.append(
+            notificationCenter.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.clearCache()
+            }
+        )
 
         print("📁 ArtworkManager initialized - Disk cache: \(diskCacheURL.path)")
     }
@@ -67,7 +95,8 @@ class ArtworkManager: ObservableObject {
     }
 
     func clearCache() {
-        memoryCache.removeAll()
+        memoryCache.removeAllObjects()
+        cachedTrackIds.removeAll()
         print("🗑️ ArtworkManager memory cache cleared")
     }
 
@@ -77,7 +106,8 @@ class ArtworkManager: ObservableObject {
             for file in files {
                 try FileManager.default.removeItem(at: file)
             }
-            memoryCache.removeAll()
+            memoryCache.removeAllObjects()
+            cachedTrackIds.removeAll()
             artworkMapping.removeAll()
             saveMapping()
             print("🗑️ Cleared \(files.count) artwork files from disk cache")
@@ -88,7 +118,8 @@ class ArtworkManager: ObservableObject {
 
     func forceRefreshArtwork(for track: Track) async -> UIImage? {
         // Remove from memory cache and mapping to force re-extraction
-        memoryCache.removeValue(forKey: track.stableId)
+        memoryCache.removeObject(forKey: track.stableId as NSString)
+        cachedTrackIds.remove(track.stableId)
 
         // Note: We don't delete the actual artwork file as other tracks might use it
         // Just remove the mapping for this track
@@ -117,26 +148,46 @@ class ArtworkManager: ObservableObject {
 
     func getArtwork(for track: Track) async -> UIImage? {
         // 1. Check memory cache first (fastest)
-        if let cachedImage = memoryCache[track.stableId] {
+        if let cachedImage = memoryCache.object(forKey: track.stableId as NSString) {
             return cachedImage
         }
 
         // 2. Check disk cache (fast)
         if let diskImage = await loadFromDiskCache(stableId: track.stableId) {
             // Store in memory cache for next time
-            memoryCache[track.stableId] = diskImage
+            cacheImage(diskImage, for: track.stableId)
             return diskImage
         }
 
         // 3. Extract from audio file and cache (slow - should be rare after indexing)
         if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
             // Store in both caches
-            memoryCache[track.stableId] = image
+            cacheImage(image, for: track.stableId)
             await saveToDiskCache(image: image, stableId: track.stableId)
             return image
         }
 
         return nil
+    }
+
+    func updateVisibleArtworkWindow(visibleTrackIds: [String], prefetchTrackIds: [String] = []) {
+        let keepTrackIds = Set(visibleTrackIds + prefetchTrackIds)
+        guard !keepTrackIds.isEmpty else {
+            clearCache()
+            return
+        }
+
+        let staleTrackIds = cachedTrackIds.subtracting(keepTrackIds)
+        for staleTrackId in staleTrackIds {
+            memoryCache.removeObject(forKey: staleTrackId as NSString)
+            cachedTrackIds.remove(staleTrackId)
+        }
+    }
+
+    private func cacheImage(_ image: UIImage, for stableId: String) {
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? Int(image.size.width * image.size.height * 4)
+        memoryCache.setObject(image, forKey: stableId as NSString, cost: max(cost, 1))
+        cachedTrackIds.insert(stableId)
     }
 
     // MARK: - Disk Cache Management

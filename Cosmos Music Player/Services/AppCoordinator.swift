@@ -349,10 +349,7 @@ class AppCoordinator: ObservableObject {
             // Restore playlists from iCloud after indexing is complete
             await restorePlaylistsFromiCloud()
 
-            // Verify and fix any database relationship issues
-            await verifyDatabaseRelationships()
-
-            // Try playlist restoration again after relationships are fixed
+            // Retry once after the first restoration pass
             await retryPlaylistRestoration()
 
             // Deduplicate playlist items (fixes folder-synced playlists with duplicate entries)
@@ -376,13 +373,25 @@ class AppCoordinator: ObservableObject {
             // Update widget with playlists
             syncPlaylistsToCloud()
 
-            // Check for orphaned files after sync completes
-            print("🔄 AppCoordinator: Starting orphaned files check...")
-            await fileCleanupManager.checkForOrphanedFiles()
-            print("🔄 AppCoordinator: Orphaned files check completed")
+            // Run heavier maintenance after UI-critical startup work finishes
+            scheduleDeferredPostIndexMaintenance()
         } catch {
             print("Failed to save favorites after indexing: \(error)")
         }
+    }
+
+    private func scheduleDeferredPostIndexMaintenance() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            await self?.runPostIndexMaintenance()
+        }
+    }
+
+    private func runPostIndexMaintenance() async {
+        print("🔄 AppCoordinator: Starting deferred post-index maintenance...")
+        await verifyDatabaseRelationships()
+        await fileCleanupManager.checkForOrphanedFiles()
+        print("✅ AppCoordinator: Deferred post-index maintenance completed")
     }
     
     private func forceiCloudFolderCreation() async {
@@ -446,9 +455,13 @@ class AppCoordinator: ObservableObject {
 
                     if !tracksToAdd.isEmpty {
                         print("➕ Adding \(tracksToAdd.count) missing tracks from cloud to '\(playlistState.title)'")
-                        for trackId in tracksToAdd {
-                            // Check if track exists in database
-                            if let _ = try databaseManager.getTrack(byStableId: trackId) {
+                        let trackIdsToAdd = Array(tracksToAdd)
+                        let existingTrackIds = Set(try databaseManager
+                            .getTracksByStableIds(trackIdsToAdd)
+                            .map { $0.stableId })
+
+                        for trackId in trackIdsToAdd {
+                            if existingTrackIds.contains(trackId) {
                                 try databaseManager.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
                                 print("✅ Added track to playlist: \(trackId)")
                             } else {
@@ -466,14 +479,14 @@ class AppCoordinator: ObservableObject {
                     // Add tracks to playlist if they exist in the database
                     guard let playlistId = playlist.id else { continue }
 
-                    for item in playlistState.items {
-                        // Check if track exists in database
-                        if let _ = try databaseManager.getTrack(byStableId: item.trackId) {
-                            try databaseManager.addToPlaylist(playlistId: playlistId, trackStableId: item.trackId)
-                            print("✅ Added track to playlist: \(item.trackId)")
-                        } else {
-                            print("⚠️ Track not found in database: \(item.trackId)")
-                        }
+                    let cloudTrackIds = playlistState.items.map { $0.trackId }
+                    let existingTrackIds = Set(try databaseManager
+                        .getTracksByStableIds(cloudTrackIds)
+                        .map { $0.stableId })
+
+                    for trackId in cloudTrackIds where existingTrackIds.contains(trackId) {
+                        try databaseManager.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
+                        print("✅ Added track to playlist: \(trackId)")
                     }
                 }
             }
@@ -498,7 +511,9 @@ class AppCoordinator: ObservableObject {
             
             print("📊 Database stats - Tracks: \(tracks.count), Albums: \(albums.count), Artists: \(artists.count)")
             
-            // Simple verification - just report what we have
+            let validArtistIds = Set(artists.compactMap(\.id))
+            let validAlbumIds = Set(albums.compactMap(\.id))
+
             var tracksWithoutArtist = 0
             var tracksWithoutAlbum = 0
             var invalidArtistRefs = 0
@@ -507,26 +522,20 @@ class AppCoordinator: ObservableObject {
             for track in tracks {
                 // Check artist relationship
                 if let artistId = track.artistId {
-                    let artistExists = artists.contains { $0.id == artistId }
-                    if !artistExists {
+                    if !validArtistIds.contains(artistId) {
                         invalidArtistRefs += 1
-                        print("⚠️ Track '\(track.title)' references non-existent artist ID: \(artistId)")
                     }
                 } else {
                     tracksWithoutArtist += 1
-                    print("⚠️ Track '\(track.title)' has no artist ID")
                 }
                 
                 // Check album relationship  
                 if let albumId = track.albumId {
-                    let albumExists = albums.contains { $0.id == albumId }
-                    if !albumExists {
+                    if !validAlbumIds.contains(albumId) {
                         invalidAlbumRefs += 1
-                        print("⚠️ Track '\(track.title)' references non-existent album ID: \(albumId)")
                     }
                 } else {
                     tracksWithoutAlbum += 1
-                    print("⚠️ Track '\(track.title)' has no album ID")
                 }
             }
             
@@ -561,14 +570,15 @@ class AppCoordinator: ObservableObject {
                     let currentItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
                     if currentItems.isEmpty {
                         print("🔄 Playlist '\(playlistState.title)' is empty, attempting to restore tracks...")
-                        
-                        for item in playlistState.items {
-                            if let _ = try databaseManager.getTrack(byStableId: item.trackId) {
-                                try databaseManager.addToPlaylist(playlistId: playlistId, trackStableId: item.trackId)
-                                print("✅ Added track to playlist after fix: \(item.trackId)")
-                            } else {
-                                print("⚠️ Track still not found after fixes: \(item.trackId)")
-                            }
+
+                        let cloudTrackIds = playlistState.items.map { $0.trackId }
+                        let existingTrackIds = Set(try databaseManager
+                            .getTracksByStableIds(cloudTrackIds)
+                            .map { $0.stableId })
+
+                        for trackId in cloudTrackIds where existingTrackIds.contains(trackId) {
+                            try databaseManager.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
+                            print("✅ Added track to playlist after fix: \(trackId)")
                         }
                     } else {
                         print("⚡ Playlist '\(playlistState.title)' already has \(currentItems.count) items")
@@ -769,14 +779,11 @@ class AppCoordinator: ObservableObject {
                     let dbPlaylistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
 
                     // Validate that tracks still exist before syncing
-                    var validItems: [(String, Date)] = []
-                    for item in dbPlaylistItems {
-                        if let _ = try? databaseManager.getTrack(byStableId: item.trackStableId) {
-                            validItems.append((item.trackStableId, Date()))
-                        } else {
-                            print("⚠️ Skipping orphaned track in playlist '\(playlist.title)': \(item.trackStableId)")
-                        }
-                    }
+                    let orderedTrackIds = dbPlaylistItems.map { $0.trackStableId }
+                    let existingTrackIds = Set((try? databaseManager.getTracksByStableIds(orderedTrackIds).map { $0.stableId }) ?? [])
+                    let validItems = orderedTrackIds
+                        .filter { existingTrackIds.contains($0) }
+                        .map { ($0, Date()) }
                     let stateItems = validItems
 
                     // SAFETY CHECK: Don't overwrite cloud data with empty playlists for non-folder-synced playlists
@@ -836,13 +843,8 @@ class AppCoordinator: ObservableObject {
                 // Get playlist items IN ORDER (same as app displays)
                 let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
 
-                // Preserve playlist order by fetching tracks one by one
-                var orderedTracks: [Track] = []
-                for item in playlistItems {
-                    if let track = try databaseManager.getTrack(byStableId: item.trackStableId) {
-                        orderedTracks.append(track)
-                    }
-                }
+                let orderedTrackIds = playlistItems.map { $0.trackStableId }
+                let orderedTracks = try databaseManager.getTracksByStableIdsPreservingOrder(orderedTrackIds)
 
                 // Get first 4 tracks for artwork mashup (in correct playlist order)
                 let artworkTracks = Array(orderedTracks.prefix(4))

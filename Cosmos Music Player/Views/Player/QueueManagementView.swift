@@ -7,6 +7,7 @@ struct QueueManagementView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draggedTrack: Track?
     @State private var settings = DeleteSettings.load()
+    @State private var artistNameCache: [Int64: String] = [:]
     
     var body: some View {
         NavigationView {
@@ -59,6 +60,7 @@ struct QueueManagementView: View {
                                     index: index,
                                     isCurrentTrack: index == playerEngine.currentIndex,
                                     isDragging: draggedTrack?.stableId == track.stableId,
+                                    artistName: track.artistId.flatMap { artistNameCache[$0] },
                                     onTap: {
                                         jumpToTrack(at: index)
                                     }
@@ -81,6 +83,17 @@ struct QueueManagementView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
             settings = DeleteSettings.load()
+        }
+        .onAppear {
+            loadArtistNameCache()
+        }
+    }
+
+    private func loadArtistNameCache() {
+        do {
+            artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+        } catch {
+            print("Failed to load queue artist cache: \(error)")
         }
     }
     
@@ -137,6 +150,7 @@ struct QueueTrackRow: View {
     let index: Int
     let isCurrentTrack: Bool
     let isDragging: Bool
+    let artistName: String?
     let onTap: () -> Void
 
     @State private var artworkImage: UIImage?
@@ -179,11 +193,8 @@ struct QueueTrackRow: View {
                     }
                 }
                 
-                if let artistId = track.artistId,
-                   let artist = try? DatabaseManager.shared.read({ db in
-                       try Artist.fetchOne(db, key: artistId)
-                   }) {
-                    Text(artist.name)
+                if let artistName, !artistName.isEmpty {
+                    Text(artistName)
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -229,4 +240,3 @@ struct QueueTrackRow: View {
         }
     }
 }
-

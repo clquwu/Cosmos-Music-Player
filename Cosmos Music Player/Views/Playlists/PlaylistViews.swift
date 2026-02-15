@@ -115,13 +115,8 @@ struct PlaylistsScreen: View {
         guard let playlistId = playlist.id else { return [] }
         do {
             let playlistItems = try appCoordinator.databaseManager.getPlaylistItems(playlistId: playlistId)
-            var tracks: [Track] = []
-            for item in playlistItems {
-                if let track = try appCoordinator.databaseManager.getTrack(byStableId: item.trackStableId) {
-                    tracks.append(track)
-                }
-            }
-            return tracks
+            let trackIds = playlistItems.map { $0.trackStableId }
+            return try appCoordinator.databaseManager.getTracksByStableIdsPreservingOrder(trackIds)
         } catch {
             print("Failed to get playlist tracks: \(error)")
             return []
@@ -426,6 +421,7 @@ struct PlaylistDetailScreen: View {
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var customCoverImage: UIImage?
     @State private var showCoverOptions = false
+    @State private var artistNameCache: [Int64: String] = [:]
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
@@ -650,6 +646,7 @@ struct PlaylistDetailScreen: View {
                                 track: track,
                                 playlist: playlist,
                                 isEditMode: isEditMode,
+                                artistName: track.artistId.flatMap { artistNameCache[$0] },
                                 onTap: {
                                     Task {
                                         guard let playlistId = playlist.id else { return }
@@ -775,6 +772,7 @@ struct PlaylistDetailScreen: View {
             loadPlaylistTracks()
             loadSortPreference()
             loadCustomCover()
+            loadArtistNameCache()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
             loadPlaylistTracks()
@@ -830,11 +828,8 @@ struct PlaylistDetailScreen: View {
 
         do {
             let playlistItems = try appCoordinator.databaseManager.getPlaylistItems(playlistId: playlistId)
-            let allTracks = try appCoordinator.getAllTracks()
-
-            tracks = playlistItems.compactMap { item in
-                allTracks.first { $0.stableId == item.trackStableId }
-            }
+            let trackIds = playlistItems.map { $0.trackStableId }
+            tracks = try appCoordinator.databaseManager.getTracksByStableIdsPreservingOrder(trackIds)
 
             // Load artworks for the first 4 tracks
             Task {
@@ -866,6 +861,14 @@ struct PlaylistDetailScreen: View {
         if let savedRawValue = UserDefaults.standard.string(forKey: key),
            let saved = TrackSortOption(rawValue: savedRawValue) {
             sortOption = saved
+        }
+    }
+
+    private func loadArtistNameCache() {
+        do {
+            artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+        } catch {
+            print("Failed to load playlist artist cache: \(error)")
         }
     }
 
@@ -979,6 +982,7 @@ struct PlaylistTrackRowView: View {
     let track: Track
     let playlist: Playlist?
     let isEditMode: Bool
+    let artistName: String?
     let onTap: () -> Void
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var playerEngine = PlayerEngine.shared
@@ -1032,11 +1036,8 @@ struct PlaylistTrackRowView: View {
                         .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color : .primary)
                         .lineLimit(1)
 
-                    if let artistId = track.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }) {
-                        Text(artist.name)
+                    if let artistName, !artistName.isEmpty {
+                        Text(artistName)
                             .font(.body)
                             .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color.opacity(0.8) : .secondary)
                             .lineLimit(1)

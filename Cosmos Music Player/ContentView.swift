@@ -114,6 +114,7 @@ struct LifecycleModifier: ViewModifier {
     @Binding var refreshTimer: Timer?
     @Binding var showTutorial: Bool
     let onRefresh: @Sendable () async -> Void
+    @State private var hasPendingIndexRefresh = false
     
     func body(content: Content) -> some View {
         content
@@ -136,20 +137,24 @@ struct LifecycleModifier: ViewModifier {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TrackFound"))) { _ in
-                Task { await onRefresh() }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
-                Task { await onRefresh() }
+                if libraryIndexer.isIndexing {
+                    hasPendingIndexRefresh = true
+                } else {
+                    Task { await onRefresh() }
+                }
             }
             .onChange(of: libraryIndexer.isIndexing) { _, isIndexing in
                 if isIndexing {
                     refreshTimer?.invalidate()
-                    refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                    refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                        guard hasPendingIndexRefresh else { return }
+                        hasPendingIndexRefresh = false
                         Task { await onRefresh() }
                     }
                 } else {
                     refreshTimer?.invalidate()
                     refreshTimer = nil
+                    hasPendingIndexRefresh = false
                     Task { await onRefresh() }
                 }
             }

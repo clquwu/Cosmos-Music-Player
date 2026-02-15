@@ -142,6 +142,7 @@ struct AlbumDetailScreen: View {
     @State private var artworkImage: UIImage?
     @State private var settings = DeleteSettings.load()
     @State private var albumTracks: [Track] = []
+    @State private var artistNameCache: [Int64: String] = [:]
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
@@ -173,10 +174,8 @@ struct AlbumDetailScreen: View {
     
     private var albumArtist: String {
         if let artistId = album.artistId,
-           let artist = try? DatabaseManager.shared.read({ db in
-               try Artist.fetchOne(db, key: artistId)
-           }) {
-            return artist.name
+           let artistName = artistNameCache[artistId] {
+            return artistName
         }
         return Localized.unknownArtist
     }
@@ -296,10 +295,11 @@ struct AlbumDetailScreen: View {
                                 }
 
                                 // Tracks for this disc
-                                ForEach(Array(disc.tracks.enumerated()), id: \.offset) { index, track in
+                                ForEach(Array(disc.tracks.enumerated()), id: \.element.stableId) { index, track in
                                     AlbumTrackRowView(
                                         track: track,
                                         trackNumber: track.trackNo ?? (index + 1),
+                                        artistName: track.artistId.flatMap { artistNameCache[$0] },
                                         onTap: {
                                             Task {
                                                 await playerEngine.playTrack(track, queue: filteredAlbumTracks)
@@ -323,6 +323,7 @@ struct AlbumDetailScreen: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
+            loadArtistNameCache()
             loadAlbumTracks()
             loadAlbumArtwork()
         }
@@ -357,11 +358,20 @@ struct AlbumDetailScreen: View {
             }
         }
     }
+
+    private func loadArtistNameCache() {
+        do {
+            artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+        } catch {
+            print("Failed to load album artist cache: \(error)")
+        }
+    }
 }
 
 struct AlbumTrackRowView: View {
     let track: Track
     let trackNumber: Int
+    let artistName: String?
     let onTap: () -> Void
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var isFavorite = false
@@ -390,11 +400,8 @@ struct AlbumTrackRowView: View {
                     
                     // Artist name and duration with dot separator
                     HStack(spacing: 0) {
-                        if let artistId = track.artistId,
-                           let artist = try? DatabaseManager.shared.read({ db in
-                               try Artist.fetchOne(db, key: artistId)
-                           }) {
-                            Text(artist.name)
+                        if let artistName, !artistName.isEmpty {
+                            Text(artistName)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             

@@ -696,6 +696,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         // Apply frequency-specific gains from EQManager
         let eqFrequencies = eqManager.currentEQFrequencies
         let eqGains = eqManager.currentEQGains
+        let eqBandwidths = eqManager.currentEQBandwidths
 
         if !eqFrequencies.isEmpty && !eqGains.isEmpty {
             // Use EQManager's exact frequencies and gains
@@ -708,7 +709,8 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     let band = equalizer.bands[i]
                     band.frequency = Float(eqFrequencies[i])
                     band.gain = Float(eqGains[i])
-                    band.bandwidth = 1.0
+                    let bandwidth = i < eqBandwidths.count ? eqBandwidths[i] : 1.0
+                    band.bandwidth = Float(max(0.05, min(5.0, bandwidth)))
                     band.filterType = .parametric
                     band.bypass = false
                 }
@@ -733,12 +735,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     // Average the frequencies and gains for this group
                     var avgFrequency = 0.0
                     var avgGain = 0.0
+                    var avgBandwidth = 0.0
                     var groupSize = 0
 
                     for j in startIndex..<endIndex {
                         if j < eqFrequencies.count && j < eqGains.count {
                             avgFrequency += eqFrequencies[j]
                             avgGain += eqGains[j]
+                            avgBandwidth += j < eqBandwidths.count ? eqBandwidths[j] : 1.0
                             groupSize += 1
                         }
                     }
@@ -746,12 +750,13 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     if groupSize > 0 {
                         avgFrequency /= Double(groupSize)
                         avgGain /= Double(groupSize)
+                        avgBandwidth /= Double(groupSize)
                     }
 
                     let band = equalizer.bands[i]
                     band.frequency = Float(avgFrequency)
                     band.gain = Float(avgGain)
-                    band.bandwidth = 1.0
+                    band.bandwidth = Float(max(0.05, min(5.0, avgBandwidth)))
                     band.filterType = .parametric
                     band.bypass = false
 

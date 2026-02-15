@@ -50,13 +50,15 @@ class EQManager: ObservableObject {
 
     @Published var availablePresets: [EQPreset] = []
 
-    // We'll use dynamic frequencies based on imported GraphicEQ files
+    // Runtime EQ data used by both AVAudioEngine and SFBAudioEngine backends
     private var eqFrequencies: [Double] = []
     private var eqGains: [Double] = []
+    private var eqBandwidths: [Double] = []
 
     // Public getters for SFBAudioEngine integration
     var currentEQFrequencies: [Double] { eqFrequencies }
     var currentEQGains: [Double] { eqGains }
+    var currentEQBandwidths: [Double] { eqBandwidths }
 
     let databaseManager = DatabaseManager.shared
     private var audioEngine: AVAudioEngine?
@@ -151,7 +153,8 @@ class EQManager: ObservableObject {
                 let band = eqNode.bands[i]
                 band.frequency = Float(eqFrequencies[i])
                 band.gain = i < eqGains.count ? Float(eqGains[i]) : 0.0
-                band.bandwidth = 1.0
+                let bandwidth = i < eqBandwidths.count ? eqBandwidths[i] : 1.0
+                band.bandwidth = Float(max(0.05, min(5.0, bandwidth)))
                 band.filterType = .parametric
                 band.bypass = false
             }
@@ -176,12 +179,14 @@ class EQManager: ObservableObject {
                 // Average the frequencies and gains for this group
                 var avgFrequency = 0.0
                 var avgGain = 0.0
+                var avgBandwidth = 0.0
                 var groupSize = 0
 
                 for j in startIndex..<endIndex {
                     if j < eqFrequencies.count && j < eqGains.count {
                         avgFrequency += eqFrequencies[j]
                         avgGain += eqGains[j]
+                        avgBandwidth += j < eqBandwidths.count ? eqBandwidths[j] : 1.0
                         groupSize += 1
                     }
                 }
@@ -189,12 +194,13 @@ class EQManager: ObservableObject {
                 if groupSize > 0 {
                     avgFrequency /= Double(groupSize)
                     avgGain /= Double(groupSize)
+                    avgBandwidth /= Double(groupSize)
                 }
 
                 let band = eqNode.bands[i]
                 band.frequency = Float(avgFrequency)
                 band.gain = Float(avgGain)
-                band.bandwidth = 1.0
+                band.bandwidth = Float(max(0.05, min(5.0, avgBandwidth)))
                 band.filterType = .parametric
                 band.bypass = false
 
@@ -230,9 +236,11 @@ class EQManager: ObservableObject {
                 await MainActor.run {
                     let newFrequencies = sortedBands.map { $0.frequency }
                     let newGains = sortedBands.map { $0.gain }
+                    let newBandwidths = sortedBands.map { max(0.05, min(5.0, $0.bandwidth)) }
                     
                     self.eqFrequencies = newFrequencies
                     self.eqGains = newGains
+                    self.eqBandwidths = newBandwidths
                     
                     if self.eqNode != nil {
                         self.configureEQBands()
@@ -274,13 +282,25 @@ class EQManager: ObservableObject {
         }
     }
 
-    // Standard 16-band frequencies (ISO standard)
-    static let manual16BandFrequencies: [Double] = [
-        31.25, 62.5, 125, 250, 500, 1000, 2000, 4000, 8000, 16000,
-        32, 64, 128, 256, 512, 1024
-    ].sorted()
+    static func defaultParametricFrequencies(for bandCount: Int) -> [Double] {
+        let clampedBandCount = max(0, min(16, bandCount))
+        guard clampedBandCount > 0 else { return [] }
+        guard clampedBandCount > 1 else { return [1000.0] }
 
-    func createPreset(name: String, frequencies: [Double], gains: [Double], type: EQPresetType = .imported) async throws -> EQPreset {
+        let minFrequency = 20.0
+        let maxFrequency = 20_000.0
+        return (0..<clampedBandCount).map { index in
+            minFrequency * pow(maxFrequency / minFrequency, Double(index) / Double(clampedBandCount - 1))
+        }
+    }
+
+    func createPreset(
+        name: String,
+        frequencies: [Double],
+        gains: [Double],
+        bandwidths: [Double]? = nil,
+        type: EQPresetType = .imported
+    ) async throws -> EQPreset {
         let currentTime = Int64(Date().timeIntervalSince1970)
 
         let preset = EQPreset(
@@ -296,12 +316,13 @@ class EQManager: ObservableObject {
 
         // Create bands for the preset
         let bandCount = min(frequencies.count, gains.count)
+        let bandwidthValues = bandwidths ?? Array(repeating: 1.0, count: bandCount)
         for index in 0..<bandCount {
             let band = EQBand(
                 presetId: savedPreset.id!,
                 frequency: frequencies[index],
                 gain: gains[index],
-                bandwidth: 1.0,
+                bandwidth: index < bandwidthValues.count ? max(0.05, min(5.0, bandwidthValues[index])) : 1.0,
                 bandIndex: index
             )
             try await databaseManager.saveEQBand(band)
@@ -329,7 +350,7 @@ class EQManager: ObservableObject {
         }
     }
 
-    func updatePresetGains(_ preset: EQPreset, frequencies: [Double], gains: [Double]) async throws {
+    func updatePresetBands(_ preset: EQPreset, frequencies: [Double], gains: [Double], bandwidths: [Double]) async throws {
         let currentTime = Int64(Date().timeIntervalSince1970)
 
         try await databaseManager.write { db in
@@ -342,13 +363,13 @@ class EQManager: ObservableObject {
             try db.execute(sql: "DELETE FROM eq_band WHERE preset_id = ?", arguments: [preset.id!])
 
             // Insert new bands
-            let bandCount = min(frequencies.count, gains.count)
+            let bandCount = min(min(frequencies.count, gains.count), bandwidths.count)
             for index in 0..<bandCount {
                 var band = EQBand(
                     presetId: preset.id!,
                     frequency: frequencies[index],
                     gain: gains[index],
-                    bandwidth: 1.0,
+                    bandwidth: max(0.05, min(5.0, bandwidths[index])),
                     bandIndex: index
                 )
                 try band.insert(db)
@@ -361,6 +382,11 @@ class EQManager: ObservableObject {
                 self.applyEQSettings()
             }
         }
+    }
+
+    func updatePresetGains(_ preset: EQPreset, frequencies: [Double], gains: [Double]) async throws {
+        let bandwidths = Array(repeating: 1.0, count: min(frequencies.count, gains.count))
+        try await updatePresetBands(preset, frequencies: frequencies, gains: gains, bandwidths: bandwidths)
     }
 
     private func loadBands(for preset: EQPreset) async throws -> [EQBand] {
@@ -437,12 +463,22 @@ class EQManager: ObservableObject {
         return graphicEQString
     }
 
-    func createManual16BandPreset(name: String) async throws -> EQPreset {
-        // Create a flat 16-band preset with 0dB gain
-        let frequencies = EQManager.manual16BandFrequencies
-        let gains = Array(repeating: 0.0, count: 16)
+    func createManualParametricPreset(name: String, bandCount: Int) async throws -> EQPreset {
+        let frequencies = EQManager.defaultParametricFrequencies(for: bandCount)
+        let gains = Array(repeating: 0.0, count: frequencies.count)
+        let bandwidths = Array(repeating: 1.0, count: frequencies.count)
 
-        return try await createPreset(name: name, frequencies: frequencies, gains: gains, type: .manual)
+        return try await createPreset(
+            name: name,
+            frequencies: frequencies,
+            gains: gains,
+            bandwidths: bandwidths,
+            type: .manual
+        )
+    }
+
+    func createManual16BandPreset(name: String) async throws -> EQPreset {
+        return try await createManualParametricPreset(name: name, bandCount: 16)
     }
 
     func importGraphicEQPreset(from content: String, name: String) async throws -> EQPreset {

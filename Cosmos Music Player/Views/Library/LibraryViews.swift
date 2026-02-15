@@ -993,6 +993,18 @@ struct TrackListContentView: View {
     @StateObject private var playerEngine = PlayerEngine.shared
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var settings = DeleteSettings.load()
+    @State private var displayLimit = 50
+    @State private var artistNameCache: [Int64: String] = [:]
+    private let pageSize = 50
+    private let largeQueueCap = 5000
+
+    private var displayedTracks: [Track] {
+        Array(tracks.prefix(displayLimit))
+    }
+
+    private var trackDisplaySignature: String {
+        "\(tracks.count)-\(tracks.first?.stableId ?? "")-\(tracks.last?.stableId ?? "")"
+    }
     
     private func toggleSelection(for track: Track) {
         if selectedTracks.contains(track.stableId) {
@@ -1008,6 +1020,33 @@ struct TrackListContentView: View {
             recentlyActedTracks.remove(trackId)
         }
     }
+
+    private func queueForPlayback(startingAt selectedTrack: Track) -> [Track] {
+        guard tracks.count > largeQueueCap,
+              let selectedIndex = tracks.firstIndex(where: { $0.stableId == selectedTrack.stableId }) else {
+            return tracks
+        }
+
+        let endIndex = min(selectedIndex + largeQueueCap, tracks.count)
+        return Array(tracks[selectedIndex..<endIndex])
+    }
+
+    private func loadArtistNameCache() {
+        do {
+            artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+        } catch {
+            print("Failed to load artist name cache: \(error)")
+        }
+    }
+
+    private func updateArtworkWindow() {
+        let visibleWindowIds = Array(displayedTracks.suffix(120)).map { $0.stableId }
+        let prefetchIds = Array(tracks.dropFirst(displayLimit).prefix(20)).map { $0.stableId }
+        ArtworkManager.shared.updateVisibleArtworkWindow(
+            visibleTrackIds: visibleWindowIds,
+            prefetchTrackIds: prefetchIds
+        )
+    }
     
     var body: some View {
         if tracks.isEmpty {
@@ -1018,7 +1057,8 @@ struct TrackListContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(tracks, id: \.stableId) { track in
+            List {
+                ForEach(displayedTracks, id: \.stableId) { track in
                 ZStack(alignment: .leading) {
                     HStack(spacing: 0) {
                         if isBulkMode {
@@ -1034,6 +1074,7 @@ struct TrackListContentView: View {
                             track: track,
                             activeTrackId: playerEngine.currentTrack?.stableId,
                             isAudioPlaying: playerEngine.isPlaying,
+                            artistName: track.artistId.flatMap { artistNameCache[$0] },
                             onTap: {
                                 if isBulkMode {
                                     toggleSelection(for: track)
@@ -1043,7 +1084,7 @@ struct TrackListContentView: View {
                                             try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
                                             try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
                                         }
-                                        await appCoordinator.playTrack(track, queue: tracks)
+                                        await appCoordinator.playTrack(track, queue: queueForPlayback(startingAt: track))
                                     }
                                 }
                             },
@@ -1080,9 +1121,34 @@ struct TrackListContentView: View {
                 .listRowSeparator(.hidden).listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             }
+                if displayLimit < tracks.count {
+                    Color.clear
+                        .frame(height: 1)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                        .onAppear {
+                            displayLimit = min(displayLimit + pageSize, tracks.count)
+                        }
+                }
+            }
             .listStyle(PlainListStyle())
             .scrollContentBackground(.hidden)
             .contentMargins(.bottom, 100, for: .scrollContent)
+            .onAppear {
+                displayLimit = min(pageSize, tracks.count)
+                if artistNameCache.isEmpty {
+                    loadArtistNameCache()
+                }
+                updateArtworkWindow()
+            }
+            .onChange(of: trackDisplaySignature) { _, _ in
+                displayLimit = min(pageSize, tracks.count)
+                updateArtworkWindow()
+            }
+            .onChange(of: displayLimit) { _, _ in
+                updateArtworkWindow()
+            }
         }
     }
 }
@@ -1482,8 +1548,16 @@ struct SearchView: View {
         let onNavigateToArtist: (Artist, [Track]) -> Void
         let onNavigateToAlbum: (Album, [Track]) -> Void
         let onNavigateToPlaylist: (Playlist) -> Void
-        @EnvironmentObject private var appCoordinator: AppCoordinator
         @State private var settings = DeleteSettings.load()
+        @State private var artistNameCache: [Int64: String] = [:]
+
+        private func loadArtistCache() {
+            do {
+                artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+            } catch {
+                print("Failed to load search artist cache: \(error)")
+            }
+        }
         
         var body: some View {
             if results.isEmpty {
@@ -1511,7 +1585,12 @@ struct SearchView: View {
                                     .padding(.horizontal, 16)
                                 
                                 ForEach(results.songs, id: \.stableId) { track in
-                                    SearchSongRowView(track: track, allTracks: allTracks, onDismiss: onDismiss)
+                                    SearchSongRowView(
+                                        track: track,
+                                        allTracks: allTracks,
+                                        artistName: track.artistId.flatMap { artistNameCache[$0] },
+                                        onDismiss: onDismiss
+                                    )
                                         .background(
                                             RoundedRectangle(cornerRadius: 12)
                                                 .fill(.ultraThinMaterial)
@@ -1533,7 +1612,6 @@ struct SearchView: View {
                                 ForEach(results.artists, id: \.id) { artist in
                                     SearchArtistRowView(
                                         artist: artist,
-                                        allTracks: allTracks,
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToArtist
                                     )
@@ -1558,7 +1636,7 @@ struct SearchView: View {
                                 ForEach(results.albums, id: \.id) { album in
                                     SearchAlbumRowView(
                                         album: album,
-                                        allTracks: allTracks,
+                                        albumArtistName: album.artistId.flatMap { artistNameCache[$0] },
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToAlbum
                                     )
@@ -1602,6 +1680,13 @@ struct SearchView: View {
                 .safeAreaInset(edge: .bottom) {
                     Color.clear.frame(height: 100) // Space for mini player
                 }
+                .onAppear {
+                    if artistNameCache.isEmpty {
+                        loadArtistCache()
+                    }
+                    let visibleIds = Array(results.songs.prefix(20)).map { $0.stableId }
+                    ArtworkManager.shared.updateVisibleArtworkWindow(visibleTrackIds: visibleIds)
+                }
             }
         }
     }
@@ -1609,21 +1694,33 @@ struct SearchView: View {
     struct SearchSongRowView: View {
         let track: Track
         let allTracks: [Track]
+        let artistName: String?
         let onDismiss: () -> Void
         @EnvironmentObject private var appCoordinator: AppCoordinator
         @StateObject private var playerEngine = PlayerEngine.shared
         @State private var settings = DeleteSettings.load()
         @State private var artworkImage: UIImage?
+        private let largeQueueCap = 5000
         
         private var isCurrentlyPlaying: Bool {
             playerEngine.currentTrack?.stableId == track.stableId
+        }
+
+        private func queueForPlayback() -> [Track] {
+            guard allTracks.count > largeQueueCap,
+                  let selectedIndex = allTracks.firstIndex(where: { $0.stableId == track.stableId }) else {
+                return allTracks
+            }
+
+            let endIndex = min(selectedIndex + largeQueueCap, allTracks.count)
+            return Array(allTracks[selectedIndex..<endIndex])
         }
         
         var body: some View {
             Button(action: {
                 onDismiss()
                 Task {
-                    await appCoordinator.playTrack(track, queue: allTracks)
+                    await appCoordinator.playTrack(track, queue: queueForPlayback())
                 }
             }) {
                 HStack(spacing: 12) {
@@ -1660,15 +1757,10 @@ struct SearchView: View {
                             .minimumScaleFactor(0.8)
                             .multilineTextAlignment(.leading)
                         
-                        HStack(spacing: 4) {
-                            if let artistId = track.artistId,
-                               let artist = try? DatabaseManager.shared.read({ db in
-                                   try Artist.fetchOne(db, key: artistId)
-                               }) {
-                                Text(artist.name)
-                                    .font(.caption)
-                                    .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color.opacity(0.8) : .secondary)
-                            }
+                        if let artistName, !artistName.isEmpty {
+                            Text(artistName)
+                                .font(.caption)
+                                .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color.opacity(0.8) : .secondary)
                         }
                     }
                     
@@ -1720,17 +1812,17 @@ struct SearchView: View {
     
     struct SearchArtistRowView: View {
         let artist: Artist
-        let allTracks: [Track]
         let onDismiss: () -> Void
         let onNavigate: (Artist, [Track]) -> Void
-        @State private var settings = DeleteSettings.load()
-        
-        private var artistTracks: [Track] {
-            allTracks.filter { $0.artistId == artist.id }
-        }
         
         var body: some View {
             Button(action: {
+                let artistTracks: [Track]
+                if let artistId = artist.id {
+                    artistTracks = (try? DatabaseManager.shared.getTracksByArtistId(artistId)) ?? []
+                } else {
+                    artistTracks = []
+                }
                 onDismiss()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     onNavigate(artist, artistTracks)
@@ -1771,15 +1863,12 @@ struct SearchView: View {
     
     struct SearchAlbumRowView: View {
         let album: Album
-        let allTracks: [Track]
+        let albumArtistName: String?
         let onDismiss: () -> Void
         let onNavigate: (Album, [Track]) -> Void
         @State private var settings = DeleteSettings.load()
         @State private var artworkImage: UIImage?
-        
-        private var albumTracks: [Track] {
-            allTracks.filter { $0.albumId == album.id }
-        }
+        @State private var albumTracks: [Track] = []
         
         var body: some View {
             Button(action: {
@@ -1814,15 +1903,12 @@ struct SearchView: View {
                             .minimumScaleFactor(0.8)
                         
                         HStack(spacing: 4) {
-                            if let artistId = album.artistId,
-                               let artist = try? DatabaseManager.shared.read({ db in
-                                   try Artist.fetchOne(db, key: artistId)
-                               }) {
-                                Text(artist.name)
+                            if let albumArtistName, !albumArtistName.isEmpty {
+                                Text(albumArtistName)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
-                            
+
                             Text("• \(Localized.album)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -1845,14 +1931,24 @@ struct SearchView: View {
             }
             .buttonStyle(PlainButtonStyle())
             .onAppear {
-                loadAlbumArtwork()
+                loadAlbumData()
             }
         }
         
-        private func loadAlbumArtwork() {
-            guard let firstTrack = albumTracks.first else { return }
+        private func loadAlbumData() {
+            guard let albumId = album.id else { return }
+
             Task {
-                artworkImage = await ArtworkManager.shared.getArtwork(for: firstTrack)
+                let tracks = (try? DatabaseManager.shared.getTracksByAlbumId(albumId)) ?? []
+                await MainActor.run {
+                    albumTracks = tracks
+                }
+
+                guard let firstTrack = tracks.first else { return }
+                let artwork = await ArtworkManager.shared.getArtwork(for: firstTrack)
+                await MainActor.run {
+                    artworkImage = artwork
+                }
             }
         }
     }
