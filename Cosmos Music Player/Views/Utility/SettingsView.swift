@@ -109,6 +109,17 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
 
+                Section(Localized.librarySection) {
+                    Toggle(Localized.removeFromLibraryOnly, isOn: $deleteSettings.deleteFromLibraryOnly)
+                        .onChange(of: deleteSettings.deleteFromLibraryOnly) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                    Text(Localized.removeFromLibraryOnlyDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Section(Localized.information) {
                     HStack {
                         Text(Localized.version)

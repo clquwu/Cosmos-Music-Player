@@ -546,6 +546,35 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         print("✅ SFBAudioEngineManager paused")
     }
 
+    /// Stop the internal AVAudioEngine so it fully releases audio hardware.
+    /// Call this during an audio session interruption (alarm, phone call) so the
+    /// system sound can play unimpeded.
+    func stopEngineForInterruption() {
+        audioPlayer?.pause()
+        audioPlayer?.withEngine { engine in
+            if engine.isRunning {
+                engine.stop()
+                print("🛑 SFBAudioEngine internal AVAudioEngine stopped for interruption")
+            }
+        }
+        isPlaying = false
+        updateTimer?.invalidate()
+    }
+
+    /// Restart the internal AVAudioEngine after an interruption ends.
+    func restartEngineAfterInterruption() {
+        audioPlayer?.withEngine { engine in
+            if !engine.isRunning {
+                do {
+                    try engine.start()
+                    print("🔊 SFBAudioEngine internal AVAudioEngine restarted after interruption")
+                } catch {
+                    print("⚠️ Failed to restart SFBAudioEngine AVAudioEngine: \(error)")
+                }
+            }
+        }
+    }
+
     func stop() {
         audioPlayer?.stop()
         isPlaying = false

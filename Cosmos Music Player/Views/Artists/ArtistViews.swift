@@ -217,8 +217,8 @@ struct ArtistDetailScreen: View {
                 VStack(spacing: 0) {
                     headerSection(geometry: geometry)
                     VStack(spacing: 20) {
-                        if !artistTracks.isEmpty { songsSection }
                         if !artistAlbums.isEmpty { albumsSection }
+                        if !artistTracks.isEmpty { songsSection }
                     }
                     .padding(.top, 20)
                     .padding(.bottom, 100) // Add padding for mini player
@@ -233,8 +233,8 @@ struct ArtistDetailScreen: View {
         ScrollView {
             VStack(spacing: 20) {
                 simpleHeader
-                if !artistTracks.isEmpty { songsSection }
                 if !artistAlbums.isEmpty { albumsSection }
+                if !artistTracks.isEmpty { songsSection }
             }
             .padding(.bottom, 100) // Add padding for mini player
         }
@@ -802,21 +802,21 @@ struct ArtistTrackRowView: View {
     private func deleteFile() {
         Task {
             do {
-                let url = URL(fileURLWithPath: track.path)
-                
-                // Delete file from storage
-                try FileManager.default.removeItem(at: url)
-                print("🗑️ Deleted file from storage: \(track.title)")
-                
-                // Delete from database with cleanup of orphaned relations
+                let settings = DeleteSettings.load()
+                if settings.deleteFromLibraryOnly {
+                    DeleteSettings.addExcludedTrack(track.stableId)
+                } else {
+                    do {
+                        try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
+                    } catch {
+                        print("⚠️ Could not remove file from disk: \(error.localizedDescription)")
+                    }
+                }
+
                 try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
-                print("✅ Database deletion completed successfully")
-                
-                // Notify UI to refresh
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
-                
             } catch {
-                print("❌ Failed to delete file: \(error)")
+                print("❌ Failed to delete track: \(error)")
             }
         }
     }

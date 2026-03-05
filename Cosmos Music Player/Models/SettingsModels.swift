@@ -58,6 +58,7 @@ struct DeleteSettings: Codable {
     var backgroundColorChoice: BackgroundColor = .violet
     var forceDarkMode: Bool = false
     var dsdPlaybackMode: DSDPlaybackMode = .pcm
+    var deleteFromLibraryOnly: Bool = false
     var lastLibraryScanDate: Date? = nil
 
     static func load() -> DeleteSettings {
@@ -72,6 +73,31 @@ struct DeleteSettings: Codable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "DeleteSettings")
         }
+    }
+
+    // MARK: - Excluded Tracks (library-only deletions)
+
+    private static let excludedTracksKey = "ExcludedTrackStableIds"
+
+    static func addExcludedTrack(_ stableId: String) {
+        var excluded = excludedTrackIds()
+        excluded.insert(stableId)
+        UserDefaults.standard.set(Array(excluded), forKey: excludedTracksKey)
+    }
+
+    static func isTrackExcluded(_ stableId: String) -> Bool {
+        return excludedTrackIds().contains(stableId)
+    }
+
+    static func removeExcludedTrack(_ stableId: String) {
+        var excluded = excludedTrackIds()
+        excluded.remove(stableId)
+        UserDefaults.standard.set(Array(excluded), forKey: excludedTracksKey)
+    }
+
+    private static func excludedTrackIds() -> Set<String> {
+        let array = UserDefaults.standard.stringArray(forKey: excludedTracksKey) ?? []
+        return Set(array)
     }
 }
 

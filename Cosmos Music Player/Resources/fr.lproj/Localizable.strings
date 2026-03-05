@@ -97,6 +97,9 @@
 "override_system_appearance" = "Remplacer l'apparence du système et forcer l'application à utiliser le mode sombre.";
 "background_color" = "Couleur d'arrière-plan";
 "choose_color_theme" = "Choisissez le thème de couleur pour les effets d'arrière-plan sur tous les écrans.";
+"library_section" = "Bibliothèque";
+"remove_from_library_only" = "Supprimer de la bibliothèque uniquement";
+"remove_from_library_only_description" = "Lorsque cette option est activée, la suppression d'une piste la retire uniquement de la bibliothèque. Le fichier restera sur le disque.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Ajouter aux favoris";

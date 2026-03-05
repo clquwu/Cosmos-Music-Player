@@ -1158,12 +1158,21 @@ struct PlaylistTrackRowView: View {
     private func deleteFile() {
         Task {
             do {
-                let url = URL(fileURLWithPath: track.path)
-                try FileManager.default.removeItem(at: url)
+                let settings = DeleteSettings.load()
+                if settings.deleteFromLibraryOnly {
+                    DeleteSettings.addExcludedTrack(track.stableId)
+                } else {
+                    do {
+                        try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
+                    } catch {
+                        print("⚠️ Could not remove file from disk: \(error.localizedDescription)")
+                    }
+                }
+
                 try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
-                print("❌ Failed to delete file: \(error)")
+                print("❌ Failed to delete track: \(error)")
             }
         }
     }

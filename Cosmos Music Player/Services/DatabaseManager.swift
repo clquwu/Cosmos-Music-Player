@@ -948,6 +948,29 @@ class DatabaseManager: @unchecked Sendable {
         // Clean up orphaned albums and artists after track deletion
         try cleanupOrphanedAlbums()
         try cleanupOrphanedArtists()
+
+        // Remove stored bookmark so the file won't be re-imported
+        removeExternalFileBookmark(for: stableId)
+    }
+
+    private func removeExternalFileBookmark(for stableId: String) {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else { return }
+
+        do {
+            let data = try Data(contentsOf: bookmarksURL)
+            guard var bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else { return }
+
+            guard bookmarks.removeValue(forKey: stableId) != nil else { return }
+
+            let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
+            try plistData.write(to: bookmarksURL)
+            print("🔖 Removed external file bookmark for stableId: \(stableId)")
+        } catch {
+            print("⚠️ Failed to remove external file bookmark: \(error.localizedDescription)")
+        }
     }
 
     func cleanupOrphanedAlbums() throws {

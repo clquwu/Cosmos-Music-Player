@@ -97,6 +97,9 @@
 "override_system_appearance" = "Override system appearance and force the app to use dark mode.";
 "background_color" = "Background Color";
 "choose_color_theme" = "Choose the color theme for background effects across all screens.";
+"library_section" = "Library";
+"remove_from_library_only" = "Remove from library only";
+"remove_from_library_only_description" = "When enabled, deleting a track only removes it from the library. The file will remain on disk.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Add to Liked Songs";

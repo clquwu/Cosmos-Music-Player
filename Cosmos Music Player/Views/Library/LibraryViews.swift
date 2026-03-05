@@ -109,7 +109,8 @@ struct LibraryView: View {
     
     private func importMusicFiles(_ urls: [URL]) {
         Task {
-            var processedCount = 0
+            var addedCount = 0
+            var skippedCount = 0
             
             for url in urls {
                 // Reject network URLs
@@ -134,31 +135,49 @@ struct LibraryView: View {
                     
                     // Store bookmark data for this file
                     await storeBookmarkData(bookmarkData, for: url)
-                    
+
                     // Process the file directly from its original location
-                    await libraryIndexer.processExternalFile(url)
-                    processedCount += 1
-                    print("Processed and bookmarked file from original location: \(url.lastPathComponent)")
+                    let imported = await libraryIndexer.processExternalFile(url, allowExcludedReimport: true)
+                    if imported {
+                        addedCount += 1
+                        print("✅ Imported and bookmarked file from original location: \(url.lastPathComponent)")
+                    } else {
+                        skippedCount += 1
+                        print("⏭️ Skipped import (already exists/excluded/error): \(url.lastPathComponent)")
+                    }
                     
                 } catch {
                     print("Failed to create bookmark for \(url.lastPathComponent): \(error)")
                     
                     // Still try to process the file even if bookmark creation fails
-                    await libraryIndexer.processExternalFile(url)
-                    processedCount += 1
-                    print("Processed file from original location (no bookmark): \(url.lastPathComponent)")
+                    let imported = await libraryIndexer.processExternalFile(url, allowExcludedReimport: true)
+                    if imported {
+                        addedCount += 1
+                        print("✅ Imported file from original location (no bookmark): \(url.lastPathComponent)")
+                    } else {
+                        skippedCount += 1
+                        print("⏭️ Skipped import (already exists/excluded/error): \(url.lastPathComponent)")
+                    }
                 }
             }
             
             // Show feedback
             await MainActor.run {
-                if processedCount > 0 {
+                if addedCount > 0 || skippedCount > 0 {
                     syncToastIcon = "plus.circle.fill"
                     syncToastColor = .green
-                    if processedCount == 1 {
-                        syncToastMessage = "1 song processed"
+                    if skippedCount == 0 {
+                        if addedCount == 1 {
+                            syncToastMessage = "1 song imported"
+                        } else {
+                            syncToastMessage = "\(addedCount) songs imported"
+                        }
+                    } else if addedCount == 0 {
+                        syncToastIcon = "info.circle.fill"
+                        syncToastColor = .blue
+                        syncToastMessage = "\(skippedCount) already in library"
                     } else {
-                        syncToastMessage = "\(processedCount) songs processed"
+                        syncToastMessage = "\(addedCount) imported, \(skippedCount) skipped"
                     }
                     
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -175,7 +194,7 @@ struct LibraryView: View {
             }
             
             // Trigger library refresh to update UI
-            if processedCount > 0, let onManualSync = onManualSync {
+            if addedCount > 0, let onManualSync = onManualSync {
                 _ = await onManualSync()
             }
         }
@@ -863,9 +882,14 @@ struct TrackListView: View {
     
     private func bulkDelete() {
         Task {
+            let deleteSettings = DeleteSettings.load()
             for trackId in selectedTracks {
                 if let track = sortedTracks.first(where: { $0.stableId == trackId }) {
-                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
+                    if deleteSettings.deleteFromLibraryOnly {
+                        DeleteSettings.addExcludedTrack(track.stableId)
+                    } else {
+                        try? FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
+                    }
                     try? DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 }
             }
@@ -1364,6 +1388,25 @@ struct SearchView: View {
                     artists = try DatabaseManager.shared.searchArtists(query: normalizedQuery, limit: 20)
                     albums = try DatabaseManager.shared.searchAlbums(query: normalizedQuery, limit: 30)
                     playlists = try DatabaseManager.shared.searchPlaylists(query: normalizedQuery, limit: 15)
+
+                    // Also include songs and albums from matched artists
+                    let matchedArtistIds = artists.compactMap { $0.id }
+                    if !matchedArtistIds.isEmpty {
+                        let existingSongIds = Set(songs.map { $0.stableId })
+                        let existingAlbumIds = Set(albums.compactMap { $0.id })
+
+                        for artistId in matchedArtistIds {
+                            let artistTracks = try DatabaseManager.shared.getTracksByArtistId(artistId)
+                            for track in artistTracks where !existingSongIds.contains(track.stableId) {
+                                songs.append(track)
+                            }
+
+                            let allAlbums = try DatabaseManager.shared.getAllAlbums()
+                            for album in allAlbums where album.artistId == artistId && !existingAlbumIds.contains(album.id!) {
+                                albums.append(album)
+                            }
+                        }
+                    }
                 } catch {
                     print("Search error: \(error)")
                 }
@@ -1577,13 +1620,14 @@ struct SearchView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
+                        // Songs
                         if selectedCategory == .all || selectedCategory == .songs, !results.songs.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(Localized.songs)
                                     .font(.title3)
                                     .fontWeight(.bold)
                                     .padding(.horizontal, 16)
-                                
+
                                 ForEach(results.songs, id: \.stableId) { track in
                                     SearchSongRowView(
                                         track: track,
@@ -1591,48 +1635,20 @@ struct SearchView: View {
                                         artistName: track.artistId.flatMap { artistNameCache[$0] },
                                         onDismiss: onDismiss
                                     )
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 12)
-                                                .fill(.ultraThinMaterial)
-                                                .opacity(0.7)
-                                        )
-                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                        .padding(.horizontal, 16)
-                                }
-                            }
-                        }
-                        
-                        if selectedCategory == .all || selectedCategory == .artists, !results.artists.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(Localized.artists)
-                                    .font(.title3)
-                                    .fontWeight(.bold)
-                                    .padding(.horizontal, 16)
-                                
-                                ForEach(results.artists, id: \.id) { artist in
-                                    SearchArtistRowView(
-                                        artist: artist,
-                                        onDismiss: onDismiss,
-                                        onNavigate: onNavigateToArtist
-                                    )
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .fill(.ultraThinMaterial)
-                                            .opacity(0.7)
-                                    )
                                     .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
                                     .padding(.horizontal, 16)
                                 }
                             }
                         }
-                        
+
+                        // Albums (also shown when Artists category is selected, grouped by artist)
                         if selectedCategory == .all || selectedCategory == .albums, !results.albums.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(Localized.albums)
                                     .font(.title3)
                                     .fontWeight(.bold)
                                     .padding(.horizontal, 16)
-                                
+
                                 ForEach(results.albums, id: \.id) { album in
                                     SearchAlbumRowView(
                                         album: album,
@@ -1650,14 +1666,50 @@ struct SearchView: View {
                                 }
                             }
                         }
-                        
+
+                        // Artists - show artist row + their albums underneath
+                        if selectedCategory == .all || selectedCategory == .artists, !results.artists.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(Localized.artists)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                    .padding(.horizontal, 16)
+
+                                ForEach(results.artists, id: \.id) { artist in
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        SearchArtistRowView(
+                                            artist: artist,
+                                            onDismiss: onDismiss,
+                                            onNavigate: onNavigateToArtist
+                                        )
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .fill(.ultraThinMaterial)
+                                                .opacity(0.7)
+                                        )
+                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+                                        .padding(.horizontal, 16)
+
+                                        // Show this artist's albums below
+                                        SearchArtistAlbumsRow(
+                                            artist: artist,
+                                            onDismiss: onDismiss,
+                                            onNavigateToAlbum: onNavigateToAlbum
+                                        )
+                                    }
+                                    .padding(.bottom, 4)
+                                }
+                            }
+                        }
+
+                        // Playlists
                         if selectedCategory == .all || selectedCategory == .playlists, !results.playlists.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(Localized.playlists)
                                     .font(.title3)
                                     .fontWeight(.bold)
                                     .padding(.horizontal, 16)
-                                
+
                                 ForEach(results.playlists, id: \.id) { playlist in
                                     SearchPlaylistRowView(
                                         playlist: playlist,
@@ -1700,8 +1752,15 @@ struct SearchView: View {
         @StateObject private var playerEngine = PlayerEngine.shared
         @State private var settings = DeleteSettings.load()
         @State private var artworkImage: UIImage?
+        @State private var swipeOffset: CGFloat = 0
+        @State private var swipeAction: SwipeAction = .none
         private let largeQueueCap = 5000
-        
+        private let swipeThreshold: CGFloat = 80
+
+        private enum SwipeAction {
+            case none, playNext, addToQueue
+        }
+
         private var isCurrentlyPlaying: Bool {
             playerEngine.currentTrack?.stableId == track.stableId
         }
@@ -1715,14 +1774,41 @@ struct SearchView: View {
             let endIndex = min(selectedIndex + largeQueueCap, allTracks.count)
             return Array(allTracks[selectedIndex..<endIndex])
         }
-        
+
         var body: some View {
-            Button(action: {
-                onDismiss()
-                Task {
-                    await appCoordinator.playTrack(track, queue: queueForPlayback())
+            ZStack {
+                // Swipe bubble icons
+                HStack {
+                    // Left side - Play Next bubble (appears on right swipe)
+                    if swipeOffset > 0 {
+                        Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(settings.backgroundColorChoice.color)
+                            .clipShape(Circle())
+                            .opacity(min(Double(swipeOffset) / swipeThreshold, 1.0))
+                            .scaleEffect(min(Double(swipeOffset) / swipeThreshold, 1.0))
+                            .padding(.leading, 8)
+                    }
+
+                    Spacer()
+
+                    // Right side - Add to Queue bubble (appears on left swipe)
+                    if swipeOffset < 0 {
+                        Image(systemName: "text.append")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(.blue)
+                            .clipShape(Circle())
+                            .opacity(min(Double(-swipeOffset) / swipeThreshold, 1.0))
+                            .scaleEffect(min(Double(-swipeOffset) / swipeThreshold, 1.0))
+                            .padding(.trailing, 8)
+                    }
                 }
-            }) {
+
+                // Main content
                 HStack(spacing: 12) {
                     // Album artwork
                     ZStack {
@@ -1740,14 +1826,14 @@ struct SearchView: View {
                         .frame(width: 40, height: 40)
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .background(Color(.systemGray5))
-                        
+
                         if isCurrentlyPlaying {
                             RoundedRectangle(cornerRadius: 6)
                                 .stroke(settings.backgroundColorChoice.color, lineWidth: 1.5)
                                 .frame(width: 40, height: 40)
                         }
                     }
-                    
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text(track.title)
                             .font(.body)
@@ -1756,20 +1842,20 @@ struct SearchView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                             .multilineTextAlignment(.leading)
-                        
+
                         if let artistName, !artistName.isEmpty {
                             Text(artistName)
                                 .font(.caption)
                                 .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color.opacity(0.8) : .secondary)
                         }
                     }
-                    
+
                     Spacer()
-                    
-                    // Currently playing indicator (Deezer-style equalizer)
+
+                    // Currently playing indicator
                     if isCurrentlyPlaying {
                         let eqKey = "\(playerEngine.isPlaying && isCurrentlyPlaying)-\(playerEngine.currentTrack?.stableId ?? "")"
-                        
+
                         EqualizerBarsExact(
                             color: settings.backgroundColorChoice.color,
                             isActive: playerEngine.isPlaying && isCurrentlyPlaying,
@@ -1778,7 +1864,7 @@ struct SearchView: View {
                         )
                         .id(eqKey)
                     }
-                    
+
                     if let duration = track.durationMs {
                         Text(formatDuration(duration))
                             .font(.caption)
@@ -1787,27 +1873,65 @@ struct SearchView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.7)
+                )
+                .offset(x: swipeOffset)
+                .gesture(
+                    DragGesture(minimumDistance: 20)
+                        .onChanged { value in
+                            swipeOffset = value.translation.width
+                            if swipeOffset > swipeThreshold {
+                                swipeAction = .playNext
+                            } else if swipeOffset < -swipeThreshold {
+                                swipeAction = .addToQueue
+                            } else {
+                                swipeAction = .none
+                            }
+                        }
+                        .onEnded { _ in
+                            withAnimation(.spring(response: 0.3)) {
+                                switch swipeAction {
+                                case .playNext:
+                                    playerEngine.insertNext(track)
+                                case .addToQueue:
+                                    playerEngine.addToQueue(track)
+                                case .none:
+                                    break
+                                }
+                                swipeOffset = 0
+                                swipeAction = .none
+                            }
+                        }
+                )
                 .contentShape(Rectangle())
+                .onTapGesture {
+                    onDismiss()
+                    Task {
+                        await appCoordinator.playTrack(track, queue: queueForPlayback())
+                    }
+                }
             }
-            .buttonStyle(PlainButtonStyle())
             .onAppear {
                 loadArtwork()
             }
         }
-        
+
         private func loadArtwork() {
             Task {
                 artworkImage = await ArtworkManager.shared.getArtwork(for: track)
             }
         }
-        
+
         private func formatDuration(_ milliseconds: Int) -> String {
             let seconds = milliseconds / 1000
             let minutes = seconds / 60
             let remainingSeconds = seconds % 60
             return String(format: "%d:%02d", minutes, remainingSeconds)
         }
-        
+
     }
     
     struct SearchArtistRowView: View {
@@ -1861,6 +1985,100 @@ struct SearchView: View {
         }
     }
     
+    struct SearchArtistAlbumsRow: View {
+        let artist: Artist
+        let onDismiss: () -> Void
+        let onNavigateToAlbum: (Album, [Track]) -> Void
+        @State private var artistAlbums: [Album] = []
+        @State private var artistTracks: [Track] = []
+
+        var body: some View {
+            Group {
+                if !artistAlbums.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(artistAlbums, id: \.id) { album in
+                                let albumTracks = artistTracks.filter { $0.albumId == album.id }
+                                Button {
+                                    onDismiss()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                        onNavigateToAlbum(album, albumTracks)
+                                    }
+                                } label: {
+                                    SearchArtistAlbumCard(album: album, tracks: artistTracks)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                    }
+                }
+            }
+            .onAppear { loadArtistData() }
+        }
+
+        private func loadArtistData() {
+            guard let artistId = artist.id else { return }
+            Task {
+                let tracks = (try? DatabaseManager.shared.getTracksByArtistId(artistId)) ?? []
+                let allAlbums = (try? DatabaseManager.shared.getAllAlbums()) ?? []
+                let albums = allAlbums.filter { $0.artistId == artistId }
+                await MainActor.run {
+                    artistTracks = tracks
+                    artistAlbums = albums
+                }
+            }
+        }
+
+        struct SearchArtistAlbumCard: View {
+            let album: Album
+            let tracks: [Track]
+            @State private var artworkImage: UIImage?
+
+            var body: some View {
+                VStack(spacing: 4) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(.systemGray5))
+                            .frame(width: 80, height: 80)
+
+                        if let image = artworkImage {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        } else {
+                            Image(systemName: "opticaldisc.fill")
+                                .font(.title3)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Text(album.title)
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(width: 80)
+                        .foregroundColor(.primary)
+                }
+                .onAppear { loadArtwork() }
+            }
+
+            private func loadArtwork() {
+                let albumTracks = tracks.filter { $0.albumId == album.id }
+                guard let firstTrack = albumTracks.first else { return }
+                Task {
+                    let image = await ArtworkManager.shared.getArtwork(for: firstTrack)
+                    await MainActor.run { artworkImage = image }
+                }
+            }
+        }
+
+    }
+
     struct SearchAlbumRowView: View {
         let album: Album
         let albumArtistName: String?

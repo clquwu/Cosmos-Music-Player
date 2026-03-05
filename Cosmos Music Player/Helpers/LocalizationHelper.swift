@@ -112,6 +112,9 @@ struct Localized {
     static let overrideSystemAppearance = "override_system_appearance".localized
     static let backgroundColor = "background_color".localized
     static let chooseColorTheme = "choose_color_theme".localized
+    static let librarySection = "library_section".localized
+    static let removeFromLibraryOnly = "remove_from_library_only".localized
+    static let removeFromLibraryOnlyDescription = "remove_from_library_only_description".localized
     
     // MARK: - Liked Songs Actions
     static let addToLikedSongs = "add_to_liked_songs".localized

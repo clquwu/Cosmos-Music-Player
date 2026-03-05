@@ -103,6 +103,12 @@ struct Cosmos_Music_PlayerApp: App {
 
         // Configure audio for background playback - critical for SFBAudioEngine stability
         Task { @MainActor in
+            // Don't touch audio session if interrupted by alarm/call
+            guard !PlayerEngine.shared.isAudioSessionInterrupted else {
+                print("🎧 Audio session interrupted - skipping background optimization")
+                return
+            }
+
             // Optimize SFBAudioEngine for lock screen stability
             if PlayerEngine.shared.isPlaying {
                 await optimizeSFBAudioForBackground()
@@ -159,14 +165,20 @@ struct Cosmos_Music_PlayerApp: App {
     }
     
     private func handleWillResignActive() {
+        // Don't re-grab the audio session if we're being interrupted by an alarm or call
+        guard !PlayerEngine.shared.isAudioSessionInterrupted else {
+            print("🎧 Audio session interrupted (alarm/call) - skipping session keepalive")
+            return
+        }
+
         // Re-assert the session as we background - no mixWithOthers in background
         do {
             let s = AVAudioSession.sharedInstance()
             try s.setCategory(.playback, mode: .default, options: []) // no mixWithOthers in bg
             try s.setActive(true, options: [])
             print("🎧 Session keepalive on resign active - success")
-        } catch { 
-            print("❌ Session keepalive fail:", error) 
+        } catch {
+            print("❌ Session keepalive fail:", error)
         }
     }
     

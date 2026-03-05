@@ -138,11 +138,12 @@ class LibraryIndexer: NSObject, ObservableObject {
         startOfflineMode()
     }
 
-    func processExternalFile(_ fileURL: URL) async {
+    @discardableResult
+    func processExternalFile(_ fileURL: URL, allowExcludedReimport: Bool = false) async -> Bool {
         // Reject network URLs
         if let scheme = fileURL.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
             print("❌ Rejected network URL: \(fileURL.absoluteString)")
-            return
+            return false
         }
 
         do {
@@ -154,9 +155,27 @@ class LibraryIndexer: NSObject, ObservableObject {
             print("🆔 Generated stable ID: \(stableId)")
 
             // Check if track already exists in database
-            if try databaseManager.getTrack(byStableId: stableId) != nil {
+            if let existingTrack = try databaseManager.getTrack(byStableId: stableId) {
                 print("⏭️ Track already exists in database: \(fileURL.lastPathComponent)")
-                return
+                print("📍 Existing DB path: \(existingTrack.path)")
+                if allowExcludedReimport && DeleteSettings.isTrackExcluded(stableId) {
+                    DeleteSettings.removeExcludedTrack(stableId)
+                    print("✅ Cleared exclusion for already-present track: \(fileURL.lastPathComponent)")
+                }
+                if allowExcludedReimport {
+                    NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+                }
+                return false
+            }
+
+            // Check if track was excluded (removed from library only)
+            let isExcluded = DeleteSettings.isTrackExcluded(stableId)
+            if isExcluded && !allowExcludedReimport {
+                print("⏭️ Track excluded from library: \(fileURL.lastPathComponent)")
+                return false
+            }
+            if isExcluded && allowExcludedReimport {
+                print("🔁 Re-importing excluded track by user request: \(fileURL.lastPathComponent)")
             }
 
             print("🎶 Parsing external audio file: \(fileURL.lastPathComponent)")
@@ -177,13 +196,23 @@ class LibraryIndexer: NSObject, ObservableObject {
                 NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
             }
 
+            // Remove only this track from exclusion after successful explicit re-import.
+            if isExcluded && allowExcludedReimport {
+                DeleteSettings.removeExcludedTrack(stableId)
+                print("✅ Cleared exclusion for re-imported track: \(fileURL.lastPathComponent)")
+            }
+
+            return true
+
         } catch LibraryIndexerError.parseTimeout {
             print("⏰ Timeout parsing external audio file: \(fileURL.lastPathComponent)")
             print("❌ Skipping external file due to parsing timeout")
+            return false
         } catch {
             print("❌ Failed to process external track at \(fileURL.lastPathComponent): \(error)")
             print("❌ Error type: \(type(of: error))")
             print("❌ Error details: \(String(describing: error))")
+            return false
         }
     }
     
@@ -505,7 +534,13 @@ class LibraryIndexer: NSObject, ObservableObject {
                 print("⏭️ Track already exists in database: \(fileURL.lastPathComponent)")
                 return
             }
-            
+
+            // Check if track was excluded (removed from library only)
+            if DeleteSettings.isTrackExcluded(stableId) {
+                print("⏭️ Track excluded from library: \(fileURL.lastPathComponent)")
+                return
+            }
+
             print("🎶 Parsing audio file: \(fileURL.lastPathComponent)")
             let track = try await parseAudioFile(at: fileURL, stableId: stableId)
             print("✅ Audio file parsed successfully: \(track.title)")
@@ -572,6 +607,10 @@ class LibraryIndexer: NSObject, ObservableObject {
             let stableId = try generateStableId(for: fileURL)
 
             if try databaseManager.getTrack(byStableId: stableId) != nil {
+                return
+            }
+
+            if DeleteSettings.isTrackExcluded(stableId) {
                 return
             }
 
@@ -768,7 +807,7 @@ class LibraryIndexer: NSObject, ObservableObject {
                     }
 
                     // Process the file directly from its original location
-                    await processExternalFile(url)
+                    await processExternalFile(url, allowExcludedReimport: true)
                     print("✅ Processed shared file from original location: \(filename)")
 
                     // Store the bookmark permanently for future access after app updates
@@ -988,6 +1027,12 @@ class LibraryIndexer: NSObject, ObservableObject {
                         continue
                     }
 
+                    // Check if track was excluded (removed from library only)
+                    if DeleteSettings.isTrackExcluded(stableId) {
+                        print("⏭️ Track excluded from library: \(resolvedURL.lastPathComponent)")
+                        continue
+                    }
+
                     // File not in database yet - process it
                     // Start accessing security-scoped resource
                     guard resolvedURL.startAccessingSecurityScopedResource() else {
@@ -1150,8 +1195,8 @@ class AudioMetadataParser {
         
         print("📊 FLAC file size: \(fileSize) bytes for \(url.lastPathComponent)")
         
-        // Don't try to read files that are too large (>100MB) or too small (<1KB)
-        guard fileSize > 1024 && fileSize < 300_000_000 else {
+        // or too small (<1KB)
+        guard fileSize > 1024 else {
             print("❌ FLAC file size is unreasonable: \(fileSize) bytes")
             throw AudioParseError.fileSizeError
         }

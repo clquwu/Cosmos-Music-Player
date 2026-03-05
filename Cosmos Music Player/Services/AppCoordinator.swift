@@ -606,13 +606,13 @@ class AppCoordinator: ObservableObject {
     
     func manualSync() async {
         print("🔄 Manual sync triggered - attempting library indexing")
-        
+
         // Check if we're already indexing
         if libraryIndexer.isIndexing {
             print("⚠️ Library indexing already in progress - skipping manual sync")
             return
         }
-        
+
         // For manual sync, always attempt to re-index to catch new files
         print("📋 Performing manual sync - user requested fresh library scan")
         await startLibraryIndexing()

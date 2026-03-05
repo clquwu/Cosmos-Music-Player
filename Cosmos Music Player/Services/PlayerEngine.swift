@@ -60,6 +60,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var hasSetupAudioEngine = false
     private var hasSetupAudioSession = false
     private var hasSetupSiriBackgroundSession = false
+    private(set) var isAudioSessionInterrupted = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
@@ -241,27 +242,71 @@ class PlayerEngine: NSObject, ObservableObject {
         switch type {
         case .began:
             print("🚫 Audio session interruption began - pausing playback")
+            isAudioSessionInterrupted = true
+
             // Save current playback position before interruption
             let savedPosition = playbackTime
             let wasPlaying = isPlaying
-            
+
             if isPlaying {
-                pause()
+                if usingSFBEngine {
+                    // Stop the SFBAudioEngine's internal AVAudioEngine completely
+                    // so it releases the audio hardware for the alarm/call
+                    sfbAudioManager.stopEngineForInterruption()
+                    isPlaying = false
+                    playbackState = .paused
+                    stopPlaybackTimer()
+                    updateNowPlayingInfoEnhanced()
+                } else {
+                    // Stop native AVAudioEngine completely (not just pause)
+                    audioEngine.stop()
+                    isPlaying = false
+                    playbackState = .paused
+                    stopPlaybackTimer()
+                    updateNowPlayingInfoEnhanced()
+                }
             }
-            
-            // IMPORTANT: Don't stop the audio engine during interruption
-            // Stopping it can invalidate the audioFile and cause position loss
-            // The system will handle the interruption, we just need to pause
-            print("⏸️ Keeping audio engine in paused state during interruption")
-            
+
+            // Also stop any silent background players that hold audio hardware
+            stopSilentPlaybackForPause()
+
+            // Deactivate our audio session so the system alarm/call can fully take over
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                print("🔇 Audio session deactivated to yield to system audio")
+            } catch {
+                print("⚠️ Failed to deactivate audio session: \(error)")
+            }
+
             // Restore the saved position (pause() may have updated it)
             playbackTime = savedPosition
             print("💾 Saved playback position: \(savedPosition)s (was playing: \(wasPlaying))")
             
         case .ended:
             print("✅ Audio session interruption ended")
+            isAudioSessionInterrupted = false
             print("💾 Will restore to position: \(playbackTime)s when playback resumes")
-            
+
+            // Re-activate our audio session now that the interruption is over
+            do {
+                try AVAudioSession.sharedInstance().setActive(true, options: [])
+                print("🔊 Audio session re-activated after interruption")
+            } catch {
+                print("⚠️ Failed to re-activate audio session: \(error)")
+            }
+
+            // Restart the audio engine so it's ready for playback resume
+            if usingSFBEngine {
+                sfbAudioManager.restartEngineAfterInterruption()
+            } else {
+                do {
+                    try audioEngine.start()
+                    print("🔊 Native AVAudioEngine restarted after interruption")
+                } catch {
+                    print("⚠️ Failed to restart native AVAudioEngine: \(error)")
+                }
+            }
+
             // Check if we should resume playback
             let shouldResume: Bool
             if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
@@ -272,7 +317,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 shouldResume = false
                 print("🔍 No interruption options - will not auto-resume")
             }
-            
+
             // Only auto-resume if the system tells us to (e.g., after a Siri interruption)
             // Don't auto-resume for user-initiated interruptions (like audio messages)
             if shouldResume && playbackState == .paused {
@@ -280,7 +325,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 play()
             } else {
                 print("⏸️ Not auto-resuming - user must manually resume")
-                
+
                 // Ensure playback state is correct but keep position saved
                 isPlaying = false
                 playbackState = .paused
@@ -345,21 +390,20 @@ class PlayerEngine: NSObject, ObservableObject {
     
     @objc private func handleMemoryWarning(_ notification: Notification) {
         print("⚠️ Memory warning received - cleaning up audio resources")
-        
+
         Task { @MainActor in
             // Clear cached artwork to free memory
             cachedArtwork = nil
             cachedArtworkTrackId = nil
-            
-            // If not currently playing, stop audio engine to free resources
-            if !isPlaying {
+
+            // Don't touch the audio engine if we're currently loading or playing
+            // Stopping during a load causes the load to fail on large files
+            if !isPlaying && !isLoadingTrack {
                 audioEngine.stop()
+                playerNode.stop()
                 print("🛑 Stopped audio engine due to memory pressure")
             }
-            
-            // Force garbage collection of any retained buffers
-            playerNode.stop()
-            
+
             print("🧹 Cleaned up audio resources due to memory warning")
         }
     }
@@ -939,45 +983,34 @@ class PlayerEngine: NSObject, ObservableObject {
                 usingSFBEngine = false
                 
                 audioFile = try await withCheckedThrowingContinuation { continuation in
-                    DispatchQueue.global(qos: .background).async {
-                        var error: NSError?
-                        let coordinator = NSFileCoordinator()
-                        
-                        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &error) { (readingURL) in
-                            do {
-                                let freshURL = URL(fileURLWithPath: readingURL.path)
-                                print("🎵 Loading native audio file: \(freshURL.lastPathComponent)")
-                                
-                                // Check if this is a DSD file that was rejected by SFBAudioEngine
-                                let fileExtension = freshURL.pathExtension.lowercased()
-                                if fileExtension == "dsf" || fileExtension == "dff" {
-                                    print("⚠️ DSD file rejected by SFBAudioEngine - may be due to sample rate or format incompatibility")
-                                    
-                                    let dsdError = NSError(domain: "PlayerEngine", code: 3001, userInfo: [
-                                        NSLocalizedDescriptionKey: "DSD file not supported",
-                                        NSLocalizedFailureReasonErrorKey: "This DSD file has a sample rate that is too high for playback.",
-                                        NSLocalizedRecoverySuggestionErrorKey: "Try converting this DSD file to a lower sample rate (DSD64) or to a PCM format like FLAC."
-                                    ])
-                                    continuation.resume(throwing: dsdError)
-                                    return
-                                }
-                                
-                                guard FileManager.default.fileExists(atPath: freshURL.path) else {
-                                    continuation.resume(throwing: PlayerError.fileNotFound)
-                                    return
-                                }
-                                
-                                let audioFile = try AVAudioFile(forReading: freshURL)
-                                print("✅ Native AVAudioFile loaded successfully: \(freshURL.lastPathComponent)")
-                                continuation.resume(returning: audioFile)
-                            } catch {
-                                print("❌ Failed to load native AVAudioFile: \(error)")
-                                continuation.resume(throwing: error)
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        do {
+                            print("🎵 Loading native audio file: \(url.lastPathComponent)")
+
+                            // Check if this is a DSD file that was rejected by SFBAudioEngine
+                            let fileExtension = url.pathExtension.lowercased()
+                            if fileExtension == "dsf" || fileExtension == "dff" {
+                                print("⚠️ DSD file rejected by SFBAudioEngine - may be due to sample rate or format incompatibility")
+
+                                let dsdError = NSError(domain: "PlayerEngine", code: 3001, userInfo: [
+                                    NSLocalizedDescriptionKey: "DSD file not supported",
+                                    NSLocalizedFailureReasonErrorKey: "This DSD file has a sample rate that is too high for playback.",
+                                    NSLocalizedRecoverySuggestionErrorKey: "Try converting this DSD file to a lower sample rate (DSD64) or to a PCM format like FLAC."
+                                ])
+                                continuation.resume(throwing: dsdError)
+                                return
                             }
-                        }
-                        
-                        if let error = error {
-                            print("❌ NSFileCoordinator error in PlayerEngine: \(error)")
+
+                            guard FileManager.default.fileExists(atPath: url.path) else {
+                                continuation.resume(throwing: PlayerError.fileNotFound)
+                                return
+                            }
+
+                            let audioFile = try AVAudioFile(forReading: url)
+                            print("✅ Native AVAudioFile loaded successfully: \(url.lastPathComponent)")
+                            continuation.resume(returning: audioFile)
+                        } catch {
+                            print("❌ Failed to load native AVAudioFile: \(error)")
                             continuation.resume(throwing: error)
                         }
                     }
@@ -1566,6 +1599,13 @@ class PlayerEngine: NSObject, ObservableObject {
         // Keep the audio session active to prevent app termination
         Task { @MainActor in
             do {
+                // Don't re-grab the audio session during an interruption (alarm, phone call)
+                // This would prevent the alarm from ringing properly
+                guard !isAudioSessionInterrupted else {
+                    print("🎧 Audio session interrupted, not maintaining session")
+                    return
+                }
+
                 let session = AVAudioSession.sharedInstance()
 
                 // Only maintain session if we're not already active
@@ -2006,126 +2046,73 @@ class PlayerEngine: NSObject, ObservableObject {
     // MARK: - Now Playing Info
     
     private func loadAndCacheArtwork(track: Track) async {
-        guard track.hasEmbeddedArt else { return }
+        // Always try ArtworkManager cache first — avoids re-parsing large files
+        if let uiImage = await ArtworkManager.shared.getArtwork(for: track) {
+            await MainActor.run {
+                let artwork = self.convertUIImageToMPMediaItemArtwork(uiImage)
+                self.cachedArtwork = artwork
+                self.cachedArtworkTrackId = track.stableId
+                self.updateNowPlayingInfoWithCachedArtwork()
+                print("🎨 Cached artwork from ArtworkManager for: \(track.title)")
+            }
+            return
+        }
+
+        // No cached artwork — only then fall back to file parsing
+        guard track.hasEmbeddedArt else {
+            // Mark this track so we don't keep retrying
+            await MainActor.run {
+                self.cachedArtworkTrackId = track.stableId
+            }
+            return
+        }
 
         do {
-            // Ensure file is local first
             let url = URL(fileURLWithPath: track.path)
             try await cloudDownloadManager.ensureLocal(url)
 
-            // Special handling for Opus/OGG files - use ArtworkManager directly
-            let fileExtension = url.pathExtension.lowercased()
-            if fileExtension == "opus" || fileExtension == "ogg" {
-                if let uiImage = await ArtworkManager.shared.getArtwork(for: track) {
-                    print("✅ Loaded Opus/OGG artwork via ArtworkManager")
+            let artwork: MPMediaItemArtwork? = try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    let fileExtension = url.pathExtension.lowercased()
+                    print("🎵 Loading artwork from file: \(url.lastPathComponent)")
 
-                    // Cache the artwork and update now playing info
-                    await MainActor.run {
-                        let artwork = self.convertUIImageToMPMediaItemArtwork(uiImage)
-                        self.cachedArtwork = artwork
-                        self.cachedArtworkTrackId = track.stableId
-                        self.updateNowPlayingInfoWithCachedArtwork()
-                        print("🎨 Cached and updated artwork for: \(track.title)")
-                    }
-                } else {
-                    print("⚠️ No artwork found in Opus/OGG file: \(url.lastPathComponent)")
-                }
-                return
-            }
-
-            // Load artwork using NSFileCoordinator with proper async handling for other formats
-            let artwork = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<MPMediaItemArtwork?, Error>) in
-                DispatchQueue.global(qos: .background).async {
-                    var coordinatorError: NSError?
-                    let coordinator = NSFileCoordinator()
-                    
-                    coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { (readingURL) in
-                        do {
-                            let freshURL = URL(fileURLWithPath: readingURL.path)
-                            print("🎵 Loading artwork from: \(freshURL.lastPathComponent)")
-                            
-                            // Check if file actually exists at path
-                            guard FileManager.default.fileExists(atPath: freshURL.path) else {
-                                print("❌ Artwork file not found at path: \(freshURL.path)")
-                                continuation.resume(returning: nil)
-                                return
-                            }
-                            
-                            // Handle different file formats for artwork extraction
-                            let fileExtension = freshURL.pathExtension.lowercased()
-                            
-                            if fileExtension == "dsf" || fileExtension == "dff" {
-                                // For DSD files, try SFBAudioEngine metadata extraction
-                                if let artwork = self.loadArtworkFromSFBAudioEngine(url: freshURL) {
-                                    print("✅ Loaded DSD artwork via SFBAudioEngine")
-                                    continuation.resume(returning: artwork)
-                                    return
-                                }
-                                
-                                // Fallback to direct file parsing for DSD
-                                if let artwork = self.loadArtworkFromDSDFile(url: freshURL) {
-                                    print("✅ Loaded DSD artwork via direct parsing")
-                                    continuation.resume(returning: artwork)
-                                    return
-                                }
-                                
-                                print("⚠️ No artwork found in DSD file: \(freshURL.lastPathComponent)")
-                                continuation.resume(returning: nil)
-                            } else if fileExtension == "flac" {
-                                // First try with AVAsset (works for some FLAC files)
-                                if let artwork = self.loadArtworkFromAVAsset(url: freshURL) {
-                                    print("✅ Loaded FLAC artwork via AVAsset")
-                                    continuation.resume(returning: artwork)
-                                    return
-                                }
-
-                                // If AVAsset fails, try direct FLAC metadata reading
-                                if let artwork = self.loadArtworkFromFLACMetadata(url: freshURL) {
-                                    print("✅ Loaded FLAC artwork via direct metadata reading")
-                                    continuation.resume(returning: artwork)
-                                    return
-                                }
-
-                                print("⚠️ No artwork found in FLAC file: \(freshURL.lastPathComponent)")
-                                continuation.resume(returning: nil)
-                            } else {
-                                // For MP3/M4A files, use AVAsset
-                                if let artwork = self.loadArtworkFromAVAsset(url: freshURL) {
-                                    print("✅ Loaded artwork via AVAsset for: \(freshURL.lastPathComponent)")
-                                    continuation.resume(returning: artwork)
-                                } else {
-                                    print("⚠️ No artwork found in file: \(freshURL.lastPathComponent)")
-                                    continuation.resume(returning: nil)
-                                }
-                            }
-                            
+                    if fileExtension == "dsf" || fileExtension == "dff" {
+                        if let art = self.loadArtworkFromSFBAudioEngine(url: url) ?? self.loadArtworkFromDSDFile(url: url) {
+                            continuation.resume(returning: art)
+                        } else {
+                            continuation.resume(returning: nil)
                         }
-                    }
-                    
-                    if let error = coordinatorError {
-                        print("❌ NSFileCoordinator error loading artwork: \(error)")
-                        continuation.resume(throwing: error)
+                    } else if fileExtension == "flac" {
+                        if let art = self.loadArtworkFromAVAsset(url: url) ?? self.loadArtworkFromFLACMetadata(url: url) {
+                            continuation.resume(returning: art)
+                        } else {
+                            continuation.resume(returning: nil)
+                        }
+                    } else {
+                        continuation.resume(returning: self.loadArtworkFromAVAsset(url: url))
                     }
                 }
             }
-            
-            // Cache the artwork and update now playing info
+
             await MainActor.run {
                 if let artwork = artwork {
-                    // Cache the artwork
                     self.cachedArtwork = artwork
                     self.cachedArtworkTrackId = track.stableId
-                    
-                    // Update now playing info with cached artwork
                     self.updateNowPlayingInfoWithCachedArtwork()
-                    print("🎨 Cached and updated artwork for: \(track.title)")
+                    print("🎨 Cached artwork from file for: \(track.title)")
                 } else {
-                    print("🎨 No artwork to cache for: \(track.title)")
+                    // Mark as attempted so we don't retry
+                    self.cachedArtworkTrackId = track.stableId
+                    print("🎨 No artwork found for: \(track.title)")
                 }
             }
-            
+
         } catch {
             print("❌ Failed to load artwork for caching: \(error)")
+            // Mark as attempted so we don't keep retrying and crashing on large files
+            await MainActor.run {
+                self.cachedArtworkTrackId = track.stableId
+            }
         }
     }
     
@@ -2605,6 +2592,11 @@ class PlayerEngine: NSObject, ObservableObject {
         hasSetupSiriBackgroundSession = true
         
         // Set up audio session for background (same as handleWillResignActive)
+        // But don't re-grab if interrupted by alarm/call
+        guard !isAudioSessionInterrupted else {
+            print("🎧 Audio session interrupted (alarm/call) - skipping Siri background session keepalive")
+            return
+        }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, options: []) // no mixWithOthers in bg
