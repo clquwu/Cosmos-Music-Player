@@ -1378,6 +1378,53 @@ class AudioMetadataParser {
         let cleaned = gainString.replacingOccurrences(of: " dB", with: "")
         return Double(cleaned)
     }
+
+    private static func parseSlashSeparatedNumber(_ value: String) -> Int? {
+        let firstPart = value.components(separatedBy: "/").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? value
+        return Int(firstPart)
+    }
+
+    // MP4 trkn/disk atoms usually store values as big-endian UInt16 pairs.
+    private static func parseMP4TrackOrDiscData(_ data: Data) -> Int? {
+        let bytes = [UInt8](data)
+
+        if bytes.count >= 4 {
+            let valueAtOffset2 = (Int(bytes[2]) << 8) | Int(bytes[3])
+            if valueAtOffset2 > 0 {
+                return valueAtOffset2
+            }
+        }
+
+        if bytes.count >= 2 {
+            let valueAtOffset0 = (Int(bytes[0]) << 8) | Int(bytes[1])
+            if valueAtOffset0 > 0 {
+                return valueAtOffset0
+            }
+        }
+
+        return nil
+    }
+
+    private static func extractTrackOrDiscNumber(from metadata: AVMetadataItem) async -> Int? {
+        if let stringValue = try? await metadata.load(.stringValue),
+           let parsed = parseSlashSeparatedNumber(stringValue) {
+            return parsed
+        }
+
+        if let numberValue = try? await metadata.load(.numberValue) {
+            let value = numberValue.intValue
+            if value > 0 {
+                return value
+            }
+        }
+
+        if let dataValue = try? await metadata.load(.dataValue),
+           let parsed = parseMP4TrackOrDiscData(dataValue) {
+            return parsed
+        }
+
+        return nil
+    }
     
     private static func parseMp3MetadataSync(from url: URL) async throws -> AudioMetadata {
         print("📖 Reading MP3 metadata for: \(url.lastPathComponent)")
@@ -1444,6 +1491,14 @@ class AudioMetadataParser {
                 default:
                     break
                 }
+
+                if trackNumber == nil, item.commonKey?.rawValue == "trackNumber" {
+                    trackNumber = await extractTrackOrDiscNumber(from: item)
+                }
+
+                if discNumber == nil, item.commonKey?.rawValue == "discNumber" {
+                    discNumber = await extractTrackOrDiscNumber(from: item)
+                }
             }
             
             // Check for additional ID3 tags
@@ -1458,6 +1513,14 @@ class AudioMetadataParser {
                             artist = try? await metadata.load(.stringValue)
                             print("🎤 Found artist in additional common key: \(artist ?? "nil")")
                         }
+                    case "trackNumber":
+                        if trackNumber == nil {
+                            trackNumber = await extractTrackOrDiscNumber(from: metadata)
+                        }
+                    case "discNumber":
+                        if discNumber == nil {
+                            discNumber = await extractTrackOrDiscNumber(from: metadata)
+                        }
                     default:
                         break
                     }
@@ -1465,12 +1528,12 @@ class AudioMetadataParser {
                     print("🔍 Checking ID3 tag: \(identifier.rawValue)")
                     switch identifier.rawValue {
                     case "id3/TRCK":
-                        if let trackString = try? await metadata.load(.stringValue) {
-                            trackNumber = Int(trackString.components(separatedBy: "/").first ?? "")
+                        if trackNumber == nil {
+                            trackNumber = await extractTrackOrDiscNumber(from: metadata)
                         }
                     case "id3/TPOS":
-                        if let discString = try? await metadata.load(.stringValue) {
-                            discNumber = Int(discString.components(separatedBy: "/").first ?? "")
+                        if discNumber == nil {
+                            discNumber = await extractTrackOrDiscNumber(from: metadata)
                         }
                     case "id3/TPE2":
                         albumArtist = try? await metadata.load(.stringValue)
@@ -1493,6 +1556,19 @@ class AudioMetadataParser {
                             album = try? await metadata.load(.stringValue)
                         }
                     default:
+                        let identifierValue = identifier.rawValue.lowercased()
+
+                        // Handle MP4/iTunes metadata identifiers (e.g. trkn/disk)
+                        if trackNumber == nil &&
+                            (identifierValue.contains("trkn") || identifierValue.contains("tracknumber")) {
+                            trackNumber = await extractTrackOrDiscNumber(from: metadata)
+                        }
+
+                        if discNumber == nil &&
+                            (identifierValue.contains("disk") || identifierValue.contains("discnumber")) {
+                            discNumber = await extractTrackOrDiscNumber(from: metadata)
+                        }
+
                         // Debug: log unhandled tags that might contain artist info
                         if identifier.rawValue.contains("ART") || identifier.rawValue.contains("TPE") {
                             let value = try? await metadata.load(.stringValue)
