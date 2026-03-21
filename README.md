@@ -235,6 +235,11 @@ You have two storage options:
 3. Add your FLAC, MP3, or WAV music files to this folder
 4. Files will sync to all your devices signed into the same iCloud account
 
+If you have "Optimize Storage" enabled in iCloud Drive (which is the default setting), syncing files across devices might be slow. You can disable it only on this directory:
+1. Navigate to "iCloud Drive" → "Cosmos Music Player"
+2. Right click or long press this directory
+3. Enable “Keep downloaded”
+
 #### Option 2: Local Storage (This Device Only)
 1. Open Files app on your iOS device
 2. Navigate to "On My iPhone" → "Cosmos Music Player"
