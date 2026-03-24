@@ -98,6 +98,8 @@
 "background_color" = "Couleur d'arrière-plan";
 "choose_color_theme" = "Choisissez le thème de couleur pour les effets d'arrière-plan sur tous les écrans.";
 "library_section" = "Bibliothèque";
+"home_sections" = "Sections de l'accueil";
+"choose_visible_sections" = "Choisissez quelles sections sont visibles sur l'écran d'accueil";
 "remove_from_library_only" = "Supprimer de la bibliothèque uniquement";
 "remove_from_library_only_description" = "Lorsque cette option est activée, la suppression d'une piste la retire uniquement de la bibliothèque. Le fichier restera sur le disque.";
 

@@ -755,6 +755,7 @@ struct PlaylistDetailScreen: View {
             }
             .listStyle(PlainListStyle())
             .scrollContentBackground(.hidden)
+            .contentMargins(.bottom, 100, for: .scrollContent)
             .environment(\.editMode, .constant(isEditMode ? .active : .inactive))
         }
         .navigationBarTitleDisplayMode(.inline)

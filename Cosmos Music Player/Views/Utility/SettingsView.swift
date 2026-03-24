@@ -120,6 +120,36 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                Section {
+                    ForEach($deleteSettings.homeSections) { $section in
+                        HStack {
+                            Image(systemName: section.id.icon)
+                                .foregroundColor(.secondary)
+                                .frame(width: 24)
+
+                            Toggle(section.id.displayName, isOn: $section.isVisible)
+                                .onChange(of: section.isVisible) { _, _ in
+                                    deleteSettings.save()
+                                }
+                        }
+                    }
+                    .onMove { source, destination in
+                        deleteSettings.homeSections.move(fromOffsets: source, toOffset: destination)
+                        deleteSettings.save()
+                    }
+
+                    Text(Localized.chooseVisibleSections)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } header: {
+                    HStack {
+                        Text(Localized.homeSections)
+                        Spacer()
+                        EditButton()
+                            .font(.caption)
+                    }
+                }
+
                 Section(Localized.information) {
                     HStack {
                         Text(Localized.version)

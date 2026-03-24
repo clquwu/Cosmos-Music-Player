@@ -229,8 +229,90 @@ struct LibraryView: View {
             print("Failed to store bookmark data: \(error)")
         }
     }
-    
-    
+
+    @ViewBuilder
+    private func homeSectionView(for sectionId: HomeSectionId) -> some View {
+        switch sectionId {
+        case .allSongs:
+            NavigationLink {
+                AllSongsScreen(tracks: tracks)
+            } label: {
+                LibrarySectionRowView(
+                    title: Localized.allSongs,
+                    subtitle: Localized.songsCountOnly(tracks.count),
+                    icon: "music.note",
+                    color: settings.backgroundColorChoice.color
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+
+        case .likedSongs:
+            NavigationLink {
+                LikedSongsScreen(allTracks: tracks)
+            } label: {
+                LibrarySectionRowView(
+                    title: Localized.likedSongs,
+                    subtitle: Localized.yourFavorites,
+                    icon: "heart.fill",
+                    color: .red
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+
+        case .playlists:
+            NavigationLink {
+                PlaylistsScreen()
+            } label: {
+                LibrarySectionRowView(
+                    title: Localized.playlists,
+                    subtitle: Localized.yourPlaylists,
+                    icon: "music.note.list",
+                    color: .green
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+
+        case .artists:
+            NavigationLink {
+                ArtistsScreen(allTracks: tracks)
+            } label: {
+                LibrarySectionRowView(
+                    title: Localized.artists,
+                    subtitle: Localized.browseByArtist,
+                    icon: "person.2.fill",
+                    color: .purple
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+
+        case .albums:
+            NavigationLink {
+                AlbumsScreen(allTracks: tracks)
+            } label: {
+                LibrarySectionRowView(
+                    title: Localized.albums,
+                    subtitle: Localized.browseByAlbum,
+                    icon: "opticaldisc.fill",
+                    color: .orange
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+
+        case .addSongs:
+            Button(action: {
+                showMusicPicker = true
+            }) {
+                LibrarySectionRowView(
+                    title: Localized.addSongs,
+                    subtitle: Localized.importMusicFiles,
+                    icon: "plus.circle.fill",
+                    color: .blue
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -335,77 +417,9 @@ struct LibraryView: View {
                             }
                             .padding(.leading, 4)
                             .padding(.trailing, 4)
-                            NavigationLink {
-                                AllSongsScreen(tracks: tracks)
-                            } label: {
-                                LibrarySectionRowView(
-                                    title: Localized.allSongs,
-                                    subtitle: Localized.songsCountOnly(tracks.count),
-                                    icon: "music.note",
-                                    color: settings.backgroundColorChoice.color
-                                )
+                            ForEach(settings.homeSections.filter(\.isVisible)) { section in
+                                homeSectionView(for: section.id)
                             }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            NavigationLink {
-                                LikedSongsScreen(allTracks: tracks)
-                            } label: {
-                                LibrarySectionRowView(
-                                    title: Localized.likedSongs,
-                                    subtitle: Localized.yourFavorites,
-                                    icon: "heart.fill",
-                                    color: .red
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            NavigationLink {
-                                PlaylistsScreen()
-                            } label: {
-                                LibrarySectionRowView(
-                                    title: Localized.playlists,
-                                    subtitle: Localized.yourPlaylists,
-                                    icon: "music.note.list",
-                                    color: .green
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            NavigationLink {
-                                ArtistsScreen(allTracks: tracks)
-                            } label: {
-                                LibrarySectionRowView(
-                                    title: Localized.artists,
-                                    subtitle: Localized.browseByArtist,
-                                    icon: "person.2.fill",
-                                    color: .purple
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            NavigationLink {
-                                AlbumsScreen(allTracks: tracks)
-                            } label: {
-                                LibrarySectionRowView(
-                                    title: Localized.albums,
-                                    subtitle: Localized.browseByAlbum,
-                                    icon: "opticaldisc.fill",
-                                    color: .orange
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            Button(action: {
-                                showMusicPicker = true
-                            }) {
-                                LibrarySectionRowView(
-                                    title: Localized.addSongs,
-                                    subtitle: Localized.importMusicFiles,
-                                    icon: "plus.circle.fill",
-                                    color: .blue
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
                         }
                         .padding(16)
                         .padding(.bottom, 100) // Add padding for mini player
@@ -1754,7 +1768,9 @@ struct SearchView: View {
         @State private var artworkImage: UIImage?
         @State private var swipeOffset: CGFloat = 0
         @State private var swipeAction: SwipeAction = .none
-        private let largeQueueCap = 5000
+        @State private var isFavorite = false
+        @State private var showPlaylistDialog = false
+        @State private var showDeleteConfirmation = false
         private let swipeThreshold: CGFloat = 80
 
         private enum SwipeAction {
@@ -1763,16 +1779,6 @@ struct SearchView: View {
 
         private var isCurrentlyPlaying: Bool {
             playerEngine.currentTrack?.stableId == track.stableId
-        }
-
-        private func queueForPlayback() -> [Track] {
-            guard allTracks.count > largeQueueCap,
-                  let selectedIndex = allTracks.firstIndex(where: { $0.stableId == track.stableId }) else {
-                return allTracks
-            }
-
-            let endIndex = min(selectedIndex + largeQueueCap, allTracks.count)
-            return Array(allTracks[selectedIndex..<endIndex])
         }
 
         var body: some View {
@@ -1910,18 +1916,113 @@ struct SearchView: View {
                 .onTapGesture {
                     onDismiss()
                     Task {
-                        await appCoordinator.playTrack(track, queue: queueForPlayback())
+                        // Only queue the selected song from search
+                        await appCoordinator.playTrack(track, queue: [track])
+                    }
+                }
+                .contextMenu {
+                    Button(action: {
+                        do {
+                            try appCoordinator.toggleFavorite(trackStableId: track.stableId)
+                            isFavorite.toggle()
+                        } catch {
+                            print("Failed to toggle favorite: \(error)")
+                        }
+                    }) {
+                        Label(
+                            isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs,
+                            systemImage: isFavorite ? "heart.slash" : "heart"
+                        )
+                    }
+
+                    Button(action: {
+                        playerEngine.insertNext(track)
+                    }) {
+                        Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
+
+                    Button(action: {
+                        playerEngine.addToQueue(track)
+                    }) {
+                        Label(Localized.addToQueue, systemImage: "text.append")
+                    }
+
+                    Button(action: {
+                        showPlaylistDialog = true
+                    }) {
+                        Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
+                    }
+
+                    if let artistId = track.artistId,
+                       let artist = try? DatabaseManager.shared.read({ db in
+                           try Artist.fetchOne(db, key: artistId)
+                       }),
+                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
+                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
+                       }) {
+                        NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
+                            Label(Localized.showArtistPage, systemImage: "person.circle")
+                        }
+                    }
+
+                    Button(role: .destructive, action: {
+                        showDeleteConfirmation = true
+                    }) {
+                        Label(Localized.deleteFile, systemImage: "trash")
                     }
                 }
             }
             .onAppear {
                 loadArtwork()
+                checkFavoriteStatus()
+            }
+            .sheet(isPresented: $showPlaylistDialog) {
+                PlaylistSelectionView(track: track)
+                    .accentColor(settings.backgroundColorChoice.color)
+            }
+            .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
+                Button(Localized.delete, role: .destructive) {
+                    deleteFile()
+                }
+                Button(Localized.cancel, role: .cancel) { }
+            } message: {
+                Text(Localized.deleteFileConfirmation(track.title))
+            }
+        }
+
+        private func checkFavoriteStatus() {
+            do {
+                isFavorite = try DatabaseManager.shared.isFavorite(trackStableId: track.stableId)
+            } catch {
+                print("Failed to check favorite status: \(error)")
             }
         }
 
         private func loadArtwork() {
             Task {
                 artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+            }
+        }
+
+        private func deleteFile() {
+            Task {
+                do {
+                    let settings = DeleteSettings.load()
+                    if settings.deleteFromLibraryOnly {
+                        DeleteSettings.addExcludedTrack(track.stableId)
+                    } else {
+                        do {
+                            try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
+                        } catch {
+                            print("⚠️ Could not remove file from disk: \(error.localizedDescription)")
+                        }
+                    }
+
+                    try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                    NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+                } catch {
+                    print("❌ Failed to delete track: \(error)")
+                }
             }
         }
 

@@ -720,8 +720,9 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
         
         // Handle multiple artists - take the first main artist and clean up formatting
-        if cleaned.contains(",") {
-            let components = cleaned.components(separatedBy: ",")
+        // Split on comma or semicolon
+        if cleaned.contains(",") || cleaned.contains(";") {
+            let components = cleaned.components(separatedBy: CharacterSet(charactersIn: ",;"))
             if let firstArtist = components.first?.trimmingCharacters(in: .whitespacesAndNewlines) {
                 cleaned = firstArtist
             }

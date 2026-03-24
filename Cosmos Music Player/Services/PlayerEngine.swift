@@ -61,6 +61,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private var hasSetupAudioSession = false
     private var hasSetupSiriBackgroundSession = false
     private(set) var isAudioSessionInterrupted = false
+    private var wasPlayingBeforeInterruption = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
@@ -247,6 +248,7 @@ class PlayerEngine: NSObject, ObservableObject {
             // Save current playback position before interruption
             let savedPosition = playbackTime
             let wasPlaying = isPlaying
+            wasPlayingBeforeInterruption = wasPlaying
 
             if isPlaying {
                 if usingSFBEngine {
@@ -318,10 +320,11 @@ class PlayerEngine: NSObject, ObservableObject {
                 print("🔍 No interruption options - will not auto-resume")
             }
 
-            // Only auto-resume if the system tells us to (e.g., after a Siri interruption)
-            // Don't auto-resume for user-initiated interruptions (like audio messages)
-            if shouldResume && playbackState == .paused {
-                print("▶️ Auto-resuming playback after interruption")
+            // Only auto-resume if:
+            // 1. The system tells us to (e.g., after a Siri interruption)
+            // 2. The user was actually playing before the interruption (not manually paused)
+            if shouldResume && wasPlayingBeforeInterruption && playbackState == .paused {
+                print("▶️ Auto-resuming playback after interruption (was playing before)")
                 play()
             } else {
                 print("⏸️ Not auto-resuming - user must manually resume")

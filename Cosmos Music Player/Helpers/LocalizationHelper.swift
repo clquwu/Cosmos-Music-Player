@@ -113,6 +113,8 @@ struct Localized {
     static let backgroundColor = "background_color".localized
     static let chooseColorTheme = "choose_color_theme".localized
     static let librarySection = "library_section".localized
+    static let homeSections = "home_sections".localized
+    static let chooseVisibleSections = "choose_visible_sections".localized
     static let removeFromLibraryOnly = "remove_from_library_only".localized
     static let removeFromLibraryOnlyDescription = "remove_from_library_only_description".localized
     

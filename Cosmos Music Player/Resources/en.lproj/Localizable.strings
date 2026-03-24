@@ -98,6 +98,8 @@
 "background_color" = "Background Color";
 "choose_color_theme" = "Choose the color theme for background effects across all screens.";
 "library_section" = "Library";
+"home_sections" = "Home Sections";
+"choose_visible_sections" = "Choose which sections are visible on the home screen";
 "remove_from_library_only" = "Remove from library only";
 "remove_from_library_only_description" = "When enabled, deleting a track only removes it from the library. The file will remain on disk.";
 

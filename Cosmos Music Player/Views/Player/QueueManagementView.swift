@@ -70,6 +70,7 @@ struct QueueManagementView: View {
                                 .listRowInsets(EdgeInsets())
                             }
                             .onMove(perform: moveItems)
+                            .onDelete(perform: deleteItems)
                         }
                         .listStyle(PlainListStyle())
                         .scrollContentBackground(.hidden)
@@ -122,11 +123,31 @@ struct QueueManagementView: View {
             newCurrentIndex += 1
         }
 
-        // Apply changes on main thread
-        DispatchQueue.main.async {
-            self.playerEngine.playbackQueue = newQueue
-            self.playerEngine.currentIndex = newCurrentIndex
+        // Update synchronously - SwiftUI List expects data to match immediately after onMove
+        playerEngine.playbackQueue = newQueue
+        playerEngine.currentIndex = newCurrentIndex
+        loadArtistNameCache()
+    }
+
+    private func deleteItems(at offsets: IndexSet) {
+        // Filter out the currently playing track - can't delete it
+        let deletableOffsets = offsets.filter { $0 != playerEngine.currentIndex }
+        guard !deletableOffsets.isEmpty else { return }
+
+        var newQueue = playerEngine.playbackQueue
+        var newCurrentIndex = playerEngine.currentIndex
+
+        // Sort descending to remove from end first
+        for index in deletableOffsets.sorted().reversed() {
+            newQueue.remove(at: index)
+            if index < newCurrentIndex {
+                newCurrentIndex -= 1
+            }
         }
+
+        // Must update synchronously - SwiftUI List expects data to match immediately after onDelete
+        playerEngine.playbackQueue = newQueue
+        playerEngine.currentIndex = newCurrentIndex
     }
 
     private func jumpToTrack(at index: Int) {
