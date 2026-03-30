@@ -97,6 +97,15 @@ struct HomeSectionItem: Codable, Identifiable, Equatable {
     ]
 }
 
+/// Keys mirrored into the app group so extensions can read storage root if needed.
+enum AppGroupStorageRootKeys {
+    static let suiteName = "group.dev.clq.Cosmos-Music-Player"
+    static let useCustomAppFolder = "CosmosUseCustomAppFolder"
+    static let customFolderBookmarkData = "CosmosCustomAppFolderBookmarkData"
+    static let customFolderDisplayPath = "CosmosCustomAppFolderDisplayPath"
+    static let alsoScanSandboxDocuments = "CosmosAlsoScanSandboxDocuments"
+}
+
 struct DeleteSettings: Codable {
     var hasShownDeletePopup: Bool = false
     var minimalistIcons: Bool = false
@@ -108,6 +117,16 @@ struct DeleteSettings: Codable {
 
     // Home screen section visibility & order
     var homeSections: [HomeSectionItem] = HomeSectionItem.defaultSections
+
+    // MARK: - Library & data folder (security-scoped bookmark when useCustomAppFolder is true)
+    /// When true, `resolvedAppFolderURL` uses `customAppFolderBookmarkData` instead of the iCloud Documents folder.
+    var useCustomAppFolder: Bool = false
+    /// Persistent bookmark for the user-picked folder (nil when using default iCloud layout).
+    var customAppFolderBookmarkData: Data? = nil
+    /// Last known path string for settings UI (not authoritative for access).
+    var customAppFolderDisplayPath: String? = nil
+    /// When a custom folder is set, also index music in the app sandbox Documents folder (default off to avoid duplicate libraries).
+    var alsoScanSandboxDocuments: Bool = false
 
     init() {}
 
@@ -128,6 +147,17 @@ struct DeleteSettings: Codable {
             decoded.append(defaultSection)
         }
         homeSections = decoded
+
+        useCustomAppFolder = try container.decodeIfPresent(Bool.self, forKey: .useCustomAppFolder) ?? false
+        customAppFolderBookmarkData = try container.decodeIfPresent(Data.self, forKey: .customAppFolderBookmarkData)
+        customAppFolderDisplayPath = try container.decodeIfPresent(String.self, forKey: .customAppFolderDisplayPath)
+        alsoScanSandboxDocuments = try container.decodeIfPresent(Bool.self, forKey: .alsoScanSandboxDocuments) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case hasShownDeletePopup, minimalistIcons, backgroundColorChoice, forceDarkMode, dsdPlaybackMode
+        case deleteFromLibraryOnly, lastLibraryScanDate, homeSections
+        case useCustomAppFolder, customAppFolderBookmarkData, customAppFolderDisplayPath, alsoScanSandboxDocuments
     }
 
     static func load() -> DeleteSettings {
@@ -142,6 +172,16 @@ struct DeleteSettings: Codable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "DeleteSettings")
         }
+        syncStorageRootToAppGroup()
+    }
+
+    /// Mirrors custom-folder fields to the app group for widgets / extensions.
+    private func syncStorageRootToAppGroup() {
+        guard let suite = UserDefaults(suiteName: AppGroupStorageRootKeys.suiteName) else { return }
+        suite.set(useCustomAppFolder, forKey: AppGroupStorageRootKeys.useCustomAppFolder)
+        suite.set(customAppFolderBookmarkData, forKey: AppGroupStorageRootKeys.customFolderBookmarkData)
+        suite.set(customAppFolderDisplayPath, forKey: AppGroupStorageRootKeys.customFolderDisplayPath)
+        suite.set(alsoScanSandboxDocuments, forKey: AppGroupStorageRootKeys.alsoScanSandboxDocuments)
     }
 
     // MARK: - Excluded Tracks (library-only deletions)

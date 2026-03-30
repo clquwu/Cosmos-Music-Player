@@ -98,6 +98,14 @@
 "background_color" = "Background Color";
 "choose_color_theme" = "Choose the color theme for background effects across all screens.";
 "library_section" = "Library";
+"library_and_data_folder" = "Library & data folder";
+"use_custom_library_folder" = "Use a custom folder";
+"choose_library_folder" = "Choose folder…";
+"no_library_folder_selected" = "No folder selected yet.";
+"also_scan_app_documents" = "Also scan On My iPhone (Documents)";
+"also_scan_app_documents_description" = "When enabled, the app indexes both your chosen folder and the app’s Documents folder. Turn off to only use the folder you picked.";
+"reset_default_library_folder" = "Reset to default (iCloud layout)";
+"library_folder_footer" = "Pick any folder in Files. Favorites, playlists, and library scans use this location. The music database stays on the device.";
 "home_sections" = "Home Sections";
 "choose_visible_sections" = "Choose which sections are visible on the home screen";
 "remove_from_library_only" = "Remove from library only";

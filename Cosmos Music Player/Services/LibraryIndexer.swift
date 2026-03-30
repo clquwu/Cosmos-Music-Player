@@ -36,13 +36,7 @@ class LibraryIndexer: NSObject, ObservableObject {
     
     private func setupMetadataQuery() {
         metadataQuery.delegate = self
-        
-        // Search only within the app's iCloud container
-        if let musicFolderURL = stateManager.getMusicFolderURL() {
-            metadataQuery.searchScopes = [musicFolderURL]
-        } else {
-            metadataQuery.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
-        }
+        applyMetadataSearchScopes()
         
         // Support all audio formats according to plan
         let formats = ["*.flac", "*.mp3", "*.wav", "*.m4a", "*.aac", "*.opus", "*.ogg", "*.dsf", "*.dff"]
@@ -65,6 +59,15 @@ class LibraryIndexer: NSObject, ObservableObject {
             object: metadataQuery
         )
     }
+
+    /// Updates query scopes from the current library root (iCloud Documents or user-picked folder).
+    private func applyMetadataSearchScopes() {
+        if let musicFolderURL = stateManager.getMusicFolderURL() {
+            metadataQuery.searchScopes = [musicFolderURL]
+        } else {
+            metadataQuery.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
+        }
+    }
     
     func start() {
         guard !isIndexing else { return }
@@ -80,6 +83,8 @@ class LibraryIndexer: NSObject, ObservableObject {
         Task {
             await copyFilesFromSharedContainer()
         }
+
+        applyMetadataSearchScopes()
         
         if let musicFolderURL = stateManager.getMusicFolderURL() {
             print("Starting iCloud library indexing in: \(musicFolderURL)")
@@ -282,18 +287,23 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
         }
         
-        // Scan local Documents folder
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        print("📱 Scanning local Documents folder: \(documentsPath.path)")
-        do {
-            let localFiles = try await findMusicFiles(in: documentsPath)
-            print("📱 Found \(localFiles.count) files in local Documents folder")
-            for file in localFiles {
-                print("  📄 Local file: \(file.lastPathComponent)")
+        let settings = DeleteSettings.load()
+        let skipSandboxDocs = settings.useCustomAppFolder && !settings.alsoScanSandboxDocuments
+        if !skipSandboxDocs {
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            print("📱 Scanning local Documents folder: \(documentsPath.path)")
+            do {
+                let localFiles = try await findMusicFiles(in: documentsPath)
+                print("📱 Found \(localFiles.count) files in local Documents folder")
+                for file in localFiles {
+                    print("  📄 Local file: \(file.lastPathComponent)")
+                }
+                allMusicFiles.append(contentsOf: localFiles)
+            } catch {
+                print("⚠️ Failed to scan local Documents folder: \(error)")
             }
-            allMusicFiles.append(contentsOf: localFiles)
-        } catch {
-            print("⚠️ Failed to scan local Documents folder: \(error)")
+        } else {
+            print("📱 Skipping sandbox Documents scan (custom library folder only)")
         }
         
         let totalFiles = allMusicFiles.count
@@ -420,30 +430,45 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
     
     private func scanLocalDocuments() async {
+        let settings = DeleteSettings.load()
+        let skipSandboxDocs = settings.useCustomAppFolder && !settings.alsoScanSandboxDocuments
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        
+
+        var allMusicFiles: [URL] = []
         do {
-            let musicFiles = try await findMusicFiles(in: documentsPath)
-            
-            let totalFiles = musicFiles.count
+            if !skipSandboxDocs {
+                let localFiles = try await findMusicFiles(in: documentsPath)
+                allMusicFiles.append(contentsOf: localFiles)
+            }
+            if let musicFolderURL = stateManager.getMusicFolderURL(), musicFolderURL.path != documentsPath.path {
+                let extra = try await findMusicFiles(in: musicFolderURL)
+                allMusicFiles.append(contentsOf: extra)
+            }
+
+            let totalFiles = allMusicFiles.count
+            guard totalFiles > 0 else {
+                await MainActor.run {
+                    isIndexing = false
+                    print("Offline library scan: no files found.")
+                }
+                return
+            }
+
             var processedFiles = 0
-            
-            for fileURL in musicFiles {
+            for fileURL in allMusicFiles {
                 await processLocalFile(fileURL)
-                
                 processedFiles += 1
                 await MainActor.run {
                     indexingProgress = Double(processedFiles) / Double(totalFiles)
                 }
             }
-            
+
             await MainActor.run {
                 isIndexing = false
                 print("Offline library scan completed. Found \(tracksFound) tracks.")
             }
 
-            // Process folder playlists after offline scan
-            await processFolderPlaylists(allMusicFiles: musicFiles)
+            await processFolderPlaylists(allMusicFiles: allMusicFiles)
         } catch {
             await MainActor.run {
                 isIndexing = false

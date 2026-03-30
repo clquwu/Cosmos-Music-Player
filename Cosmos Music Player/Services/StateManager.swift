@@ -11,27 +11,78 @@ class StateManager: @unchecked Sendable {
     static let shared = StateManager()
     
     private var iCloudContainerURL: URL?
-    
+    private let customFolderLock = NSLock()
+    /// Holds the URL while security-scoped access is active for the custom library folder.
+    private var customFolderScopedURL: URL?
+
     private init() {
         // Only set if iCloud is available
         if FileManager.default.ubiquityIdentityToken != nil {
             iCloudContainerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil)
         }
     }
-    
-    private func getAppFolderURL() -> URL? {
+
+    /// Call after changing custom folder settings so the next resolve re-applies security scope.
+    func invalidateCustomFolderAccess() {
+        customFolderLock.lock()
+        defer { customFolderLock.unlock() }
+        customFolderScopedURL?.stopAccessingSecurityScopedResource()
+        customFolderScopedURL = nil
+    }
+
+    private func defaultICloudAppFolderURL() -> URL? {
         guard let containerURL = iCloudContainerURL else { return nil }
         return containerURL.appendingPathComponent("Documents", isDirectory: true)
     }
-    
+
+    /// Resolves the user’s custom folder bookmark when enabled; starts security-scoped access for this process.
+    private func resolvedCustomFolderURLIfEnabled() -> URL? {
+        let settings = DeleteSettings.load()
+        guard settings.useCustomAppFolder, let data = settings.customAppFolderBookmarkData else {
+            customFolderLock.lock()
+            let hadAccess = customFolderScopedURL != nil
+            customFolderLock.unlock()
+            if hadAccess { invalidateCustomFolderAccess() }
+            return nil
+        }
+        guard let pair = SecurityScopedFolderBookmark.resolveURL(from: data) else {
+            return nil
+        }
+        if pair.isStale {
+            print("⚠️ StateManager: custom app folder bookmark is stale — re-select the folder in Settings")
+            return nil
+        }
+        let url = pair.url
+        customFolderLock.lock()
+        defer { customFolderLock.unlock() }
+        if customFolderScopedURL == url {
+            return url
+        }
+        customFolderScopedURL?.stopAccessingSecurityScopedResource()
+        guard url.startAccessingSecurityScopedResource() else {
+            print("⚠️ StateManager: could not start security-scoped access for custom folder")
+            customFolderScopedURL = nil
+            return nil
+        }
+        customFolderScopedURL = url
+        return url
+    }
+
+    /// Active data folder: custom security-scoped folder when configured and valid, otherwise iCloud `Documents` under the ubiquity container.
+    private func resolvedAppFolderURL() -> URL? {
+        if let custom = resolvedCustomFolderURLIfEnabled() {
+            return custom
+        }
+        return defaultICloudAppFolderURL()
+    }
+
     func createAppFolderIfNeeded() throws {
-        guard let appFolderURL = getAppFolderURL() else {
+        guard let appFolderURL = resolvedAppFolderURL() else {
             throw StateManagerError.iCloudNotAvailable
         }
-        
         if !FileManager.default.fileExists(atPath: appFolderURL.path) {
-            try FileManager.default.createDirectory(at: appFolderURL, 
-                                                 withIntermediateDirectories: true, 
+            try FileManager.default.createDirectory(at: appFolderURL,
+                                                 withIntermediateDirectories: true,
                                                  attributes: nil)
         }
     }
@@ -48,7 +99,7 @@ class StateManager: @unchecked Sendable {
         // Also try to save to iCloud Drive if available
         do {
             try createAppFolderIfNeeded()
-            guard let appFolderURL = getAppFolderURL() else {
+            guard let appFolderURL = resolvedAppFolderURL() else {
                 print("⚠️ iCloud not available, favorites saved locally only")
                 return
             }
@@ -101,7 +152,7 @@ class StateManager: @unchecked Sendable {
         }
         
         // Fallback to iCloud Drive if local doesn't exist
-        guard let appFolderURL = getAppFolderURL() else {
+        guard let appFolderURL = resolvedAppFolderURL() else {
             print("📭 No favorites found (neither local nor iCloud)")
             return []
         }
@@ -178,7 +229,7 @@ class StateManager: @unchecked Sendable {
         // Also try to save to iCloud Drive if available
         do {
             try createAppFolderIfNeeded()
-            guard let appFolderURL = getAppFolderURL() else {
+            guard let appFolderURL = resolvedAppFolderURL() else {
                 print("⚠️ iCloud not available, playlist saved locally only")
                 return
             }
@@ -214,8 +265,11 @@ class StateManager: @unchecked Sendable {
     }
     
     func loadPlaylist(slug: String) throws -> PlaylistState? {
-        guard let appFolderURL = getAppFolderURL() else {
-            throw StateManagerError.iCloudNotAvailable
+        if let localPlaylist = try? loadPlaylistFromLocalDocuments(slug: slug) {
+            return localPlaylist
+        }
+        guard let appFolderURL = resolvedAppFolderURL() else {
+            return nil
         }
 
         let playlistsFolder = appFolderURL.appendingPathComponent("playlists", isDirectory: true)
@@ -229,17 +283,10 @@ class StateManager: @unchecked Sendable {
             let data = try Data(contentsOf: playlistURL)
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let playlist = try decoder.decode(PlaylistState.self, from: data)
-            return playlist
+            return try decoder.decode(PlaylistState.self, from: data)
         } catch {
             print("⚠️ Failed to load playlist '\(slug)': \(error)")
-            // Try to load from local backup
-            if let localPlaylist = try? loadPlaylistFromLocalDocuments(slug: slug) {
-                print("✅ Recovered playlist '\(slug)' from local backup")
-                return localPlaylist
-            }
-            print("❌ Unable to recover playlist '\(slug)' from local backup")
-            throw error
+            return nil
         }
     }
 
@@ -259,56 +306,69 @@ class StateManager: @unchecked Sendable {
     }
     
     func getAllPlaylists() throws -> [PlaylistState] {
-        guard let appFolderURL = getAppFolderURL() else {
-            throw StateManagerError.iCloudNotAvailable
-        }
-        
-        let playlistsFolder = appFolderURL.appendingPathComponent("playlists", isDirectory: true)
-        
-        guard FileManager.default.fileExists(atPath: playlistsFolder.path) else {
-            return []
-        }
-        
-        let playlistFiles = try FileManager.default.contentsOfDirectory(at: playlistsFolder, 
-                                                                       includingPropertiesForKeys: nil)
-        
         var playlists: [PlaylistState] = []
+        var seenSlugs = Set<String>()
         var corruptedFiles: [URL] = []
+        var primaryPlaylistsFolder: URL?
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        for fileURL in playlistFiles where fileURL.pathExtension == "json" {
-            do {
-                let data = try Data(contentsOf: fileURL)
-                let playlist = try decoder.decode(PlaylistState.self, from: data)
-                playlists.append(playlist)
-            } catch {
-                // Check for authentication errors
-                if let nsError = error as NSError? {
-                    if nsError.domain == NSPOSIXErrorDomain && nsError.code == 81 {
-                        print("🔐 Authentication required for playlist file: \(fileURL.lastPathComponent)")
-                        throw StateManagerError.iCloudNotAvailable
+        if let appFolderURL = resolvedAppFolderURL() {
+            let playlistsFolder = appFolderURL.appendingPathComponent("playlists", isDirectory: true)
+            primaryPlaylistsFolder = playlistsFolder
+            if FileManager.default.fileExists(atPath: playlistsFolder.path) {
+                let playlistFiles = try FileManager.default.contentsOfDirectory(at: playlistsFolder,
+                                                                              includingPropertiesForKeys: nil)
+                for fileURL in playlistFiles where fileURL.pathExtension == "json" {
+                    do {
+                        let data = try Data(contentsOf: fileURL)
+                        let playlist = try decoder.decode(PlaylistState.self, from: data)
+                        playlists.append(playlist)
+                        seenSlugs.insert(playlist.slug)
+                    } catch {
+                        if let nsError = error as NSError? {
+                            if nsError.domain == NSPOSIXErrorDomain && nsError.code == 81 {
+                                print("🔐 Authentication required for playlist file: \(fileURL.lastPathComponent)")
+                                throw StateManagerError.iCloudNotAvailable
+                            }
+                        }
+                        print("⚠️ Failed to read playlist file \(fileURL.lastPathComponent): \(error)")
+                        let slug = fileURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "playlist-", with: "")
+                        if let recoveredPlaylist = try? loadPlaylistFromLocalDocuments(slug: slug) {
+                            print("✅ Recovered playlist from local backup: \(slug)")
+                            playlists.append(recoveredPlaylist)
+                            seenSlugs.insert(recoveredPlaylist.slug)
+                            try? savePlaylist(recoveredPlaylist)
+                        } else {
+                            corruptedFiles.append(fileURL)
+                            print("❌ Unable to recover playlist: \(fileURL.lastPathComponent)")
+                        }
                     }
-                }
-                print("⚠️ Failed to read playlist file \(fileURL.lastPathComponent): \(error)")
-
-                // Try to recover from local backup
-                let slug = fileURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "playlist-", with: "")
-                if let recoveredPlaylist = try? loadPlaylistFromLocalDocuments(slug: slug) {
-                    print("✅ Recovered playlist from local backup: \(slug)")
-                    playlists.append(recoveredPlaylist)
-                    // Try to repair cloud file
-                    try? savePlaylist(recoveredPlaylist)
-                } else {
-                    corruptedFiles.append(fileURL)
-                    print("❌ Unable to recover playlist: \(fileURL.lastPathComponent)")
                 }
             }
         }
 
-        // Move corrupted files to a quarantine folder
-        if !corruptedFiles.isEmpty {
-            try? quarantineCorruptedFiles(corruptedFiles, in: playlistsFolder)
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let localPlaylistsFolder = documentsURL.appendingPathComponent("cosmos-playlists", isDirectory: true)
+        if FileManager.default.fileExists(atPath: localPlaylistsFolder.path) {
+            let localFiles = try FileManager.default.contentsOfDirectory(at: localPlaylistsFolder,
+                                                                        includingPropertiesForKeys: nil)
+            for fileURL in localFiles where fileURL.pathExtension == "json" {
+                let slug = fileURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "playlist-", with: "")
+                guard !seenSlugs.contains(slug) else { continue }
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let playlist = try decoder.decode(PlaylistState.self, from: data)
+                    playlists.append(playlist)
+                    seenSlugs.insert(playlist.slug)
+                } catch {
+                    print("⚠️ Failed to read local playlist file \(fileURL.lastPathComponent): \(error)")
+                }
+            }
+        }
+
+        if !corruptedFiles.isEmpty, let folder = primaryPlaylistsFolder {
+            try? quarantineCorruptedFiles(corruptedFiles, in: folder)
         }
 
         return playlists.sorted { $0.updatedAt > $1.updatedAt }
@@ -336,7 +396,7 @@ class StateManager: @unchecked Sendable {
         
         // Also try to delete from iCloud Drive if available
         do {
-            guard let appFolderURL = getAppFolderURL() else {
+            guard let appFolderURL = resolvedAppFolderURL() else {
                 print("⚠️ iCloud not available, playlist deleted locally only")
                 return
             }
@@ -381,7 +441,7 @@ class StateManager: @unchecked Sendable {
     }
     
     func getMusicFolderURL() -> URL? {
-        return getAppFolderURL()
+        return resolvedAppFolderURL()
     }
     
     func checkiCloudAvailability() -> Bool {
@@ -429,7 +489,7 @@ extension StateManager {
         // Also try to save to iCloud Drive if available
         do {
             try createAppFolderIfNeeded()
-            guard let appFolderURL = getAppFolderURL() else {
+            guard let appFolderURL = resolvedAppFolderURL() else {
                 print("⚠️ iCloud not available, player state saved locally only")
                 return
             }
@@ -474,7 +534,7 @@ extension StateManager {
         }
         
         // Fallback to iCloud Drive if local doesn't exist
-        guard let appFolderURL = getAppFolderURL() else {
+        guard let appFolderURL = resolvedAppFolderURL() else {
             print("📭 No player state found (neither local nor iCloud)")
             return nil
         }

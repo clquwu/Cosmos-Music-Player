@@ -9,6 +9,7 @@ import Foundation
 import UIKit
 import CloudKit
 
+@MainActor
 class TutorialViewModel: ObservableObject {
     @Published var currentStep: Int = 0
     @Published var isSignedIntoAppleID: Bool = false
@@ -68,40 +69,43 @@ class TutorialViewModel: ObservableObject {
     
     func checkAppleIDStatus() {
         // Use Apple's recommended CloudKit approach for detecting iCloud sign-in status
-        CKContainer.default().accountStatus { [weak self] accountStatus, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                
+        CKContainer.default().accountStatus { [weak weakSelf = self] accountStatus, error in
+            Task { @MainActor [weak weakSelf] in
+                guard let self = weakSelf else { return }
+
                 if let error = error {
                     print("📱 Apple ID check: ❓ CloudKit error: \(error.localizedDescription)")
                     // Fallback to FileManager approach
                     self.fallbackAppleIDCheck()
                     return
                 }
-                
+
                 switch accountStatus {
                 case .available:
                     self.isSignedIntoAppleID = true
                     self.appleIDDetectionFailed = false
                     print("📱 Apple ID check: ✅ Confirmed signed into iCloud (CloudKit)")
-                    
+
                 case .noAccount:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = false
                     print("📱 Apple ID check: ❌ Not signed into iCloud (CloudKit)")
-                    
+
                 case .restricted:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true
                     print("📱 Apple ID check: ⚠️ iCloud access restricted (CloudKit)")
-                    
+
                 case .couldNotDetermine:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true
                     print("📱 Apple ID check: ❓ Could not determine status (CloudKit)")
-                    
+
                 case .temporarilyUnavailable:
-                    print("Error line 104 of TutorialViewModel")
+                    self.isSignedIntoAppleID = false
+                    self.appleIDDetectionFailed = true
+                    print("📱 Apple ID check: ⏳ Temporarily unavailable (CloudKit)")
+
                 @unknown default:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true
@@ -253,3 +257,4 @@ class TutorialViewModel: ObservableObject {
         return !UserDefaults.standard.bool(forKey: "HasCompletedTutorial")
     }
 }
+

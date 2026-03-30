@@ -117,6 +117,14 @@ struct Localized {
     static let chooseVisibleSections = "choose_visible_sections".localized
     static let removeFromLibraryOnly = "remove_from_library_only".localized
     static let removeFromLibraryOnlyDescription = "remove_from_library_only_description".localized
+    static let libraryAndDataFolder = "library_and_data_folder".localized
+    static let useCustomLibraryFolder = "use_custom_library_folder".localized
+    static let chooseLibraryFolder = "choose_library_folder".localized
+    static let noLibraryFolderSelected = "no_library_folder_selected".localized
+    static let alsoScanAppDocuments = "also_scan_app_documents".localized
+    static let alsoScanAppDocumentsDescription = "also_scan_app_documents_description".localized
+    static let resetDefaultLibraryFolder = "reset_default_library_folder".localized
+    static let libraryFolderFooter = "library_folder_footer".localized
     
     // MARK: - Liked Songs Actions
     static let addToLikedSongs = "add_to_liked_songs".localized

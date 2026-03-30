@@ -1,8 +1,10 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var deleteSettings = DeleteSettings.load()
+    @State private var showLibraryFolderPicker = false
     
     var body: some View {
         NavigationView {
@@ -121,6 +123,74 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle(Localized.useCustomLibraryFolder, isOn: $deleteSettings.useCustomAppFolder)
+                        .onChange(of: deleteSettings.useCustomAppFolder) { _, newValue in
+                            if !newValue {
+                                var s = deleteSettings
+                                s.customAppFolderBookmarkData = nil
+                                s.customAppFolderDisplayPath = nil
+                                s.alsoScanSandboxDocuments = false
+                                deleteSettings = s
+                            }
+                            deleteSettings.save()
+                            StateManager.shared.invalidateCustomFolderAccess()
+                            NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+                        }
+
+                    if deleteSettings.useCustomAppFolder {
+                        Button {
+                            showLibraryFolderPicker = true
+                        } label: {
+                            HStack {
+                                Text(Localized.chooseLibraryFolder)
+                                Spacer()
+                                Image(systemName: "folder")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        if let path = deleteSettings.customAppFolderDisplayPath, !path.isEmpty {
+                            Text(path)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text(Localized.noLibraryFolderSelected)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Toggle(Localized.alsoScanAppDocuments, isOn: $deleteSettings.alsoScanSandboxDocuments)
+                            .onChange(of: deleteSettings.alsoScanSandboxDocuments) { _, _ in
+                                deleteSettings.save()
+                                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+                            }
+
+                        Text(Localized.alsoScanAppDocumentsDescription)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Button(Localized.resetDefaultLibraryFolder) {
+                            var s = deleteSettings
+                            s.useCustomAppFolder = false
+                            s.customAppFolderBookmarkData = nil
+                            s.customAppFolderDisplayPath = nil
+                            s.alsoScanSandboxDocuments = false
+                            deleteSettings = s
+                            deleteSettings.save()
+                            StateManager.shared.invalidateCustomFolderAccess()
+                            NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+                        }
+                        .foregroundColor(.red)
+                    }
+
+                    Text(Localized.libraryFolderFooter)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } header: {
+                    Text(Localized.libraryAndDataFolder)
+                }
+
+                Section {
                     ForEach($deleteSettings.homeSections) { $section in
                         HStack {
                             Image(systemName: section.id.icon)
@@ -196,6 +266,37 @@ struct SettingsView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(Localized.done) {
                         dismiss()
+                    }
+                }
+            }
+            .fileImporter(
+                isPresented: $showLibraryFolderPicker,
+                allowedContentTypes: [UTType.folder],
+                allowsMultipleSelection: false
+            ) { result in
+                Task { @MainActor in
+                    switch result {
+                    case .success(let urls):
+                        guard let url = urls.first else { return }
+                        let didAccess = url.startAccessingSecurityScopedResource()
+                        defer {
+                            if didAccess { url.stopAccessingSecurityScopedResource() }
+                        }
+                        do {
+                            let data = try SecurityScopedFolderBookmark.bookmarkData(for: url)
+                            var s = deleteSettings
+                            s.customAppFolderBookmarkData = data
+                            s.customAppFolderDisplayPath = url.path
+                            s.useCustomAppFolder = true
+                            deleteSettings = s
+                            deleteSettings.save()
+                            StateManager.shared.invalidateCustomFolderAccess()
+                            NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+                        } catch {
+                            print("⚠️ Failed to save library folder bookmark: \(error)")
+                        }
+                    case .failure(let error):
+                        print("⚠️ Library folder picker failed: \(error)")
                     }
                 }
             }
