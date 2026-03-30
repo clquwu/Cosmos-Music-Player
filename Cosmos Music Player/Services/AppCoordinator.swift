@@ -397,6 +397,10 @@ class AppCoordinator: ObservableObject {
     private func forceiCloudFolderCreation() async {
         do {
             try stateManager.createAppFolderIfNeeded()
+            if DeleteSettings.load().useCustomAppFolder {
+                print("🏗️ Using custom library folder — skipping iCloud placeholder files")
+                return
+            }
             if let folderURL = stateManager.getMusicFolderURL() {
                 print("🏗️ iCloud folder created/verified at: \(folderURL)")
                 
