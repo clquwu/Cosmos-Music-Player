@@ -114,19 +114,20 @@ struct Cosmos_Music_PlayerApp: App {
                 await optimizeSFBAudioForBackground()
             }
 
-            // Stop high-frequency timers when backgrounded
-            PlayerEngine.shared.stopPlaybackTimer()
+            // Stop ALL high-frequency UI timers when backgrounded to prevent
+            // SwiftUI redraws from spiking CPU and triggering the iOS watchdog kill.
+            PlayerEngine.shared.suspendUITimersForBackground()
         }
     }
     
     private func handleWillEnterForeground() {
         // Restart timers when foregrounding
         Task { @MainActor in
-            // Restore audio configuration when returning to foreground
+            // Restore audio configuration and all UI timers
             if PlayerEngine.shared.isPlaying {
                 await optimizeSFBAudioForForeground()
-                PlayerEngine.shared.startPlaybackTimer()
             }
+            PlayerEngine.shared.resumeUITimersForForeground()
 
             // Check for new shared files and refresh library
             await LibraryIndexer.shared.copyFilesFromSharedContainer()
@@ -165,6 +166,12 @@ struct Cosmos_Music_PlayerApp: App {
     }
     
     private func handleWillResignActive() {
+        guard PlayerEngine.shared.isPlaying else {
+            releaseAudioSessionIfIdle()
+            print("🎧 Cosmos is not playing - leaving audio focus with the current app")
+            return
+        }
+
         // Don't re-grab the audio session if we're being interrupted by an alarm or call
         guard !PlayerEngine.shared.isAudioSessionInterrupted else {
             print("🎧 Audio session interrupted (alarm/call) - skipping session keepalive")
@@ -179,6 +186,14 @@ struct Cosmos_Music_PlayerApp: App {
             print("🎧 Session keepalive on resign active - success")
         } catch {
             print("❌ Session keepalive fail:", error)
+        }
+    }
+
+    private func releaseAudioSessionIfIdle() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("ℹ️ Audio session was already inactive or could not be released: \(error)")
         }
     }
     

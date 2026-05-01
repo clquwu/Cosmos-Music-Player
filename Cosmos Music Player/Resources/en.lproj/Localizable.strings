@@ -102,6 +102,11 @@
 "choose_visible_sections" = "Choose which sections are visible on the home screen";
 "remove_from_library_only" = "Remove from library only";
 "remove_from_library_only_description" = "When enabled, deleting a track only removes it from the library. The file will remain on disk.";
+"player_controls" = "Player Controls";
+"show_lyrics_button" = "Show Lyrics Button";
+"show_lyrics_button_description" = "Show the lyrics button in the player when the sleep timer button is disabled.";
+"show_sleep_timer_button" = "Show Sleep Timer Button";
+"show_sleep_timer_button_description" = "Replace the lyrics button in the player with a sleep timer button.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Add to Liked Songs";
@@ -262,6 +267,15 @@
 /* Queue Actions */
 "play_next" = "Play Next";
 "add_to_queue" = "Add to Queue";
+
+/* Sleep Timer */
+"sleep_timer" = "Sleep Timer";
+"sleep_timer_off" = "Sleep timer off";
+"sleep_timer_15_minutes" = "15 minutes";
+"sleep_timer_30_minutes" = "30 minutes";
+"sleep_timer_45_minutes" = "45 minutes";
+"sleep_timer_60_minutes" = "60 minutes";
+"cancel_sleep_timer" = "Cancel Sleep Timer";
 
 /* Bulk Selection */
 "select" = "Select";

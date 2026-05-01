@@ -2,7 +2,7 @@
 //  HybridMusicAPI.swift
 //  Cosmos Music Player
 //
-//  Hybrid music API service that tries Discogs first, then falls back to Spotify
+//  Hybrid music API service that tries Spotify first, then falls back to Discogs
 //
 
 import Foundation
@@ -154,27 +154,18 @@ class HybridMusicAPIService: ObservableObject, @unchecked Sendable {
     func searchArtist(name: String) async throws -> UnifiedArtist? {
         print("🎵 Hybrid: Searching for artist: \(name)")
         
-        // Check cache first
-        if let cached = getCachedArtist(name: name), !cached.isExpired {
-            print("✅ Hybrid: Found cached artist: \(name) (source: \(cached.unifiedArtist.source))")
-            return cached.unifiedArtist
-        }
-        
-        // Try Discogs first
-        print("🎯 Hybrid: Trying Discogs for: \(name)")
-        do {
-            if let discogsArtist = try await discogsAPI.searchArtist(name: name) {
-                print("✅ Hybrid: Found on Discogs: \(discogsArtist.name)")
-                let unifiedArtist = UnifiedArtist(from: discogsArtist)
-                cacheArtist(name: name, artist: unifiedArtist)
-                return unifiedArtist
+        let cachedArtist = getCachedArtist(name: name)
+        if let cached = cachedArtist, !cached.isExpired {
+            if cached.unifiedArtist.source == .spotify {
+                print("✅ Hybrid: Found cached artist: \(name) (source: \(cached.unifiedArtist.source))")
+                return cached.unifiedArtist
             }
-        } catch {
-            print("⚠️ Hybrid: Discogs failed: \(error.localizedDescription)")
+
+            print("ℹ️ Hybrid: Found cached Discogs artist for \(name); checking Spotify before reusing it")
         }
-        
-        // Fallback to Spotify
-        print("🎯 Hybrid: Falling back to Spotify for: \(name)")
+
+        // Prefer Spotify so artist pages can expose Spotify artwork/links when available.
+        print("🎯 Hybrid: Trying Spotify for: \(name)")
         do {
             if let spotifyArtist = try await spotifyAPI.searchArtist(name: name) {
                 print("✅ Hybrid: Found on Spotify: \(spotifyArtist.name)")
@@ -184,6 +175,24 @@ class HybridMusicAPIService: ObservableObject, @unchecked Sendable {
             }
         } catch {
             print("⚠️ Hybrid: Spotify failed: \(error.localizedDescription)")
+        }
+
+        if let cached = cachedArtist, !cached.isExpired {
+            print("✅ Hybrid: Reusing cached artist: \(name) (source: \(cached.unifiedArtist.source))")
+            return cached.unifiedArtist
+        }
+
+        // Fallback to Discogs for bios and artists unavailable on Spotify.
+        print("🎯 Hybrid: Falling back to Discogs for: \(name)")
+        do {
+            if let discogsArtist = try await discogsAPI.searchArtist(name: name) {
+                print("✅ Hybrid: Found on Discogs: \(discogsArtist.name)")
+                let unifiedArtist = UnifiedArtist(from: discogsArtist)
+                cacheArtist(name: name, artist: unifiedArtist)
+                return unifiedArtist
+            }
+        } catch {
+            print("⚠️ Hybrid: Discogs failed: \(error.localizedDescription)")
         }
         
         print("❌ Hybrid: No artist found on either platform for: \(name)")

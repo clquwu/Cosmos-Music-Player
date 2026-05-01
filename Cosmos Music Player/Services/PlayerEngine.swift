@@ -63,6 +63,7 @@ class PlayerEngine: NSObject, ObservableObject {
     private(set) var isAudioSessionInterrupted = false
     private var wasPlayingBeforeInterruption = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private(set) var isInBackground = false
     private var hasSetupRemoteCommands = false
     private nonisolated(unsafe) var hasSetupAudioSessionNotifications = false
     private var backgroundCheckTimer: Timer?
@@ -1948,15 +1949,22 @@ class PlayerEngine: NSObject, ObservableObject {
     // MARK: - Timer and Updates
     
     func startPlaybackTimer() {
-        // Don't start timer if we're in Siri background mode (app launched by Siri)
+        // Don't start the high-frequency UI timer in background — it causes
+        // SwiftUI view redraws that spike CPU and trigger the iOS watchdog.
+        // Background track-end detection is handled by backgroundCheckTimer instead.
+        if isInBackground {
+            print("🔄 Skipping playback timer start - app is in background")
+            return
+        }
+
         let appState = UIApplication.shared.applicationState
         if hasSetupSiriBackgroundSession && appState == .background {
             print("🔄 Skipping playback timer start - Siri background mode active")
             return
         }
-        
+
         stopPlaybackTimer()
-        
+
         // Keep 0.1s interval for accurate timing
         playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -2045,7 +2053,29 @@ class PlayerEngine: NSObject, ObservableObject {
         playbackTimer?.invalidate()
         playbackTimer = nil
     }
-    
+
+    /// Stop all high-frequency UI timers when entering background to prevent
+    /// SwiftUI redraws from spiking CPU and triggering the iOS watchdog kill.
+    func suspendUITimersForBackground() {
+        isInBackground = true
+        stopPlaybackTimer()
+        volumeCheckTimer?.invalidate()
+        volumeCheckTimer = nil
+        print("⏸️ Suspended UI timers for background")
+    }
+
+    /// Restart UI timers when returning to foreground.
+    func resumeUITimersForForeground() {
+        isInBackground = false
+        if isPlaying {
+            startPlaybackTimer()
+        }
+        if hasSetupAudioSession {
+            startVolumeTimer()
+        }
+        print("▶️ Resumed UI timers for foreground")
+    }
+
     // MARK: - Now Playing Info
     
     private func loadAndCacheArtwork(track: Track) async {
@@ -2613,17 +2643,8 @@ class PlayerEngine: NSObject, ObservableObject {
         let backgroundTime = UIApplication.shared.backgroundTimeRemaining
         print("🔍 DIAGNOSTIC - backgroundTimeRemaining: \(backgroundTime)")
         
-        // Stop playback timer since we're in background - use force stop to ensure it's really stopped
-        stopPlaybackTimer()
-        
-        // Double-check timer is stopped
-        if playbackTimer == nil {
-            print("🔄 Playback timer stopped for Siri background mode")
-        } else {
-            print("⚠️ Playback timer still running - forcing stop")
-            playbackTimer?.invalidate()
-            playbackTimer = nil
-        }
+        // Stop all UI timers since we're in background
+        suspendUITimersForBackground()
         
         // Save player state
         savePlayerState()

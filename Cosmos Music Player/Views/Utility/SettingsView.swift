@@ -120,6 +120,26 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                Section(Localized.playerControls) {
+                    Toggle(Localized.showLyricsButton, isOn: $deleteSettings.showLyricsButton)
+                        .onChange(of: deleteSettings.showLyricsButton) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                    Text(Localized.showLyricsButtonDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Toggle(Localized.showSleepTimerButton, isOn: $deleteSettings.showSleepTimerButton)
+                        .onChange(of: deleteSettings.showSleepTimerButton) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                    Text(Localized.showSleepTimerButtonDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Section {
                     ForEach($deleteSettings.homeSections) { $section in
                         HStack {

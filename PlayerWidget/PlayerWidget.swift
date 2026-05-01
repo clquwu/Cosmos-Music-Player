@@ -141,6 +141,7 @@ struct MediumWidgetView: View {
                    let uiImage = UIImage(data: artworkData) {
                     Image(uiImage: uiImage)
                         .resizable()
+                        .widgetAccentedRenderingMode(.fullColor)
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 130, height: 130)
                         .clipShape(RoundedRectangle(cornerRadius: 16))

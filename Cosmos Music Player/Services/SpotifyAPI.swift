@@ -273,6 +273,15 @@ class SpotifyAPIService: ObservableObject, @unchecked Sendable {
         if let httpResponse = response as? HTTPURLResponse {
             print("📡 Spotify: Response status: \(httpResponse.statusCode)")
             if httpResponse.statusCode != 200 {
+                let responseBody = String(data: data, encoding: .utf8)
+                if let responseBody, !responseBody.isEmpty {
+                    print("📡 Spotify: Error response: \(responseBody)")
+                }
+
+                if httpResponse.statusCode == 403 {
+                    throw SpotifyAPIError.forbidden(responseBody)
+                }
+
                 throw SpotifyAPIError.httpError(httpResponse.statusCode)
             }
         }
@@ -356,6 +365,7 @@ class SpotifyAPIService: ObservableObject, @unchecked Sendable {
 enum SpotifyAPIError: Error, LocalizedError {
     case invalidURL
     case httpError(Int)
+    case forbidden(String?)
     case decodingError(Error)
     case networkError(Error)
     case authenticationError
@@ -367,6 +377,11 @@ enum SpotifyAPIError: Error, LocalizedError {
             return "Invalid URL"
         case .httpError(let code):
             return "HTTP Error: \(code)"
+        case .forbidden(let message):
+            if let message, !message.isEmpty {
+                return "Spotify access forbidden: \(message)"
+            }
+            return "Spotify access forbidden. Check that Web API access is enabled for this Spotify app and that the client credentials are from the correct app."
         case .decodingError(let error):
             return "Decoding Error: \(error.localizedDescription)"
         case .networkError(let error):

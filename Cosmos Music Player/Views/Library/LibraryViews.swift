@@ -1112,7 +1112,7 @@ struct TrackListContentView: View {
                             track: track,
                             activeTrackId: playerEngine.currentTrack?.stableId,
                             isAudioPlaying: playerEngine.isPlaying,
-                            artistName: track.artistId.flatMap { artistNameCache[$0] },
+                            artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
                             onTap: {
                                 if isBulkMode {
                                     toggleSelection(for: track)
@@ -1415,8 +1415,8 @@ struct SearchView: View {
                                 songs.append(track)
                             }
 
-                            let allAlbums = try DatabaseManager.shared.getAllAlbums()
-                            for album in allAlbums where album.artistId == artistId && !existingAlbumIds.contains(album.id!) {
+                            let artistAlbums = try DatabaseManager.shared.getAlbumsByArtistId(artistId)
+                            for album in artistAlbums where !existingAlbumIds.contains(album.id!) {
                                 albums.append(album)
                             }
                         }
@@ -1646,7 +1646,7 @@ struct SearchView: View {
                                     SearchSongRowView(
                                         track: track,
                                         allTracks: allTracks,
-                                        artistName: track.artistId.flatMap { artistNameCache[$0] },
+                                        artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
                                         onDismiss: onDismiss
                                     )
                                     .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
@@ -1666,7 +1666,7 @@ struct SearchView: View {
                                 ForEach(results.albums, id: \.id) { album in
                                     SearchAlbumRowView(
                                         album: album,
-                                        albumArtistName: album.artistId.flatMap { artistNameCache[$0] },
+                                        albumArtistName: album.albumArtist ?? album.artistId.flatMap { artistNameCache[$0] },
                                         onDismiss: onDismiss,
                                         onNavigate: onNavigateToAlbum
                                     )
@@ -1957,9 +1957,7 @@ struct SearchView: View {
                        let artist = try? DatabaseManager.shared.read({ db in
                            try Artist.fetchOne(db, key: artistId)
                        }),
-                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
-                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
-                       }) {
+                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
                         NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
                             Label(Localized.showArtistPage, systemImage: "person.circle")
                         }
@@ -2123,8 +2121,7 @@ struct SearchView: View {
             guard let artistId = artist.id else { return }
             Task {
                 let tracks = (try? DatabaseManager.shared.getTracksByArtistId(artistId)) ?? []
-                let allAlbums = (try? DatabaseManager.shared.getAllAlbums()) ?? []
-                let albums = allAlbums.filter { $0.artistId == artistId }
+                let albums = (try? DatabaseManager.shared.getAlbumsByArtistId(artistId)) ?? []
                 await MainActor.run {
                     artistTracks = tracks
                     artistAlbums = albums

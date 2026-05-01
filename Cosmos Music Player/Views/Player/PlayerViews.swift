@@ -93,12 +93,16 @@ struct PlayerView: View {
     @State private var currentLyrics: Lyrics? = nil
     @State private var isLoadingLyrics = false
     @State private var settings = DeleteSettings.load()
+    @State private var sleepTimerTask: Task<Void, Never>?
+    @State private var sleepTimerEndDate: Date?
     
     var body: some View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .player)
             mainContent
         }
+        // Cap Dynamic Type so large accessibility sizes don't overflow the player layout
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
     }
 
     private var mainContent: some View {
@@ -351,6 +355,7 @@ struct PlayerView: View {
                         .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
                         .fontWeight(.semibold)
                         .lineLimit(2)
+                        .minimumScaleFactor(0.7)
                         .multilineTextAlignment(.leading)
                         .foregroundColor(.primary)
                 }
@@ -360,6 +365,7 @@ struct PlayerView: View {
                     .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title3 : .title2)
                     .fontWeight(.semibold)
                     .lineLimit(2)
+                    .minimumScaleFactor(0.7)
                     .multilineTextAlignment(.leading)
             }
         }
@@ -375,7 +381,7 @@ struct PlayerView: View {
                     let userInfo = ["artist": artist, "allTracks": allTracks] as [String : Any]
                     NotificationCenter.default.post(name: NSNotification.Name("NavigateToArtistFromPlayer"), object: nil, userInfo: userInfo)
                 }) {
-                    Text(artist.name)
+                    Text((try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? artist.name)
                         .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .caption : .subheadline)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -530,10 +536,19 @@ struct PlayerView: View {
     private var additionalControlsView: some View {
         HStack(spacing: 12) {
             queueButton
-            lyricsButton
+            middleControlButton
             airPlayButton
         }
         .padding(.horizontal, 5)
+    }
+
+    @ViewBuilder
+    private var middleControlButton: some View {
+        if settings.showSleepTimerButton {
+            sleepTimerButton
+        } else if settings.showLyricsButton {
+            lyricsButton
+        }
     }
 
     private var queueButton: some View {
@@ -613,6 +628,69 @@ struct PlayerView: View {
             RoundedRectangle(cornerRadius: 20)
                 .stroke(Color.white.opacity(0.2), lineWidth: 1)
         )
+    }
+
+    private var sleepTimerButton: some View {
+        Menu {
+            Button(Localized.sleepTimer15Minutes) {
+                startSleepTimer(minutes: 15)
+            }
+            Button(Localized.sleepTimer30Minutes) {
+                startSleepTimer(minutes: 30)
+            }
+            Button(Localized.sleepTimer45Minutes) {
+                startSleepTimer(minutes: 45)
+            }
+            Button(Localized.sleepTimer60Minutes) {
+                startSleepTimer(minutes: 60)
+            }
+
+            if sleepTimerEndDate != nil {
+                Divider()
+
+                Button(Localized.cancelSleepTimer, role: .destructive) {
+                    cancelSleepTimer()
+                }
+            }
+        } label: {
+            Image(systemName: sleepTimerEndDate == nil ? "timer" : "timer.circle.fill")
+                .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title2 : .title)
+                .foregroundColor(sleepTimerEndDate == nil ? .primary : settings.backgroundColorChoice.color)
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .padding(.vertical, 16)
+        }
+        .menuOrder(.fixed)
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel(Localized.sleepTimer)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+    }
+
+    private func startSleepTimer(minutes: Int) {
+        sleepTimerTask?.cancel()
+        let endDate = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        sleepTimerEndDate = endDate
+
+        sleepTimerTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(minutes * 60) * 1_000_000_000)
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                playerEngine.pause()
+                sleepTimerEndDate = nil
+                sleepTimerTask = nil
+            }
+        }
+    }
+
+    private func cancelSleepTimer() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimerEndDate = nil
     }
 
     private func loadLyrics() {
@@ -990,10 +1068,10 @@ struct TrackRowView: View, @MainActor Equatable {
             return artistName
         }
 
-        guard let artistId = track.artistId else { return nil }
-        return try? DatabaseManager.shared.read { db in
-            try Artist.fetchOne(db, key: artistId)?.name
-        }
+        return try? DatabaseManager.shared.getArtistDisplayName(
+            forTrackStableId: track.stableId,
+            fallbackArtistId: track.artistId
+        )
     }
     
     var body: some View {
@@ -1097,7 +1175,7 @@ struct TrackRowView: View, @MainActor Equatable {
                     
                     if let artistId = track.artistId,
                        let artist = try? DatabaseManager.shared.read({ db in try Artist.fetchOne(db, key: artistId) }),
-                       let allArtistTracks = try? DatabaseManager.shared.read({ db in try Track.filter(Column("artist_id") == artistId).fetchAll(db) }) {
+                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
                         NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
                             Label(Localized.showArtistPage, systemImage: "person.circle")
                         }

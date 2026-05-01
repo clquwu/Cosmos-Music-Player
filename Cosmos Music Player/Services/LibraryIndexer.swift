@@ -15,6 +15,12 @@ enum LibraryIndexerError: Error {
     case metadataParsingFailed
 }
 
+private struct ParsedAudioFile {
+    let track: Track
+    let trackArtistIds: [Int64]
+    let albumArtistIds: [Int64]
+}
+
 @MainActor
 class LibraryIndexer: NSObject, ObservableObject {
     static let shared = LibraryIndexer()
@@ -179,11 +185,16 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
 
             print("🎶 Parsing external audio file: \(fileURL.lastPathComponent)")
-            let track = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let track = parsedFile.track
             print("✅ External audio file parsed successfully: \(track.title)")
 
             print("💾 Inserting external track into database: \(track.title)")
             try databaseManager.upsertTrack(track)
+            try databaseManager.setTrackArtists(trackStableId: track.stableId, artistIds: parsedFile.trackArtistIds)
+            if let albumId = track.albumId {
+                try databaseManager.setAlbumArtists(albumId: albumId, artistIds: parsedFile.albumArtistIds)
+            }
             print("✅ External track inserted into database: \(track.title)")
 
             // Pre-cache artwork for instant loading later
@@ -542,11 +553,16 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
 
             print("🎶 Parsing audio file: \(fileURL.lastPathComponent)")
-            let track = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let track = parsedFile.track
             print("✅ Audio file parsed successfully: \(track.title)")
 
             print("💾 Inserting track into database: \(track.title)")
             try databaseManager.upsertTrack(track)
+            try databaseManager.setTrackArtists(trackStableId: track.stableId, artistIds: parsedFile.trackArtistIds)
+            if let albumId = track.albumId {
+                try databaseManager.setAlbumArtists(albumId: albumId, artistIds: parsedFile.albumArtistIds)
+            }
             print("✅ Track inserted into database: \(track.title)")
 
             // Pre-cache artwork for instant loading later
@@ -616,8 +632,13 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             try await CloudDownloadManager.shared.ensureLocal(fileURL)
 
-            let track = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let track = parsedFile.track
             try databaseManager.upsertTrack(track)
+            try databaseManager.setTrackArtists(trackStableId: track.stableId, artistIds: parsedFile.trackArtistIds)
+            if let albumId = track.albumId {
+                try databaseManager.setAlbumArtists(albumId: albumId, artistIds: parsedFile.albumArtistIds)
+            }
 
             // Pre-cache artwork for instant loading later
             await ArtworkManager.shared.cacheArtwork(for: track)
@@ -637,12 +658,10 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
     
     func generateStableId(for url: URL) throws -> String {
-        let filename = url.lastPathComponent
-        let digest = SHA256.hash(data: filename.data(using: .utf8) ?? Data())
-        return digest.compactMap { String(format: "%02x", $0) }.joined()
+        DatabaseManager.generatePathStableId(forPath: url.path)
     }
     
-    private func parseAudioFile(at url: URL, stableId: String) async throws -> Track {
+    private func parseAudioFile(at url: URL, stableId: String) async throws -> ParsedAudioFile {
         print("🔍 Calling AudioMetadataParser for: \(url.lastPathComponent)")
         
         // Add timeout to prevent hanging
@@ -666,21 +685,30 @@ class LibraryIndexer: NSObject, ObservableObject {
         
         print("✅ AudioMetadataParser completed for: \(url.lastPathComponent)")
         
-        // Clean and normalize artist name to merge similar artists
-        let cleanedArtistName = cleanArtistName(metadata.artist ?? Localized.unknownArtist)
-        print("🎤 Creating artist with cleaned name: '\(cleanedArtistName)'")
-        
-        let artist = try databaseManager.upsertArtist(name: cleanedArtistName)
+        let artistNames = parseArtistNames(metadata.artist)
+        let rawAlbumArtist = metadata.albumArtist?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let albumArtistNames = rawAlbumArtist.isEmpty ? artistNames : parseArtistNames(rawAlbumArtist)
+        let displayAlbumArtist = displayArtistName(from: albumArtistNames)
+        print("🎤 Creating artist(s): '\(displayArtistName(from: artistNames))'")
+
+        let artists = try artistNames.map { try databaseManager.upsertArtist(name: $0) }
+        let albumArtists = try albumArtistNames.map { try databaseManager.upsertArtist(name: $0) }
+        let artist: Artist
+        if let firstArtist = artists.first {
+            artist = firstArtist
+        } else {
+            artist = try databaseManager.upsertArtist(name: Localized.unknownArtist)
+        }
         let album = try databaseManager.upsertAlbum(
             title: metadata.album ?? Localized.unknownAlbum,
             artistId: artist.id,
             year: metadata.year,
-            albumArtist: metadata.albumArtist
+            albumArtist: displayAlbumArtist
         )
         
         let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey])
         
-        return Track(
+        let track = Track(
             stableId: stableId,
             albumId: album.id,
             artistId: artist.id,
@@ -699,8 +727,44 @@ class LibraryIndexer: NSObject, ObservableObject {
             replaygainAlbumPeak: metadata.replaygainAlbumPeak,
             hasEmbeddedArt: metadata.hasEmbeddedArt
         )
+
+        return ParsedAudioFile(
+            track: track,
+            trackArtistIds: artists.compactMap(\.id),
+            albumArtistIds: albumArtists.compactMap(\.id)
+        )
     }
-    
+
+    private func parseArtistNames(_ artistName: String?) -> [String] {
+        let rawName = artistName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawName.isEmpty else { return [Localized.unknownArtist] }
+
+        let delimiter = "\\\\"
+        let rawComponents: [String]
+        if rawName.contains(delimiter) {
+            rawComponents = rawName.components(separatedBy: delimiter)
+        } else {
+            rawComponents = [rawName]
+        }
+
+        var seenNames = Set<String>()
+        var artists: [String] = []
+
+        for component in rawComponents {
+            let cleaned = cleanArtistName(component)
+            let normalized = cleaned.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+            guard !cleaned.isEmpty, !seenNames.contains(normalized) else { continue }
+            seenNames.insert(normalized)
+            artists.append(cleaned)
+        }
+
+        return artists.isEmpty ? [Localized.unknownArtist] : artists
+    }
+
+    private func displayArtistName(from artistNames: [String]) -> String {
+        artistNames.joined(separator: " / ")
+    }
+
     private func cleanArtistName(_ artistName: String) -> String {
         var cleaned = artistName.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -716,15 +780,6 @@ class LibraryIndexer: NSObject, ObservableObject {
         for suffix in suffixesToRemove {
             if cleaned.hasSuffix(suffix) {
                 cleaned = String(cleaned.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        
-        // Handle multiple artists - take the first main artist and clean up formatting
-        // Split on comma or semicolon
-        if cleaned.contains(",") || cleaned.contains(";") {
-            let components = cleaned.components(separatedBy: CharacterSet(charactersIn: ",;"))
-            if let firstArtist = components.first?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                cleaned = firstArtist
             }
         }
         

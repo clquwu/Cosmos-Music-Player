@@ -60,7 +60,7 @@ struct QueueManagementView: View {
                                     index: index,
                                     isCurrentTrack: index == playerEngine.currentIndex,
                                     isDragging: draggedTrack?.stableId == track.stableId,
-                                    artistName: track.artistId.flatMap { artistNameCache[$0] },
+                                    artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
                                     onTap: {
                                         jumpToTrack(at: index)
                                     }

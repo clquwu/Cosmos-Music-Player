@@ -173,6 +173,9 @@ struct AlbumDetailScreen: View {
     }
     
     private var albumArtist: String {
+        if let albumArtist = album.albumArtist, !albumArtist.isEmpty {
+            return albumArtist
+        }
         if let artistId = album.artistId,
            let artistName = artistNameCache[artistId] {
             return artistName
@@ -299,7 +302,7 @@ struct AlbumDetailScreen: View {
                                     AlbumTrackRowView(
                                         track: track,
                                         trackNumber: track.trackNo ?? (index + 1),
-                                        artistName: track.artistId.flatMap { artistNameCache[$0] },
+                                        artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
                                         onTap: {
                                             Task {
                                                 await playerEngine.playTrack(track, queue: filteredAlbumTracks)
@@ -444,9 +447,7 @@ struct AlbumTrackRowView: View {
                        let artist = try? DatabaseManager.shared.read({ db in
                            try Artist.fetchOne(db, key: artistId)
                        }),
-                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
-                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
-                       }) {
+                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
                         NavigationLink(destination: ArtistDetailScreenWrapper(artistName: artist.name, allTracks: allArtistTracks)) {
                             Label(Localized.showArtistPage, systemImage: "person.circle")
                         }

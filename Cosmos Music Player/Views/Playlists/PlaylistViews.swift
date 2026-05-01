@@ -3,6 +3,29 @@ import GRDB
 import PhotosUI
 import WidgetKit
 
+fileprivate extension UIImage {
+    func squarePlaylistCover(targetSize: CGFloat = 1024) -> UIImage {
+        guard size.width > 0, size.height > 0 else {
+            return self
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let outputSize = CGSize(width: targetSize, height: targetSize)
+
+        return UIGraphicsImageRenderer(size: outputSize, format: format).image { _ in
+            let fillScale = max(targetSize / size.width, targetSize / size.height)
+            let drawSize = CGSize(width: size.width * fillScale, height: size.height * fillScale)
+            let drawOrigin = CGPoint(
+                x: (targetSize - drawSize.width) / 2,
+                y: (targetSize - drawSize.height) / 2
+            )
+
+            draw(in: CGRect(origin: drawOrigin, size: drawSize))
+        }
+    }
+}
 
 struct PlaylistsScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
@@ -372,9 +395,10 @@ struct PlaylistCardView: View {
         // Create unique filename for this playlist cover
         let filename = "playlist_cover_\(playlistId).jpg"
         let fileURL = containerURL.appendingPathComponent(filename)
+        let coverImage = image.squarePlaylistCover()
 
-        // Convert image to JPEG data with compression
-        guard let jpegData = image.jpegData(compressionQuality: 0.8) else {
+        // Save a normalized square image so all playlist covers match standard artwork sizing.
+        guard let jpegData = coverImage.jpegData(compressionQuality: 0.85) else {
             print("❌ Failed to convert image to JPEG")
             return
         }
@@ -391,7 +415,7 @@ struct PlaylistCardView: View {
             )
 
             // Update UI
-            customCoverImage = image
+            customCoverImage = coverImage
 
             // Notify widgets to refresh
             WidgetCenter.shared.reloadAllTimelines()
@@ -646,7 +670,7 @@ struct PlaylistDetailScreen: View {
                                 track: track,
                                 playlist: playlist,
                                 isEditMode: isEditMode,
-                                artistName: track.artistId.flatMap { artistNameCache[$0] },
+                                artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
                                 onTap: {
                                     Task {
                                         guard let playlistId = playlist.id else { return }
@@ -915,9 +939,10 @@ struct PlaylistDetailScreen: View {
         // Create unique filename for this playlist cover
         let filename = "playlist_cover_\(playlistId).jpg"
         let fileURL = containerURL.appendingPathComponent(filename)
+        let coverImage = image.squarePlaylistCover()
 
-        // Convert image to JPEG data with compression
-        guard let jpegData = image.jpegData(compressionQuality: 0.8) else {
+        // Save a normalized square image so all playlist covers match standard artwork sizing.
+        guard let jpegData = coverImage.jpegData(compressionQuality: 0.85) else {
             print("❌ Failed to convert image to JPEG")
             return
         }
@@ -934,7 +959,7 @@ struct PlaylistDetailScreen: View {
             )
 
             // Update UI
-            customCoverImage = image
+            customCoverImage = coverImage
 
             // Notify widgets to refresh
             WidgetCenter.shared.reloadAllTimelines()
@@ -1101,9 +1126,7 @@ struct PlaylistTrackRowView: View {
                        let artist = try? DatabaseManager.shared.read({ db in
                                try Artist.fetchOne(db, key: artistId)
                            }),
-                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
-                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
-                       }) {
+                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
                         NavigationLink(destination: ArtistDetailScreenWrapper(artistName: artist.name, allTracks: allArtistTracks)) {
                             Label(Localized.showArtistPage, systemImage: "person.circle")
                         }

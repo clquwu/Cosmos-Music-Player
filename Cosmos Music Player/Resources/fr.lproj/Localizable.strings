@@ -102,6 +102,11 @@
 "choose_visible_sections" = "Choisissez quelles sections sont visibles sur l'écran d'accueil";
 "remove_from_library_only" = "Supprimer de la bibliothèque uniquement";
 "remove_from_library_only_description" = "Lorsque cette option est activée, la suppression d'une piste la retire uniquement de la bibliothèque. Le fichier restera sur le disque.";
+"player_controls" = "Contrôles du lecteur";
+"show_lyrics_button" = "Afficher le bouton Paroles";
+"show_lyrics_button_description" = "Affiche le bouton des paroles dans le lecteur lorsque le bouton de minuterie de sommeil est désactivé.";
+"show_sleep_timer_button" = "Afficher la minuterie de sommeil";
+"show_sleep_timer_button_description" = "Remplace le bouton des paroles dans le lecteur par une minuterie de sommeil.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Ajouter aux favoris";
@@ -262,6 +267,15 @@
 /* Queue Actions */
 "play_next" = "Lire ensuite";
 "add_to_queue" = "Ajouter à la file";
+
+/* Sleep Timer */
+"sleep_timer" = "Minuterie de sommeil";
+"sleep_timer_off" = "Minuterie désactivée";
+"sleep_timer_15_minutes" = "15 minutes";
+"sleep_timer_30_minutes" = "30 minutes";
+"sleep_timer_45_minutes" = "45 minutes";
+"sleep_timer_60_minutes" = "60 minutes";
+"cancel_sleep_timer" = "Annuler la minuterie";
 
 /* Bulk Selection */
 "select" = "Sélectionner";

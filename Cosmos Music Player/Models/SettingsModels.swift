@@ -105,6 +105,8 @@ struct DeleteSettings: Codable {
     var dsdPlaybackMode: DSDPlaybackMode = .pcm
     var deleteFromLibraryOnly: Bool = false
     var lastLibraryScanDate: Date? = nil
+    var showLyricsButton: Bool = true
+    var showSleepTimerButton: Bool = false
 
     // Home screen section visibility & order
     var homeSections: [HomeSectionItem] = HomeSectionItem.defaultSections
@@ -120,6 +122,8 @@ struct DeleteSettings: Codable {
         dsdPlaybackMode = try container.decodeIfPresent(DSDPlaybackMode.self, forKey: .dsdPlaybackMode) ?? .pcm
         deleteFromLibraryOnly = try container.decodeIfPresent(Bool.self, forKey: .deleteFromLibraryOnly) ?? false
         lastLibraryScanDate = try container.decodeIfPresent(Date.self, forKey: .lastLibraryScanDate)
+        showLyricsButton = try container.decodeIfPresent(Bool.self, forKey: .showLyricsButton) ?? true
+        showSleepTimerButton = try container.decodeIfPresent(Bool.self, forKey: .showSleepTimerButton) ?? false
 
         var decoded = try container.decodeIfPresent([HomeSectionItem].self, forKey: .homeSections) ?? HomeSectionItem.defaultSections
         // Ensure any new sections added in future updates are included

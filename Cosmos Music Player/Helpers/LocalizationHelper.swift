@@ -117,6 +117,11 @@ struct Localized {
     static let chooseVisibleSections = "choose_visible_sections".localized
     static let removeFromLibraryOnly = "remove_from_library_only".localized
     static let removeFromLibraryOnlyDescription = "remove_from_library_only_description".localized
+    static let playerControls = "player_controls".localized
+    static let showLyricsButton = "show_lyrics_button".localized
+    static let showLyricsButtonDescription = "show_lyrics_button_description".localized
+    static let showSleepTimerButton = "show_sleep_timer_button".localized
+    static let showSleepTimerButtonDescription = "show_sleep_timer_button_description".localized
     
     // MARK: - Liked Songs Actions
     static let addToLikedSongs = "add_to_liked_songs".localized
@@ -324,6 +329,15 @@ struct Localized {
     // MARK: - Queue Actions
     static let playNext = "play_next".localized
     static let addToQueue = "add_to_queue".localized
+
+    // MARK: - Sleep Timer
+    static let sleepTimer = "sleep_timer".localized
+    static let sleepTimerOff = "sleep_timer_off".localized
+    static let sleepTimer15Minutes = "sleep_timer_15_minutes".localized
+    static let sleepTimer30Minutes = "sleep_timer_30_minutes".localized
+    static let sleepTimer45Minutes = "sleep_timer_45_minutes".localized
+    static let sleepTimer60Minutes = "sleep_timer_60_minutes".localized
+    static let cancelSleepTimer = "cancel_sleep_timer".localized
 
     // MARK: - Bulk Selection
     static let select = "select".localized

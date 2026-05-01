@@ -16,6 +16,12 @@ class DatabaseManager: @unchecked Sendable {
     private let maxRetries = 3
     private let retryDelay: UInt64 = 500_000_000 // 0.5 seconds in nanoseconds
 
+    static func generatePathStableId(forPath path: String) -> String {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        let digest = SHA256.hash(data: normalizedPath.data(using: .utf8) ?? Data())
+        return digest.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
     private init() {
         setupDatabaseWithRetry()
     }
@@ -154,6 +160,24 @@ class DatabaseManager: @unchecked Sendable {
                     has_embedded_art INTEGER DEFAULT 0
                 )
             """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS track_artist (
+                    track_stable_id TEXT NOT NULL,
+                    artist_id INTEGER NOT NULL REFERENCES artist(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    PRIMARY KEY (track_stable_id, artist_id)
+                )
+            """)
+
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS album_artist_link (
+                    album_id INTEGER NOT NULL REFERENCES album(id) ON DELETE CASCADE,
+                    artist_id INTEGER NOT NULL REFERENCES artist(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    PRIMARY KEY (album_id, artist_id)
+                )
+            """)
             
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS favorite (
@@ -193,6 +217,10 @@ class DatabaseManager: @unchecked Sendable {
 
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_album ON track(album_id)")
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist ON track(artist_id)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist_artist ON track_artist(artist_id)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist_track ON track_artist(track_stable_id)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_album_artist_link_artist ON album_artist_link(artist_id)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_album_artist_link_album ON album_artist_link(album_id)")
 
             // EQ Tables
             try db.execute(sql: """
@@ -255,6 +283,8 @@ class DatabaseManager: @unchecked Sendable {
     }
 
     private func migrateDatabaseIfNeeded() throws {
+        var stableIdRemapping: [String: String] = [:]
+
         try write { db in
             // Migration: Add folder sync columns to playlist table
             do {
@@ -303,111 +333,132 @@ class DatabaseManager: @unchecked Sendable {
                 print("ℹ️ Database migration: deleted_folder_playlist table already exists or migration failed: \(error)")
             }
 
-            // First, deduplicate by filename before updating stable IDs
+            do {
+                try db.execute(sql: """
+                    CREATE TABLE IF NOT EXISTS track_artist (
+                        track_stable_id TEXT NOT NULL,
+                        artist_id INTEGER NOT NULL REFERENCES artist(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL,
+                        PRIMARY KEY (track_stable_id, artist_id)
+                    )
+                """)
+                try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist_artist ON track_artist(artist_id)")
+                try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_artist_track ON track_artist(track_stable_id)")
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO track_artist (track_stable_id, artist_id, position)
+                    SELECT stable_id, artist_id, 0
+                    FROM track
+                    WHERE artist_id IS NOT NULL
+                """)
+                print("✅ Database: Created/backfilled track_artist table")
+            } catch {
+                print("⚠️ Database migration: track_artist table setup failed: \(error)")
+            }
+
+            do {
+                try db.execute(sql: """
+                    CREATE TABLE IF NOT EXISTS album_artist_link (
+                        album_id INTEGER NOT NULL REFERENCES album(id) ON DELETE CASCADE,
+                        artist_id INTEGER NOT NULL REFERENCES artist(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL,
+                        PRIMARY KEY (album_id, artist_id)
+                    )
+                """)
+                try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_album_artist_link_artist ON album_artist_link(artist_id)")
+                try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_album_artist_link_album ON album_artist_link(album_id)")
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO album_artist_link (album_id, artist_id, position)
+                    SELECT id, artist_id, 0
+                    FROM album
+                    WHERE artist_id IS NOT NULL
+                """)
+                print("✅ Database: Created/backfilled album_artist_link table")
+            } catch {
+                print("⚠️ Database migration: album_artist_link table setup failed: \(error)")
+            }
+
+            // Migration: remove true duplicates that point at the exact same file path.
+            // Do not deduplicate by filename; different album folders may legally contain same-named files.
             do {
                 let allTracks = try Track.fetchAll(db)
-
-                // Group by filename (what the new stable_id will be)
-                let groupedByFilename = Dictionary(grouping: allTracks, by: { track -> String in
-                    let url = URL(fileURLWithPath: track.path)
-                    return url.lastPathComponent
+                let groupedByPath = Dictionary(grouping: allTracks, by: { track in
+                    URL(fileURLWithPath: track.path).standardizedFileURL.path
                 })
 
-                var removedCount = 0
-
-                for (filename, duplicates) in groupedByFilename where duplicates.count > 1 {
-                    print("⚠️ Found \(duplicates.count) tracks with same filename: \(filename)")
-
-                    // Keep the most recent one (highest ID = most recently added)
+                for (path, duplicates) in groupedByPath where duplicates.count > 1 {
                     let sorted = duplicates.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
                     let keep = sorted.first!
-                    let remove = Array(sorted.dropFirst())
 
-                    print("✅ Keeping track ID \(keep.id ?? 0): \(keep.title)")
-
-                    for duplicate in remove {
-                        // Transfer favorites to the kept track
+                    for duplicate in sorted.dropFirst() {
                         try db.execute(
                             sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
                             arguments: [keep.stableId, duplicate.stableId]
                         )
-
-                        // Transfer playlist items to the kept track
                         try db.execute(
-                            sql: "UPDATE OR IGNORE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
+                            sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
                             arguments: [keep.stableId, duplicate.stableId]
                         )
-
-                        // Delete remaining orphaned references
                         try db.execute(
-                            sql: "DELETE FROM favorite WHERE track_stable_id = ?",
-                            arguments: [duplicate.stableId]
+                            sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
+                            arguments: [keep.stableId, duplicate.stableId]
                         )
-                        try db.execute(
-                            sql: "DELETE FROM playlist_item WHERE track_stable_id = ?",
-                            arguments: [duplicate.stableId]
-                        )
-
-                        // Delete the duplicate track
+                        try db.execute(sql: "DELETE FROM favorite WHERE track_stable_id = ?", arguments: [duplicate.stableId])
+                        try db.execute(sql: "DELETE FROM playlist_item WHERE track_stable_id = ?", arguments: [duplicate.stableId])
+                        try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [duplicate.stableId])
                         try Track.filter(Column("id") == duplicate.id).deleteAll(db)
-                        print("🗑️ Removed duplicate track ID \(duplicate.id ?? 0): \(duplicate.title)")
-                        removedCount += 1
                     }
-                }
 
-                if removedCount > 0 {
-                    print("✅ Removed \(removedCount) duplicate tracks by filename")
-                } else {
-                    print("ℹ️ No duplicate tracks found by filename")
+                    print("✅ Database: Removed \(duplicates.count - 1) duplicate track row(s) for path: \(path)")
                 }
-
             } catch {
-                print("⚠️ Filename deduplication failed: \(error)")
+                print("⚠️ Database migration: Path duplicate cleanup failed: \(error)")
             }
 
-            // Now update stable IDs from path-based to filename-based
+            // Migration: filename-based stable IDs collapse same-named songs in different albums.
+            // Use normalized full paths so files in different folders remain distinct even with identical filenames.
             do {
                 let tracks = try Track.fetchAll(db)
                 var updatedCount = 0
 
                 for track in tracks {
-                    // Generate new stable ID based on filename only
-                    let url = URL(fileURLWithPath: track.path)
-                    let filename = url.lastPathComponent
-                    let newStableId = SHA256.hash(data: filename.data(using: .utf8) ?? Data())
-                        .compactMap { String(format: "%02x", $0) }.joined()
+                    let newStableId = Self.generatePathStableId(forPath: track.path)
 
-                    // Only update if stable ID changed
-                    if track.stableId != newStableId {
-                        // Update track
-                        try db.execute(
-                            sql: "UPDATE track SET stable_id = ? WHERE id = ?",
-                            arguments: [newStableId, track.id]
-                        )
-
-                        // Update favorites references
-                        try db.execute(
-                            sql: "UPDATE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
-                            arguments: [newStableId, track.stableId]
-                        )
-
-                        // Update playlist item references
-                        try db.execute(
-                            sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
-                            arguments: [newStableId, track.stableId]
-                        )
-
-                        updatedCount += 1
+                    guard track.stableId != newStableId else {
+                        continue
                     }
+
+                    try db.execute(
+                        sql: "UPDATE track SET stable_id = ? WHERE id = ?",
+                        arguments: [newStableId, track.id]
+                    )
+
+                    try db.execute(
+                        sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
+                        arguments: [newStableId, track.stableId]
+                    )
+
+                    try db.execute(
+                        sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
+                        arguments: [newStableId, track.stableId]
+                    )
+
+                    try db.execute(
+                        sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
+                        arguments: [newStableId, track.stableId]
+                    )
+                    try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [track.stableId])
+
+                    stableIdRemapping[track.stableId] = newStableId
+                    updatedCount += 1
                 }
 
                 if updatedCount > 0 {
-                    print("✅ Database: Migrated \(updatedCount) stable IDs from path-based to filename-based")
+                    print("✅ Database: Migrated \(updatedCount) stable IDs from filename-based to path-based")
                 } else {
-                    print("ℹ️ Database: Stable IDs already filename-based")
+                    print("ℹ️ Database: Stable IDs already path-based")
                 }
             } catch {
-                print("⚠️ Database migration: Stable ID migration failed: \(error)")
+                print("⚠️ Database migration: Path-based stable ID migration failed: \(error)")
                 // Don't throw - allow app to continue and re-index will handle it
             }
 
@@ -418,6 +469,42 @@ class DatabaseManager: @unchecked Sendable {
             } catch {
                 print("⚠️ Database migration: Failed to create UNIQUE index on stable_id: \(error)")
             }
+        }
+
+        migrateExternalFileBookmarkKeys(stableIdRemapping)
+    }
+
+    private func migrateExternalFileBookmarkKeys(_ stableIdRemapping: [String: String]) {
+        guard !stableIdRemapping.isEmpty else { return }
+
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+
+        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else { return }
+
+        do {
+            let data = try Data(contentsOf: bookmarksURL)
+            guard var bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else {
+                return
+            }
+
+            var updatedCount = 0
+            for (oldStableId, newStableId) in stableIdRemapping {
+                guard let bookmarkData = bookmarks.removeValue(forKey: oldStableId) else {
+                    continue
+                }
+
+                bookmarks[newStableId] = bookmarkData
+                updatedCount += 1
+            }
+
+            guard updatedCount > 0 else { return }
+
+            let updatedData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
+            try updatedData.write(to: bookmarksURL, options: .atomic)
+            print("✅ Database: Migrated \(updatedCount) external bookmark stable IDs")
+        } catch {
+            print("⚠️ Database migration: Failed to migrate external bookmark stable IDs: \(error)")
         }
     }
 
@@ -448,6 +535,11 @@ class DatabaseManager: @unchecked Sendable {
                         sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
                         arguments: [track.stableId, duplicate.stableId]
                     )
+                    try db.execute(
+                        sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
+                        arguments: [track.stableId, duplicate.stableId]
+                    )
+                    try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [duplicate.stableId])
                     // Delete the duplicate
                     try Track.filter(Column("id") == duplicate.id).deleteAll(db)
                     print("🗑️ Removed duplicate track with old stable_id: \(duplicate.stableId)")
@@ -455,6 +547,38 @@ class DatabaseManager: @unchecked Sendable {
             }
 
             try track.save(db)
+        }
+    }
+
+    func setTrackArtists(trackStableId: String, artistIds: [Int64]) throws {
+        try write { db in
+            try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [trackStableId])
+
+            for (position, artistId) in artistIds.enumerated() {
+                try db.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO track_artist (track_stable_id, artist_id, position)
+                        VALUES (?, ?, ?)
+                    """,
+                    arguments: [trackStableId, artistId, position]
+                )
+            }
+        }
+    }
+
+    func setAlbumArtists(albumId: Int64, artistIds: [Int64]) throws {
+        try write { db in
+            try db.execute(sql: "DELETE FROM album_artist_link WHERE album_id = ?", arguments: [albumId])
+
+            for (position, artistId) in artistIds.enumerated() {
+                try db.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO album_artist_link (album_id, artist_id, position)
+                        VALUES (?, ?, ?)
+                    """,
+                    arguments: [albumId, artistId, position]
+                )
+            }
         }
     }
     
@@ -506,9 +630,9 @@ class DatabaseManager: @unchecked Sendable {
         return try write { db in
             let normalizedTitle = self.normalizeAlbumTitle(title)
             
-            // More efficient query: try exact match first
+            // Match albums by title and primary artist. The same album title can exist for different artists.
             if let existing = try Album
-                .filter(Column("title") == normalizedTitle)
+                .filter(Column("title") == normalizedTitle && Column("artist_id") == artistId)
                 .fetchOne(db) {
                 return existing
             }
@@ -520,6 +644,8 @@ class DatabaseManager: @unchecked Sendable {
                 let existingNormalized = self.normalizeAlbumTitle(existing.title)
                 
                 // Match by normalized title (case-insensitive)
+                guard existing.artistId == artistId else { continue }
+
                 if existingNormalized.lowercased() == normalizedTitle.lowercased() {
                     return existing
                 }
@@ -608,6 +734,22 @@ class DatabaseManager: @unchecked Sendable {
         }
     }
 
+    func getAlbumsByArtistId(_ artistId: Int64) throws -> [Album] {
+        return try read { db in
+            return try Album.fetchAll(
+                db,
+                sql: """
+                    SELECT DISTINCT album.*
+                    FROM album
+                    LEFT JOIN album_artist_link ON album_artist_link.album_id = album.id
+                    WHERE album.artist_id = ? OR album_artist_link.artist_id = ?
+                    ORDER BY album.title
+                """,
+                arguments: [artistId, artistId]
+            )
+        }
+    }
+
     func searchAlbums(query: String, limit: Int = 30) throws -> [Album] {
         return try read { db in
             let pattern = "%\(query)%"
@@ -652,6 +794,29 @@ class DatabaseManager: @unchecked Sendable {
             }
 
             return result
+        }
+    }
+
+    func getArtistDisplayName(forTrackStableId stableId: String, fallbackArtistId: Int64?) throws -> String? {
+        return try read { db in
+            let names = try String.fetchAll(
+                db,
+                sql: """
+                    SELECT artist.name
+                    FROM track_artist
+                    JOIN artist ON artist.id = track_artist.artist_id
+                    WHERE track_artist.track_stable_id = ?
+                    ORDER BY track_artist.position
+                """,
+                arguments: [stableId]
+            )
+
+            if !names.isEmpty {
+                return names.joined(separator: " / ")
+            }
+
+            guard let fallbackArtistId else { return nil }
+            return try Artist.fetchOne(db, key: fallbackArtistId)?.name
         }
     }
 
@@ -727,10 +892,17 @@ class DatabaseManager: @unchecked Sendable {
 
     func getTracksByArtistId(_ artistId: Int64) throws -> [Track] {
         return try read { db in
-            return try Track
-                .filter(Column("artist_id") == artistId)
-                .order(Column("title"))
-                .fetchAll(db)
+            return try Track.fetchAll(
+                db,
+                sql: """
+                    SELECT DISTINCT track.*
+                    FROM track
+                    LEFT JOIN track_artist ON track_artist.track_stable_id = track.stable_id
+                    WHERE track.artist_id = ? OR track_artist.artist_id = ?
+                    ORDER BY track.title
+                """,
+                arguments: [artistId, artistId]
+            )
         }
     }
 
@@ -996,6 +1168,12 @@ class DatabaseManager: @unchecked Sendable {
                     SELECT DISTINCT artist_id
                     FROM track
                     WHERE artist_id IS NOT NULL
+                    UNION
+                    SELECT DISTINCT artist_id
+                    FROM track_artist
+                    UNION
+                    SELECT DISTINCT artist_id
+                    FROM album_artist_link
                 )
             """)
         }

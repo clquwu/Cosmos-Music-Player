@@ -168,7 +168,13 @@ struct ArtistDetailScreen: View {
     }
     
     private var artistTracks: [Track] {
-        let tracks = allTracks.filter { $0.artistId == artist.id }
+        let tracks: [Track]
+        if let artistId = artist.id,
+           let databaseTracks = try? appCoordinator.databaseManager.getTracksByArtistId(artistId) {
+            tracks = databaseTracks
+        } else {
+            tracks = allTracks.filter { $0.artistId == artist.id }
+        }
 
         // Filter out incompatible formats when connected to CarPlay
         if SFBAudioEngineManager.shared.isCarPlayEnvironment {
@@ -183,12 +189,8 @@ struct ArtistDetailScreen: View {
     }
     
     private var artistAlbums: [Album] {
-        do {
-            let albums = try appCoordinator.getAllAlbums()
-            return albums.filter { $0.artistId == artist.id }
-        } catch {
-            return []
-        }
+        guard let artistId = artist.id else { return [] }
+        return (try? appCoordinator.databaseManager.getAlbumsByArtistId(artistId)) ?? []
     }
     
     var body: some View {
@@ -705,9 +707,7 @@ struct ArtistTrackRowView: View {
                        let artist = try? DatabaseManager.shared.read({ db in
                            try Artist.fetchOne(db, key: artistId)
                        }),
-                       let allArtistTracks = try? DatabaseManager.shared.read({ db in
-                           try Track.filter(Column("artist_id") == artistId).fetchAll(db)
-                       }) {
+                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
                         NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
                             Label(Localized.showArtistPage, systemImage: "person.circle")
                         }

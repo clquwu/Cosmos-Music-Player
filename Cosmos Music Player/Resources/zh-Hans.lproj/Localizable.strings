@@ -1,0 +1,290 @@
+/* Playlist related strings */
+"playlists" = "播放列表";
+"no_playlists_yet" = "暂无播放列表";
+"create_playlists_instruction" = "请从媒体库中选择歌曲来创建你的播放列表";
+"add_to_playlist" = "添加到播放列表";
+"create_new_playlist" = "新建播放列表";
+"create_playlist" = "创建播放列表";
+"playlist_name_placeholder" = "播放列表名称";
+"enter_playlist_name" = "请输入新播放列表的名称";
+"delete_playlist" = "删除播放列表";
+"delete_playlist_confirmation" = "你确定要删除 '%@' 吗？此操作无法撤销。";
+"delete" = "删除";
+"cancel" = "取消";
+"create" = "创建";
+"done" = "完成";
+"edit" = "编辑";
+"edit_playlist" = "编辑播放列表";
+"save" = "保存";
+"enter_new_name" = "为该播放列表输入一个新名称";
+"manage_playlists" = "管理播放列表";
+"playlist" = "播放列表";
+"songs_count_singular" = "%d 首歌曲";
+"songs_count_plural" = "%d 首歌曲";
+"created_date" = "创建于 %@";
+"no_songs_found" = "未找到歌曲";
+"your_music_will_appear_here" = "如何添加你的无损音乐：\n\n1. 打开 iOS 自带的「文件」App（或点击下方“打开文件”按钮）\n2. 找到以下任意路径：\n   • iCloud 云盘 → Cosmos Music Player 文件夹\n   • 我的 iPhone → Cosmos Music Player\n3. 将你的音乐文件移动或拷贝到上述文件夹中即可";
+"create_first_playlist" = "创建你的第一个播放列表开始听歌吧";
+
+/* General UI strings */
+"all_songs" = "所有歌曲";
+"liked_songs" = "我喜欢的音乐";
+"add_songs" = "打开文件";
+"import_music_files" = "导入音乐文件";
+"ok" = "确定";
+"settings" = "设置";
+"retry" = "重试";
+"open_settings" = "打开设置";
+"continue" = "继续";
+"back" = "返回";
+"get_started" = "开始使用";
+"im_signed_in" = "我已登录";
+"its_enabled" = "已启用";
+
+/* Library and Navigation */
+"library" = "媒体库";
+"artists" = "艺术家";
+"albums" = "专辑";
+"search" = "搜索";
+"browse" = "浏览文件";
+"songs" = "歌曲";
+"processing" = "正在处理";
+"waiting" = "等待中";
+"and_more" = "... 以及其他 %d 首";
+
+/* Artist/Album/Track Info */
+"no_artists_found" = "未找到艺术家";
+"artists_will_appear" = "添加音乐后，艺术家信息将显示在这里";
+"no_albums_found" = "未找到专辑";
+"albums_will_appear" = "添加音乐后，专辑信息将显示在这里";
+"artist" = "艺术家";
+"album" = "专辑";
+"track_number" = "音轨 %d";
+"play" = "播放";
+"shuffle" = "随机播放";
+"wrong_artist" = "艺术家信息有误？";
+"data_provided_by" = "数据由 %@ 提供";
+"open_spotify" = "打开 SPOTIFY";
+"loading_artist" = "正在加载艺术家信息...";
+
+/* Player */
+"playing_queue" = "播放队列";
+"no_songs_in_queue" = "队列中暂无歌曲";
+"no_track_selected" = "未选择曲目";
+
+/* Search */
+"search_your_music_library" = "搜索你的媒体库";
+"find_songs_artists_albums_playlists" = "查找歌曲、艺术家、专辑和播放列表";
+"no_results_found" = "未找到相关结果";
+"try_different_keywords" = "尝试使用不同的关键词搜索";
+
+/* Context Menu Actions */
+"show_artist_page" = "查看艺术家主页";
+"add_to_playlist_ellipsis" = "添加到播放列表...";
+"delete_file" = "删除源文件";
+"delete_file_confirmation" = "你确定要删除源文件 '%@' 吗？此操作将从硬盘彻底删除，无法撤销。";
+
+/* Settings */
+"appearance" = "外观";
+"information" = "关于";
+"minimalist_library_icons" = "极简媒体库图标";
+"force_dark_mode" = "强制深色模式";
+"version" = "版本";
+"app_name" = "应用名称";
+"cosmos_music_player" = "Cosmos Music Player";
+"github_repository" = "GitHub 开源仓库";
+"use_simple_icons" = "在媒体库界面中移除图标的彩色背景，使用极简风格。";
+"override_system_appearance" = "无视 iOS 系统外观设置，强制让应用保持深色模式。";
+"background_color" = "背景颜色";
+"choose_color_theme" = "为所有界面的背景效果选择你喜欢的主题色。";
+"library_section" = "媒体库";
+"home_sections" = "主页显示板块";
+"choose_visible_sections" = "自定义哪些板块将显示在你的主页上";
+"remove_from_library_only" = "仅从媒体库中移除";
+"remove_from_library_only_description" = "开启后，删除操作只会将曲目从媒体库中移除，你珍贵的无损原文件仍会安全保留在手机硬盘中。";
+"player_controls" = "播放器控制";
+"show_lyrics_button" = "显示歌词按钮";
+"show_lyrics_button_description" = "当睡眠定时按钮关闭时，在播放器中显示歌词按钮。";
+"show_sleep_timer_button" = "显示睡眠定时按钮";
+"show_sleep_timer_button_description" = "用睡眠定时按钮替换播放器中的歌词按钮。";
+
+/* Liked Songs Actions */
+"add_to_liked_songs" = "标为红心 (喜欢)";
+"remove_from_liked_songs" = "取消红心";
+
+/* Search Categories */
+"all" = "全部";
+
+/* Sync and Connection */
+"library_out_of_sync" = "媒体库未同步";
+"library_sync_message" = "你的媒体库目前与 iCloud 不同步。请重新登录 Apple ID 恢复所有功能。";
+"offline_mode" = "离线纯本地模式";
+"offline_mode_message" = "iCloud 同步已禁用。目前仅读取本地文件夹中的音乐文件。";
+"icloud_connection_required" = "需要连接 iCloud";
+
+/* Tutorial/Onboarding */
+"welcome_to_cosmos" = "欢迎使用 Cosmos";
+"sign_in_to_apple_id" = "登录 Apple ID";
+"sign_in_message" = "为了在多台设备间同步你的无损音乐和收藏夹，请确保已登录 Apple ID。";
+"if_signed_in_continue" = "如果你已登录，请点击继续";
+"enable_icloud_drive" = "启用 iCloud 云盘";
+"icloud_drive_message" = "启用 iCloud 云盘后，你可以在任何设备上访问你的音乐库并保持配置同步。";
+"if_icloud_enabled_continue" = "如果已启用 iCloud 云盘，请点击继续";
+"add_your_music" = "添加你的本地音乐";
+"how_to_add_music" = "你可以将音乐文件放入 iCloud 云盘 (多端同步)，或者仅存入本机 (纯本地播放)：";
+"open_files_app" = "打开「文件」App";
+"navigate_to_icloud_drive" = "进入「iCloud 云盘」";
+"find_cosmos_player_folder" = "找到「Cosmos Music Player」文件夹";
+"add_your_music_instruction" = "导入你的音乐";
+
+/* Tutorial Status Messages */
+"signed_in_to_apple_id" = "Apple ID 已登录";
+"not_signed_in_to_apple_id" = "Apple ID 未登录";
+"cannot_detect_apple_id_status" = "无法检测 Apple ID 状态";
+"icloud_drive_enabled" = "iCloud 云盘已启用";
+"icloud_drive_not_enabled" = "iCloud 云盘未启用";
+"cannot_detect_icloud_status" = "无法检测 iCloud 云盘状态";
+
+/* Tutorial Instructions */
+"find_open_files_app" = "在手机桌面上找到并打开蓝色的「文件」App";
+"tap_icloud_drive_sidebar" = "在浏览页面选择「iCloud 云盘」或「我的 iPhone」";
+"look_for_cosmos_folder" = "找到名为「Cosmos Music Player」的文件夹并点开";
+"copy_music_files" = "将你的 DSD、FLAC、WAV 等无损文件拷贝进这个文件夹";
+
+/* Library Processing */
+"found_tracks" = "已找到 %d 首曲目";
+"processing_colon" = "🎵 正在解码处理:";
+"waiting_colon" = "⏳ 等待处理:";
+"percent_complete" = "%d%%";
+
+/* Subtitles and descriptions */
+"songs_count" = "%d 首歌曲";
+"your_favorites" = "你的收藏";
+"your_playlists" = "你的播放列表";
+"browse_by_artist" = "按艺术家浏览";
+"browse_by_album" = "按专辑浏览";
+"unknown_album" = "未知专辑";
+"unknown_artist" = "未知艺术家";
+
+/* Sync result messages */
+"sync_no_new_tracks" = "未发现新歌曲";
+"sync_one_new_track" = "发现了 1 首新歌";
+"sync_multiple_new_tracks" = "发现了 %d 首新歌";
+"sync_one_track_deleted" = "已移除 1 首歌曲";
+"sync_multiple_tracks_deleted" = "已移除 %d 首歌曲";
+"sync_no_changes" = "媒体库已是最新状态";
+
+/* Equalizer strings */
+"equalizer" = "专业均衡器 (EQ)";
+"graphic_equalizer" = "图示均衡器 (Graphic EQ)";
+"enable_equalizer" = "启用均衡器";
+"enable_disable_eq_description" = "开启或关闭全局图示均衡器";
+
+/* Manual EQ Presets */
+"manual_eq_presets" = "手动 16 段 EQ 预设";
+"no_manual_presets_created" = "暂无手动创建的预设";
+"create_manual_eq_description" = "通过滑动推子，创建自定义的 16 段均衡器预设";
+"create_manual_16band_eq" = "新建手动 16 段 EQ";
+"manual_16band_eq" = "手动 16 段 EQ";
+"manual_16band_description" = "创建一个带有标准 ISO 频段的 16 段均衡器，你可以自由进行微调";
+"adjust_bands_after_creation" = "创建完成后，你可以随时调整所有的频段参数";
+"frequency_bands" = "频段";
+"edit_equalizer" = "编辑均衡器";
+"reset_to_flat" = "重置为平直 (Flat)";
+
+/* Imported GraphicEQ Presets */
+"imported_presets" = "已导入的预设";
+"no_presets_imported" = "暂无导入的预设";
+"import_graphiceq_description" = "导入第三方 GraphicEQ .txt 参数文件来快速调音";
+"imported_graphiceq" = "导入的 GraphicEQ";
+"import_graphiceq_file" = "导入 GraphicEQ 文件";
+
+/* General EQ Settings */
+"global_settings" = "全局设置";
+"global_gain" = "全局增益 (Gain)";
+"global_gain_description" = "调整 EQ 处理后的整体输出音量，防止爆音";
+"about_graphiceq_format" = "关于 GraphicEQ 格式说明";
+"import_graphiceq_format_description" = "请导入符合以下格式的 GraphicEQ .txt 配置文件：";
+"frequency_gain_pair_description" = "每对参数代表：频率 (Hz) 和 增益 (dB)";
+"delete" = "删除";
+"export" = "导出";
+"edit" = "编辑";
+"cancel" = "取消";
+"done" = "完成";
+"save" = "保存";
+"create" = "创建";
+"preset_info" = "预设信息";
+
+/* GraphicEQ Import View */
+"import_graphiceq" = "导入 GraphicEQ";
+"preset_name" = "预设名称";
+"enter_preset_name" = "请输入预设名称";
+"import_methods" = "导入方式";
+"import_from_txt_file" = "从 .txt 文件导入";
+"paste_graphiceq_text" = "粘贴 GraphicEQ 文本";
+"error" = "错误";
+"format_info" = "格式说明";
+"expected_graphiceq_format" = "系统支持的 GraphicEQ 格式：";
+"frequency_gain_pair" = "每组参数：频率 (Hz) 增益 (dB)";
+
+/* Text Import View */
+"paste_graphiceq" = "粘贴 GraphicEQ";
+"paste_graphiceq_text_section" = "将参数文本粘贴在此处";
+"example" = "示例";
+"import" = "导入";
+
+/* Error Messages */
+"failed_to_import" = "导入失败: %@";
+"file_import_failed" = "文件导入失败: %@";
+"failed_to_create" = "创建失败: %@";
+"failed_to_export" = "预设导出失败";
+"failed_to_delete" = "预设删除失败";
+
+/* EQ Band Information */
+"band_count_info" = "%d 段 (已从 %d 段压缩)";
+"bands_reduced_description" = "你导入的 EQ 频段数超出了 iOS 底层音频框架的上限。系统已智能计算并合并频率，将你的 %d 段 EQ 压缩适配为 %d 段。";
+"bands_limited_warning" = "⚠️ 图示均衡器已从 %d 段压缩为 %d 段 (受 iOS 系统限制)";
+
+/* Audio Settings */
+"audio_settings" = "音频引擎与解码";
+"dsd_playback_mode" = "DSD 解码输出模式";
+"dsd_playback_mode_description" = "选择 DSD (DSF/DFF) 音频文件的底层解码与播放方式";
+"dsd_mode_auto" = "自动 (智能检测外接 DAC)";
+"dsd_mode_pcm" = "PCM 转换 (软解直推)";
+"dsd_mode_dop" = "DoP (DSD over PCM 源码输出)";
+"dsd_mode_auto_description" = "自动侦测是否插入了外接解码器(小尾巴)，若支持则优先启用 DoP 源码直通，否则自动转换为 PCM 播放。";
+"dsd_mode_pcm_description" = "强制将 DSD 软解转换为高采样率 PCM 格式播放（完美兼容手机扬声器、蓝牙及普通耳机）。";
+"dsd_mode_dop_description" = "强制打包为 DoP 源码输出（警告：必须连接支持 DSD 硬解的专业外接 DAC 设备，否则会产生严重爆音！）";
+
+/* Sort Options */
+"sort_date_newest" = "按添加时间 (从新到旧)";
+"sort_date_oldest" = "按添加时间 (从旧到新)";
+"sort_name_az" = "按名称 (A-Z)";
+"sort_name_za" = "按名称 (Z-A)";
+"sort_size_largest" = "按文件大小 (从大到小)";
+"sort_size_smallest" = "按文件大小 (从小到大)";
+
+/* Queue Actions */
+"play_next" = "下一首播放";
+"add_to_queue" = "添加到播放队列";
+
+/* Sleep Timer */
+"sleep_timer" = "睡眠定时";
+"sleep_timer_off" = "睡眠定时已关闭";
+"sleep_timer_15_minutes" = "15 分钟";
+"sleep_timer_30_minutes" = "30 分钟";
+"sleep_timer_45_minutes" = "45 分钟";
+"sleep_timer_60_minutes" = "60 分钟";
+"cancel_sleep_timer" = "取消睡眠定时";
+
+/* Bulk Selection */
+"select" = "选择";
+"select_all" = "全选";
+"bulk_actions" = "批量操作";
+"add_to_liked" = "批量添加红心";
+"remove_from_liked" = "批量取消红心";
+"delete_files" = "删除源文件";
+"delete_files_confirmation" = "删除文件确认";
+"selected_count_singular" = "已选择 %d 项";
+"selected_count_plural" = "已选择 %d 项";
+"delete_files_confirmation_message" = "你确定要彻底删除这 %d 个源文件吗？此操作将从硬盘抹除，无法撤销。";
