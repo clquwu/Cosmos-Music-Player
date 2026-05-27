@@ -1,0 +1,290 @@
+/* Playlist related strings */
+"playlists" = "Плейлисты";
+"no_playlists_yet" = "Плейлистов пока нет";
+"create_playlists_instruction" = "Создавайте плейлисты, добавляя в них песни из медиатеки";
+"add_to_playlist" = "Добавить в плейлист";
+"create_new_playlist" = "Создать новый плейлист";
+"create_playlist" = "Создать плейлист";
+"playlist_name_placeholder" = "Название плейлиста";
+"enter_playlist_name" = "Введите название нового плейлиста";
+"delete_playlist" = "Удалить плейлист";
+"delete_playlist_confirmation" = "Вы уверены, что хотите удалить «%@»? Это действие нельзя отменить.";
+"delete" = "Удалить";
+"cancel" = "Отмена";
+"create" = "Создать";
+"done" = "Готово";
+"edit" = "Изменить";
+"edit_playlist" = "Редактировать плейлист";
+"save" = "Сохранить";
+"enter_new_name" = "Введите новое название плейлиста";
+"manage_playlists" = "Управление плейлистами";
+"playlist" = "Плейлист";
+"songs_count_singular" = "%d песня";
+"songs_count_plural" = "%d песен";
+"created_date" = "Создан %@";
+"no_songs_found" = "Песни не найдены";
+"your_music_will_appear_here" = "Чтобы добавить музыку:\n\n1. Откройте приложение «Файлы» (или нажмите «Добавить песни»)\n2. Выберите одно из мест:\n   • iCloud Drive → папка Cosmos Music Player\n   • На iPhone → Cosmos Music Player\n3. Перетащите музыкальные файлы в выбранную папку";
+"create_first_playlist" = "Создайте свой первый плейлист, чтобы начать";
+
+/* General UI strings */
+"all_songs" = "Все песни";
+"liked_songs" = "Любимые песни";
+"add_songs" = "Открыть Файлы";
+"import_music_files" = "Импортировать музыкальные файлы";
+"ok" = "OK";
+"settings" = "Настройки";
+"retry" = "Повторить";
+"open_settings" = "Открыть настройки";
+"continue" = "Продолжить";
+"back" = "Назад";
+"get_started" = "Начать";
+"im_signed_in" = "Я вошёл";
+"its_enabled" = "Включено";
+
+/* Library and Navigation */
+"library" = "Медиатека";
+"artists" = "Исполнители";
+"albums" = "Альбомы";
+"search" = "Поиск";
+"browse" = "Обзор";
+"songs" = "Песни";
+"processing" = "Обработка";
+"waiting" = "Ожидание";
+"and_more" = "... и ещё %d";
+
+/* Artist/Album/Track Info */
+"no_artists_found" = "Исполнители не найдены";
+"artists_will_appear" = "Исполнители появятся здесь после добавления музыки в медиатеку";
+"no_albums_found" = "Альбомы не найдены";
+"albums_will_appear" = "Альбомы появятся здесь после добавления музыки в медиатеку";
+"artist" = "Исполнитель";
+"album" = "Альбом";
+"track_number" = "%d";
+"play" = "Воспроизвести";
+"shuffle" = "Перемешать";
+"wrong_artist" = "Неверный исполнитель?";
+"data_provided_by" = "Данные предоставлены %@";
+"open_spotify" = "ОТКРЫТЬ SPOTIFY";
+"loading_artist" = "Загрузка исполнителя...";
+
+/* Player */
+"playing_queue" = "Очередь воспроизведения";
+"no_songs_in_queue" = "Очередь пуста";
+"no_track_selected" = "Трек не выбран";
+
+/* Search */
+"search_your_music_library" = "Поиск по медиатеке";
+"find_songs_artists_albums_playlists" = "Найдите песни, исполнителей, альбомы и плейлисты";
+"no_results_found" = "Ничего не найдено";
+"try_different_keywords" = "Попробуйте изменить поисковый запрос";
+
+/* Context Menu Actions */
+"show_artist_page" = "Открыть страницу исполнителя";
+"add_to_playlist_ellipsis" = "Добавить в плейлист...";
+"delete_file" = "Удалить файл";
+"delete_file_confirmation" = "Вы уверены, что хотите удалить «%@»? Это действие нельзя отменить.";
+
+/* Settings */
+"appearance" = "Внешний вид";
+"information" = "Информация";
+"minimalist_library_icons" = "Минималистичные иконки медиатеки";
+"force_dark_mode" = "Принудительный тёмный режим";
+"version" = "Версия";
+"app_name" = "Название приложения";
+"cosmos_music_player" = "Cosmos Music Player";
+"github_repository" = "Репозиторий GitHub";
+"use_simple_icons" = "Использовать простые иконки без цветного фона в разделах медиатеки.";
+"override_system_appearance" = "Игнорировать системную тему и всегда использовать тёмный режим.";
+"background_color" = "Цвет фона";
+"choose_color_theme" = "Выберите цветовую тему для фоновых эффектов на всех экранах.";
+"library_section" = "Медиатека";
+"home_sections" = "Разделы главного экрана";
+"choose_visible_sections" = "Выберите разделы, отображаемые на главном экране";
+"remove_from_library_only" = "Удалять только из медиатеки";
+"remove_from_library_only_description" = "При включении трек будет удаляться только из медиатеки. Файл останется на устройстве.";
+"player_controls" = "Элементы управления плеером";
+"show_lyrics_button" = "Показывать кнопку текста песни";
+"show_lyrics_button_description" = "Показывать кнопку текста песни в плеере, когда кнопка таймера сна отключена.";
+"show_sleep_timer_button" = "Показывать кнопку таймера сна";
+"show_sleep_timer_button_description" = "Заменить кнопку текста песни в плеере на кнопку таймера сна.";
+
+/* Liked Songs Actions */
+"add_to_liked_songs" = "Добавить в любимые";
+"remove_from_liked_songs" = "Удалить из любимых";
+
+/* Search Categories */
+"all" = "Все";
+
+/* Sync and Connection */
+"library_out_of_sync" = "Медиатека не синхронизирована";
+"library_sync_message" = "Ваша медиатека сейчас не синхронизирована с iCloud. Некоторые функции могут быть недоступны, пока вы снова не войдёте в систему.";
+"offline_mode" = "Офлайн-режим";
+"offline_mode_message" = "Синхронизация iCloud отключена. Доступны только музыкальные файлы из папки Documents.";
+"icloud_connection_required" = "Требуется подключение к iCloud";
+
+/* Tutorial/Onboarding */
+"welcome_to_cosmos" = "Добро пожаловать в Cosmos";
+"sign_in_to_apple_id" = "Войдите в Apple ID";
+"sign_in_message" = "Чтобы синхронизировать музыку и избранное между устройствами, убедитесь, что вы вошли в свой Apple ID.";
+"if_signed_in_continue" = "Если вы уже вошли, можете продолжить";
+"enable_icloud_drive" = "Включите iCloud Drive";
+"icloud_drive_message" = "iCloud Drive позволяет получать доступ к музыкальным файлам с любого устройства и синхронизирует избранное.";
+"if_icloud_enabled_continue" = "Если iCloud Drive включён, можете продолжить";
+"add_your_music" = "Добавьте свою музыку";
+"how_to_add_music" = "Вы можете добавлять музыкальные файлы как в iCloud Drive (синхронизация между устройствами), так и локально (только на этом устройстве):";
+"open_files_app" = "Откройте приложение «Файлы»";
+"navigate_to_icloud_drive" = "Перейдите в iCloud Drive";
+"find_cosmos_player_folder" = "Найдите папку Cosmos Player";
+"add_your_music_instruction" = "Добавьте свою музыку";
+
+/* Tutorial Status Messages */
+"signed_in_to_apple_id" = "Выполнен вход в Apple ID";
+"not_signed_in_to_apple_id" = "Вход в Apple ID не выполнен";
+"cannot_detect_apple_id_status" = "Не удалось определить статус Apple ID";
+"icloud_drive_enabled" = "iCloud Drive включён";
+"icloud_drive_not_enabled" = "iCloud Drive не включён";
+"cannot_detect_icloud_status" = "Не удалось определить статус iCloud Drive";
+
+/* Tutorial Instructions */
+"find_open_files_app" = "Найдите и откройте приложение «Файлы» на устройстве";
+"tap_icloud_drive_sidebar" = "Выберите «iCloud Drive» или «На iPhone» в боковом меню";
+"look_for_cosmos_folder" = "Найдите папку «Cosmos Music Player» и откройте её";
+"copy_music_files" = "Скопируйте FLAC- или MP3-файлы в эту папку";
+
+/* Library Processing */
+"found_tracks" = "Найдено %d треков";
+"processing_colon" = "🎵 Обработка:";
+"waiting_colon" = "⏳ Ожидание:";
+"percent_complete" = "%d%%";
+
+/* Subtitles and descriptions */
+"songs_count" = "%d песен";
+"your_favorites" = "Ваше избранное";
+"your_playlists" = "Ваши плейлисты";
+"browse_by_artist" = "Просмотр по исполнителям";
+"browse_by_album" = "Просмотр по альбомам";
+"unknown_album" = "Неизвестный альбом";
+"unknown_artist" = "Неизвестный исполнитель";
+
+/* Sync result messages */
+"sync_no_new_tracks" = "Новая музыка не найдена";
+"sync_one_new_track" = "Найдена 1 новая песня";
+"sync_multiple_new_tracks" = "Найдено %d новых песен";
+"sync_one_track_deleted" = "Удалена 1 песня";
+"sync_multiple_tracks_deleted" = "Удалено %d песен";
+"sync_no_changes" = "Медиатека актуальна";
+
+/* Equalizer strings */
+"equalizer" = "Эквалайзер";
+"graphic_equalizer" = "Графический эквалайзер";
+"enable_equalizer" = "Включить эквалайзер";
+"enable_disable_eq_description" = "Включить или отключить графический эквалайзер";
+
+/* Manual EQ Presets */
+"manual_eq_presets" = "Ручные 16-полосные пресеты";
+"no_manual_presets_created" = "Ручные пресеты не созданы";
+"create_manual_eq_description" = "Создайте пользовательский 16-полосный пресет эквалайзера с настраиваемыми ползунками";
+"create_manual_16band_eq" = "Создать ручной 16-полосный эквалайзер";
+"manual_16band_eq" = "Ручной 16-полосный эквалайзер";
+"manual_16band_description" = "Создаёт 16-полосный эквалайзер со стандартными ISO-частотами, которые можно настраивать вручную";
+"adjust_bands_after_creation" = "После создания вы сможете настроить все частотные полосы";
+"frequency_bands" = "Частотные полосы";
+"edit_equalizer" = "Редактировать эквалайзер";
+"reset_to_flat" = "Сбросить";
+
+/* Imported GraphicEQ Presets */
+"imported_presets" = "Импортированные пресеты";
+"no_presets_imported" = "Пресеты не импортированы";
+"import_graphiceq_description" = "Импортируйте файлы GraphicEQ .txt, чтобы начать";
+"imported_graphiceq" = "Импортированный GraphicEQ";
+"import_graphiceq_file" = "Импортировать файл GraphicEQ";
+
+/* General EQ Settings */
+"global_settings" = "Глобальные настройки";
+"global_gain" = "Общее усиление";
+"global_gain_description" = "Настройте общий уровень громкости после обработки эквалайзером";
+"about_graphiceq_format" = "О формате GraphicEQ";
+"import_graphiceq_format_description" = "Импортируйте файлы GraphicEQ .txt в формате:";
+"frequency_gain_pair_description" = "Каждая пара представляет частоту (Гц) и усиление (дБ)";
+"delete" = "Удалить";
+"export" = "Экспорт";
+"edit" = "Изменить";
+"cancel" = "Отмена";
+"done" = "Готово";
+"save" = "Сохранить";
+"create" = "Создать";
+"preset_info" = "Информация о пресете";
+
+/* GraphicEQ Import View */
+"import_graphiceq" = "Импорт GraphicEQ";
+"preset_name" = "Название пресета";
+"enter_preset_name" = "Введите название пресета";
+"import_methods" = "Способы импорта";
+"import_from_txt_file" = "Импорт из .txt файла";
+"paste_graphiceq_text" = "Вставить текст GraphicEQ";
+"error" = "Ошибка";
+"format_info" = "Информация о формате";
+"expected_graphiceq_format" = "Ожидаемый формат GraphicEQ:";
+"frequency_gain_pair" = "Каждая пара: частота (Гц) усиление (дБ)";
+
+/* Text Import View */
+"paste_graphiceq" = "Вставить GraphicEQ";
+"paste_graphiceq_text_section" = "Вставьте текст GraphicEQ";
+"example" = "Пример";
+"import" = "Импорт";
+
+/* Error Messages */
+"failed_to_import" = "Не удалось импортировать: %@";
+"file_import_failed" = "Ошибка импорта файла: %@";
+"failed_to_create" = "Не удалось создать: %@";
+"failed_to_export" = "Не удалось экспортировать пресет";
+"failed_to_delete" = "Не удалось удалить пресет";
+
+/* EQ Band Information */
+"band_count_info" = "%d полос (уменьшено с %d)";
+"bands_reduced_description" = "Ваш GraphicEQ содержит больше полос, чем поддерживает iOS. Система автоматически преобразовала %d полос в %d с помощью усреднения частот.";
+"bands_limited_warning" = "⚠️ GraphicEQ уменьшен с %d до %d полос (ограничение iOS)";
+
+/* Audio Settings */
+"audio_settings" = "Аудио";
+"dsd_playback_mode" = "Режим воспроизведения DSD";
+"dsd_playback_mode_description" = "Выберите способ воспроизведения DSD-аудиофайлов (DSF/DFF)";
+"dsd_mode_auto" = "Авто (определение DAC)";
+"dsd_mode_pcm" = "Преобразование в PCM";
+"dsd_mode_dop" = "DoP (DSD over PCM)";
+"dsd_mode_auto_description" = "Автоматически определять внешний DAC и использовать DoP при поддержке, иначе преобразовывать в PCM";
+"dsd_mode_pcm_description" = "Всегда преобразовывать DSD в PCM для воспроизведения (совместимо со всеми устройствами)";
+"dsd_mode_dop_description" = "Всегда использовать кодирование DoP (требуется внешний DAC с поддержкой DSD)";
+
+/* Sort Options */
+"sort_date_newest" = "Дата добавления (сначала новые)";
+"sort_date_oldest" = "Дата добавления (сначала старые)";
+"sort_name_az" = "Название (A-Z)";
+"sort_name_za" = "Название (Z-A)";
+"sort_size_largest" = "Размер (сначала большие)";
+"sort_size_smallest" = "Размер (сначала маленькие)";
+
+/* Queue Actions */
+"play_next" = "Воспроизвести следующим";
+"add_to_queue" = "Добавить в очередь";
+
+/* Sleep Timer */
+"sleep_timer" = "Таймер сна";
+"sleep_timer_off" = "Таймер сна выключен";
+"sleep_timer_15_minutes" = "15 минут";
+"sleep_timer_30_minutes" = "30 минут";
+"sleep_timer_45_minutes" = "45 минут";
+"sleep_timer_60_minutes" = "60 минут";
+"cancel_sleep_timer" = "Отменить таймер сна";
+
+/* Bulk Selection */
+"select" = "Выбрать";
+"select_all" = "Выбрать все";
+"bulk_actions" = "Действия";
+"add_to_liked" = "Добавить в любимые";
+"remove_from_liked" = "Удалить из любимых";
+"delete_files" = "Удалить файлы";
+"delete_files_confirmation" = "Удаление файлов";
+"selected_count_singular" = "Выбрано: %d";
+"selected_count_plural" = "Выбрано: %d";
+"delete_files_confirmation_message" = "Вы уверены, что хотите удалить %d файл(ов)? Это действие нельзя отменить.";
