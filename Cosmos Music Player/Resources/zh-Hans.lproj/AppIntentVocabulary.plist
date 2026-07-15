@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>IntentPhrases</key>
+	<array>
+		<dict>
+			<key>IntentName</key>
+			<string>INPlayMediaIntent</string>
+			<key>IntentExamples</key>
+			<array>
+				<string>在 Cosmos 上播放我的音乐</string>
+				<string>在 Cosmos 上播放我的收藏</string>
+			</array>
+		</dict>
+		<dict>
+			<key>IntentName</key>
+			<string>INAddMediaIntent</string>
+			<key>IntentExamples</key>
+			<array>
+				<string>在 Cosmos 中把这首歌添加到我的收藏</string>
+				<string>在 Cosmos 中把这首歌添加到播放列表</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
