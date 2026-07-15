@@ -46,7 +46,7 @@ struct AlbumsScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LibraryNeedsRefresh"))) { _ in
             loadAlbums()
         }
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
     }
@@ -129,7 +129,7 @@ private struct AlbumCardView: View {
         // Use the first track in the album to get artwork
         guard let firstTrack = tracks.first else { return }
         Task {
-            artworkImage = await ArtworkManager.shared.getArtwork(for: firstTrack)
+            artworkImage = await ArtworkManager.shared.getThumbnail(for: firstTrack, maxPixelSize: 512)
         }
     }
 }

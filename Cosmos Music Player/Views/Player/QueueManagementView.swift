@@ -54,7 +54,9 @@ struct QueueManagementView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List {
-                            ForEach(Array(playerEngine.playbackQueue.enumerated()), id: \.element.stableId) { index, track in
+                            ForEach(playerEngine.playbackQueue.uniquelyIdentifiedRows(), id: \.rowId) { row in
+                                let index = row.index
+                                let track = row.track
                                 QueueTrackRow(
                                     track: track,
                                     index: index,
@@ -82,7 +84,7 @@ struct QueueManagementView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
             settings = DeleteSettings.load()
         }
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
         .onAppear {
@@ -257,7 +259,7 @@ struct QueueTrackRow: View {
     
     private func loadArtwork() {
         Task {
-            artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+            artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
         }
     }
 }

@@ -9,6 +9,8 @@ import Foundation
 import UIKit
 import AVFoundation
 import CryptoKit
+import ImageIO
+import SFBAudioEngine
 
 @MainActor
 class ArtworkManager: ObservableObject {
@@ -16,6 +18,8 @@ class ArtworkManager: ObservableObject {
 
     // Memory cache for quick access
     private let memoryCache = NSCache<NSString, UIImage>()
+    // Small row/grid-sized artwork, keyed by "\(stableId)-\(pixelSize)"
+    private let thumbnailCache = NSCache<NSString, UIImage>()
     private var cachedTrackIds: Set<String> = []
     private var notificationObservers: [NSObjectProtocol] = []
 
@@ -39,6 +43,8 @@ class ArtworkManager: ObservableObject {
 
         memoryCache.countLimit = maxMemoryCacheItems
         memoryCache.totalCostLimit = maxMemoryCacheCost
+        thumbnailCache.countLimit = 600
+        thumbnailCache.totalCostLimit = 30 * 1024 * 1024
 
         // Create directory if needed
         try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
@@ -53,7 +59,9 @@ class ArtworkManager: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.clearCache()
+                Task { @MainActor [weak self] in
+                    self?.clearCache()
+                }
             }
         )
         notificationObservers.append(
@@ -62,7 +70,9 @@ class ArtworkManager: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.clearCache()
+                Task { @MainActor [weak self] in
+                    self?.clearCache()
+                }
             }
         )
 
@@ -96,6 +106,7 @@ class ArtworkManager: ObservableObject {
 
     func clearCache() {
         memoryCache.removeAllObjects()
+        thumbnailCache.removeAllObjects()
         cachedTrackIds.removeAll()
         print("🗑️ ArtworkManager memory cache cleared")
     }
@@ -107,6 +118,7 @@ class ArtworkManager: ObservableObject {
                 try FileManager.default.removeItem(at: file)
             }
             memoryCache.removeAllObjects()
+            thumbnailCache.removeAllObjects()
             cachedTrackIds.removeAll()
             artworkMapping.removeAll()
             saveMapping()
@@ -119,6 +131,8 @@ class ArtworkManager: ObservableObject {
     func forceRefreshArtwork(for track: Track) async -> UIImage? {
         // Remove from memory cache and mapping to force re-extraction
         memoryCache.removeObject(forKey: track.stableId as NSString)
+        // Thumbnail keys are size-suffixed and NSCache can't enumerate, so drop them all
+        thumbnailCache.removeAllObjects()
         cachedTrackIds.remove(track.stableId)
 
         // Note: We don't delete the actual artwork file as other tracks might use it
@@ -160,7 +174,8 @@ class ArtworkManager: ObservableObject {
         }
 
         // 3. Extract from audio file and cache (slow - should be rare after indexing)
-        if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
+        if let extracted = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
+            let image = await Self.downsampledOffMain(extracted, maxPixelSize: Self.maxFullArtworkPixelSize)
             // Store in both caches
             cacheImage(image, for: track.stableId)
             await saveToDiskCache(image: image, stableId: track.stableId)
@@ -168,6 +183,72 @@ class ArtworkManager: ObservableObject {
         }
 
         return nil
+    }
+
+    /// Small artwork for list rows and grid cells. Decoding and holding these
+    /// instead of full-size art keeps scrolling smooth and memory low.
+    func getThumbnail(for track: Track, maxPixelSize: CGFloat = 160) async -> UIImage? {
+        let key = "\(track.stableId)-\(Int(maxPixelSize))" as NSString
+        if let cached = thumbnailCache.object(forKey: key) {
+            return cached
+        }
+
+        // Fast path: downsample straight from the disk cache file
+        if let artworkHash = artworkMapping[track.stableId],
+           let thumbnail = await loadThumbnailFromDisk(artworkHash: artworkHash, maxPixelSize: maxPixelSize) {
+            thumbnailCache.setObject(thumbnail, forKey: key)
+            return thumbnail
+        }
+
+        // Slow path: full pipeline (extracts and fills the disk cache), then shrink
+        guard let fullImage = await getArtwork(for: track) else { return nil }
+        let thumbnail = await Self.downsampledOffMain(fullImage, maxPixelSize: maxPixelSize)
+        thumbnailCache.setObject(thumbnail, forKey: key)
+        return thumbnail
+    }
+
+    private nonisolated func loadThumbnailFromDisk(artworkHash: String, maxPixelSize: CGFloat) async -> UIImage? {
+        let diskFile = diskCacheURL.appendingPathComponent("\(artworkHash).jpg")
+        return Self.downsampledImage(at: diskFile, maxPixelSize: maxPixelSize)
+    }
+
+    // MARK: - Downsampling
+
+    /// Ceiling for artwork kept in memory or written to the disk cache; big
+    /// enough for the full-screen player, ~10-30x smaller than raw embedded art
+    private nonisolated static let maxFullArtworkPixelSize: CGFloat = 1024
+
+    private nonisolated static func downsampledImage(at url: URL, maxPixelSize: CGFloat) -> UIImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
+    private nonisolated static func downsampled(_ image: UIImage, maxPixelSize: CGFloat) -> UIImage {
+        let pixelWidth = image.size.width * image.scale
+        let pixelHeight = image.size.height * image.scale
+        let largestSide = max(pixelWidth, pixelHeight)
+        guard largestSide > maxPixelSize else { return image }
+
+        let ratio = maxPixelSize / largestSide
+        let targetSize = CGSize(width: pixelWidth * ratio, height: pixelHeight * ratio)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
+
+    /// Runs the resize on the global executor so large images never block the main thread
+    private nonisolated static func downsampledOffMain(_ image: UIImage, maxPixelSize: CGFloat) async -> UIImage {
+        downsampled(image, maxPixelSize: maxPixelSize)
     }
 
     func updateVisibleArtworkWindow(visibleTrackIds: [String], prefetchTrackIds: [String] = []) {
@@ -204,16 +285,8 @@ class ArtworkManager: ObservableObject {
             return nil
         }
 
-        do {
-            let data = try Data(contentsOf: diskFile)
-            if let image = UIImage(data: data) {
-                return image
-            }
-        } catch {
-            print("❌ Failed to load artwork from disk: \(error)")
-        }
-
-        return nil
+        // Decode at a capped size — legacy cache files may still be full resolution
+        return Self.downsampledImage(at: diskFile, maxPixelSize: Self.maxFullArtworkPixelSize)
     }
 
     private func getArtworkHash(for stableId: String) async -> String? {
@@ -221,8 +294,10 @@ class ArtworkManager: ObservableObject {
     }
 
     private nonisolated func saveToDiskCache(image: UIImage, stableId: String) async {
+        // Cap stored size; anything larger only costs decode time and memory
+        let cappedImage = Self.downsampled(image, maxPixelSize: Self.maxFullArtworkPixelSize)
         // Compress to JPEG at 85% quality for faster loading and smaller size
-        guard let imageData = image.jpegData(compressionQuality: 0.85) else {
+        guard let imageData = cappedImage.jpegData(compressionQuality: 0.85) else {
             print("❌ Failed to compress artwork to JPEG")
             return
         }
@@ -295,7 +370,7 @@ class ArtworkManager: ObservableObject {
             print("❌ Failed to cleanup orphaned artwork: \(error)")
         }
     }
-    
+
     private nonisolated func extractArtwork(from url: URL) async -> UIImage? {
         let ext = url.pathExtension.lowercased()
 
@@ -313,15 +388,15 @@ class ArtworkManager: ObservableObject {
 
         return nil
     }
-    
+
     private nonisolated func extractMp3Artwork(from url: URL) async -> UIImage? {
         return await withCheckedContinuation { continuation in
             Task {
                 let asset = AVURLAsset(url: url)
-                
+
                 do {
                     let metadata = try await asset.load(.commonMetadata)
-                    
+
                     for item in metadata {
                         if item.commonKey == .commonKeyArtwork {
                             do {
@@ -335,7 +410,7 @@ class ArtworkManager: ObservableObject {
                             }
                         }
                     }
-                    
+
                     continuation.resume(returning: nil)
                 } catch {
                     print("Failed to load MP3 metadata: \(error)")
@@ -344,46 +419,46 @@ class ArtworkManager: ObservableObject {
             }
         }
     }
-    
+
     private nonisolated func extractFlacArtwork(from url: URL) async -> UIImage? {
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .background).async {
                 do {
-                    let data = try Data(contentsOf: url)
-                    
+                    let data = try Data(contentsOf: url, options: .mappedIfSafe)
+
                     if data.count < 42 {
                         continuation.resume(returning: nil)
                         return
                     }
-                    
+
                     var offset = 4
-                    
+
                     while offset < data.count {
                         let blockHeader = data[offset]
                         let isLast = (blockHeader & 0x80) != 0
                         let blockType = blockHeader & 0x7F
-                        
+
                         offset += 1
-                        
+
                         guard offset + 3 <= data.count else { break }
-                        
+
                         let blockSize = Int(data[offset]) << 16 | Int(data[offset + 1]) << 8 | Int(data[offset + 2])
                         offset += 3
-                        
+
                         if blockType == 6 { // PICTURE block
                             if let image = Self.parseFlacPictureBlock(data: data, offset: offset, size: blockSize) {
                                 continuation.resume(returning: image)
                                 return
                             }
                         }
-                        
+
                         offset += blockSize
-                        
+
                         if isLast { break }
                     }
-                    
+
                     continuation.resume(returning: nil)
-                    
+
                 } catch {
                     print("Failed to extract FLAC artwork: \(error)")
                     continuation.resume(returning: nil)
@@ -391,36 +466,36 @@ class ArtworkManager: ObservableObject {
             }
         }
     }
-    
+
     private nonisolated static func parseFlacPictureBlock(data: Data, offset: Int, size: Int) -> UIImage? {
         var pos = offset
-        
+
         // Skip picture type (4 bytes)
         pos += 4
-        
+
         guard pos + 4 <= data.count else { return nil }
-        
+
         // Get MIME type length
         let mimeLength = Int(data[pos]) << 24 | Int(data[pos + 1]) << 16 | Int(data[pos + 2]) << 8 | Int(data[pos + 3])
         pos += 4 + mimeLength
-        
+
         guard pos + 4 <= data.count else { return nil }
-        
+
         // Get description length
         let descLength = Int(data[pos]) << 24 | Int(data[pos + 1]) << 16 | Int(data[pos + 2]) << 8 | Int(data[pos + 3])
         pos += 4 + descLength
-        
+
         // Skip width, height, color depth, indexed colors (16 bytes total)
         pos += 16
-        
+
         guard pos + 4 <= data.count else { return nil }
-        
+
         // Get picture data length
         let pictureLength = Int(data[pos]) << 24 | Int(data[pos + 1]) << 16 | Int(data[pos + 2]) << 8 | Int(data[pos + 3])
         pos += 4
-        
+
         guard pos + pictureLength <= data.count else { return nil }
-        
+
         // Extract picture data
         let pictureData = data.subdata(in: pos..<pos + pictureLength)
         return UIImage(data: pictureData)
@@ -456,7 +531,7 @@ class ArtworkManager: ObservableObject {
 
     private nonisolated func extractDSDArtwork(from url: URL) async -> UIImage? {
         do {
-            let data = try Data(contentsOf: url)
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
 
             // For DSF files, try ID3v2 APIC frame extraction first
             if url.pathExtension.lowercased() == "dsf" {
@@ -664,11 +739,25 @@ class ArtworkManager: ObservableObject {
     // MARK: - Generic Artwork Extraction (Opus, OGG, etc.)
 
     private nonisolated func extractGenericArtwork(from url: URL) async -> UIImage? {
+        // Use SFBAudioEngine's TagLib-backed metadata reader. The previous
+        // hand-rolled byte scan corrupted any METADATA_BLOCK_PICTURE larger
+        // than one Ogg page (~64KB): the base64 payload is interleaved with
+        // Ogg page headers, which the scan couldn't strip (issue #75).
+        do {
+            let audioFile = try AudioFile(readingPropertiesAndMetadataFrom: url)
+            let pictures = audioFile.metadata.attachedPictures
+            let preferred = pictures.first(where: { $0.type == .frontCover }) ?? pictures.first
+            if let preferred, let image = UIImage(data: preferred.imageData) {
+                print("✅ Extracted artwork via SFBAudioEngine metadata: \(url.lastPathComponent) (\(preferred.imageData.count) bytes)")
+                return image
+            }
+        } catch {
+            print("⚠️ SFBAudioEngine metadata read failed for \(url.lastPathComponent): \(error)")
+        }
+
+        // Fallback: legacy Vorbis comment scan (works for single-page pictures)
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
-
-            // OGG and Opus files use Vorbis Comments with METADATA_BLOCK_PICTURE tags
-            // These contain base64-encoded FLAC picture blocks
             if let artwork = extractVorbisCommentArtwork(from: data, filename: url.lastPathComponent) {
                 return artwork
             }

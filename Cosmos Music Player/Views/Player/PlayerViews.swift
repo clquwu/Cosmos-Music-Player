@@ -75,6 +75,18 @@ extension Color {
 }
 import GRDB
 
+private enum ArtworkSwipeDirection: Equatable {
+    case previous
+    case next
+
+    var offsetSign: CGFloat {
+        switch self {
+        case .previous: return 1
+        case .next: return -1
+        }
+    }
+}
+
 struct PlayerView: View {
     @StateObject private var playerEngine = PlayerEngine.shared
     @StateObject private var artworkManager = ArtworkManager.shared
@@ -95,6 +107,7 @@ struct PlayerView: View {
     @State private var settings = DeleteSettings.load()
     @State private var sleepTimerTask: Task<Void, Never>?
     @State private var sleepTimerEndDate: Date?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     var body: some View {
         ZStack {
@@ -109,7 +122,13 @@ struct PlayerView: View {
         contentView
             .padding(.horizontal, max(16, min(20, UIScreen.main.bounds.width * 0.05)))
             .padding(.vertical)
-            .onChange(of: playerEngine.currentTrack) { _, newTrack in
+            .onChange(of: playerEngine.currentTrack) { _, _ in
+                guard !isAnimating else { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    dragOffset = 0
+                }
                 Task {
                     await loadAllArtworks()
                 }
@@ -127,7 +146,7 @@ struct PlayerView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
                 settings = DeleteSettings.load()
             }
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                 settings = DeleteSettings.load()
             }
             .sheet(isPresented: $showPlaylistDialog) {
@@ -183,7 +202,7 @@ struct PlayerView: View {
     }
 
     private var lyricsSheet: some View {
-        LyricsView(lyrics: currentLyrics, currentTime: playerEngine.playbackTime, isLoading: isLoadingLyrics)
+        LiveLyricsSheet(lyrics: currentLyrics, isLoading: isLoadingLyrics)
     }
 
     // MARK: - Artwork Section
@@ -192,33 +211,56 @@ struct PlayerView: View {
         GeometryReader { geometry in
             let maxWidth = min(geometry.size.width - 40, 360)
             let artworkSize = min(maxWidth, geometry.size.height)
+            let gestureWidth = max(geometry.size.width, 1)
+            let pageDistance = artworkSize + 18
+            let swipeProgress = min(abs(dragOffset) / pageDistance, 1)
+            let signedProgress = max(-1, min(1, dragOffset / pageDistance))
+            let canNavigate = playerEngine.playbackQueue.count > 1
 
             ZStack {
+                if canNavigate {
+                    adjacentArtworkView(artwork: previousArtwork, size: artworkSize)
+                        .offset(x: dragOffset - pageDistance)
+                        .scaleEffect(0.96 + (0.04 * max(0, signedProgress)))
+                        .opacity(Double(0.72 + (0.28 * max(0, signedProgress))))
+                        .shadow(color: .black.opacity(0.16), radius: 8, x: 0, y: 5)
+                        .zIndex(0)
+                }
+
                 currentArtworkView(size: artworkSize)
                     .offset(x: dragOffset)
-                    .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
+                    .scaleEffect(1 - (0.025 * swipeProgress))
+                    .shadow(
+                        color: .black.opacity(0.2 - (0.06 * Double(swipeProgress))),
+                        radius: 10 - (2 * swipeProgress),
+                        x: 0,
+                        y: 6 - (2 * swipeProgress)
+                    )
+                    .zIndex(1)
                     .onTapGesture {
                         NotificationCenter.default.post(name: NSNotification.Name("MinimizePlayer"), object: nil)
                     }
 
-                if previousArtwork != nil {
-                    adjacentArtworkView(artwork: previousArtwork, size: artworkSize)
-                        .offset(x: dragOffset - geometry.size.width)
-                        .opacity(dragOffset > 0 ? 1 : 0)
-                }
-
-                if nextArtwork != nil {
+                if canNavigate {
                     adjacentArtworkView(artwork: nextArtwork, size: artworkSize)
-                        .offset(x: dragOffset + geometry.size.width)
-                        .opacity(dragOffset < 0 ? 1 : 0)
+                        .offset(x: dragOffset + pageDistance)
+                        .scaleEffect(0.96 + (0.04 * max(0, -signedProgress)))
+                        .opacity(Double(0.72 + (0.28 * max(0, -signedProgress))))
+                        .shadow(color: .black.opacity(0.16), radius: 8, x: 0, y: 5)
+                        .zIndex(0)
                 }
             }
             .frame(width: geometry.size.width, height: artworkSize)
+            .contentShape(Rectangle())
+            .gesture(
+                artworkDragGesture(
+                    gestureWidth: gestureWidth,
+                    pageDistance: pageDistance
+                )
+            )
         }
         .frame(height: min(360, UIScreen.main.bounds.width - 80))
         .clipped()
-        .shadow(radius: 8)
-        .gesture(artworkDragGesture)
     }
 
     private func currentArtworkView(size: CGFloat) -> some View {
@@ -261,64 +303,131 @@ struct PlayerView: View {
         }
     }
 
-    private var artworkDragGesture: some Gesture {
-        DragGesture()
+    private func artworkDragGesture(gestureWidth: CGFloat, pageDistance: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8)
             .onChanged { value in
-                if !isAnimating {
-                    dragOffset = value.translation.width
+                guard !isAnimating else { return }
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+
+                let canNavigate = playerEngine.playbackQueue.count > 1
+                let proposedOffset = canNavigate
+                    ? value.translation.width
+                    : value.translation.width * 0.16
+                let limit = pageDistance
+                var transaction = Transaction()
+                transaction.isContinuous = true
+                withTransaction(transaction) {
+                    dragOffset = max(-limit, min(limit, proposedOffset))
                 }
             }
             .onEnded { value in
-                let threshold: CGFloat = 80
-                let velocity = value.predictedEndTranslation.width - value.translation.width
+                guard !isAnimating else { return }
+                guard playerEngine.playbackQueue.count > 1 else {
+                    resetArtworkDrag()
+                    return
+                }
 
-                if value.translation.width > threshold || velocity > 500 {
-                    handleSwipeRight()
-                } else if value.translation.width < -threshold || velocity < -500 {
-                    handleSwipeLeft()
+                let translation = value.translation.width
+                let projectedTranslation = value.predictedEndTranslation.width
+                let distanceThreshold = gestureWidth * 0.22
+                let projectionThreshold = gestureWidth * 0.34
+                let shouldCommit = abs(translation) > distanceThreshold ||
+                    abs(projectedTranslation) > projectionThreshold
+
+                guard shouldCommit else {
+                    resetArtworkDrag()
+                    return
+                }
+
+                let directionValue = abs(projectedTranslation) > abs(translation)
+                    ? projectedTranslation
+                    : translation
+
+                if directionValue > 0 {
+                    completeArtworkSwipe(.previous, pageDistance: pageDistance)
                 } else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        dragOffset = 0
-                    }
+                    completeArtworkSwipe(.next, pageDistance: pageDistance)
                 }
             }
     }
 
-    private func handleSwipeRight() {
-        isAnimating = true
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            dragOffset = UIScreen.main.bounds.width
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            Task {
-                await playerEngine.previousTrack()
-            }
-            withAnimation(.spring(response: 0.25, dampingFraction: 1)) {
-                dragOffset = 0
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                isAnimating = false
-            }
+    private func resetArtworkDrag() {
+        let animation: Animation = reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .spring(response: 0.36, dampingFraction: 0.82)
+        withAnimation(animation) {
+            dragOffset = 0
         }
     }
 
-    private func handleSwipeLeft() {
-        isAnimating = true
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            dragOffset = -UIScreen.main.bounds.width
+    private func completeArtworkSwipe(_ direction: ArtworkSwipeDirection, pageDistance: CGFloat) {
+        // "Previous" restarts the current track after three seconds. Keep the
+        // artwork honest in that case instead of briefly showing another song.
+        if direction == .previous && playerEngine.playbackTime > 3 {
+            resetArtworkDrag()
+            Task {
+                await playerEngine.previousTrack()
+            }
+            return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            Task {
+        isAnimating = true
+        let oldTrackId = playerEngine.currentTrack?.stableId
+        let outgoingArtwork = currentArtwork
+        let incomingArtwork = direction == .next ? nextArtwork : previousArtwork
+        // Exactly one page: the adjacent card lands at x == 0. Any overrun
+        // here causes a visible jump when the buffers are normalized.
+        let targetOffset = direction.offsetSign * pageDistance
+
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        let commitAnimation: Animation = reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.24)
+        withAnimation(commitAnimation) {
+            dragOffset = targetOffset
+        }
+
+        Task { @MainActor in
+            let animationDelay: UInt64 = reduceMotion ? 140_000_000 : 240_000_000
+            try? await Task.sleep(nanoseconds: animationDelay)
+
+            switch direction {
+            case .previous:
+                await playerEngine.previousTrack()
+            case .next:
                 await playerEngine.nextTrack()
             }
-            withAnimation(.spring(response: 0.25, dampingFraction: 1)) {
+
+            guard playerEngine.currentTrack?.stableId != oldTrackId else {
+                isAnimating = false
+                resetArtworkDrag()
+                return
+            }
+
+            // The incoming card is already centered. Replace the artwork
+            // buffers and reset coordinates without animation, so there is no
+            // jump or flash while the engine finishes changing tracks.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                currentArtwork = incomingArtwork
+                switch direction {
+                case .previous:
+                    nextArtwork = outgoingArtwork
+                case .next:
+                    previousArtwork = outgoingArtwork
+                }
                 dragOffset = 0
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                isAnimating = false
+
+            if currentArtwork == nil {
+                await loadCurrentArtwork()
             }
+
+            isAnimating = false
+            await loadNextArtwork()
+            await loadPreviousArtwork()
         }
     }
 
@@ -414,32 +523,15 @@ struct PlayerView: View {
     // MARK: - Progress Bar Section
 
     private var progressBarSection: some View {
-        VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 12 : 16) {
-            InteractiveProgressBar(
-                progress: playerEngine.duration > 0 ? playerEngine.playbackTime / playerEngine.duration : 0,
-                onSeek: { progress in
-                    let newTime = progress * playerEngine.duration
-                    Task {
-                        await playerEngine.seek(to: newTime)
-                    }
-                },
-                accentColor: settings.backgroundColorChoice.color
-            )
-            .frame(height: 1)
-
-            HStack {
-                Text(formatTime(playerEngine.playbackTime))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                Text(formatTime(playerEngine.duration))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+        PlayerProgressSection(
+            duration: playerEngine.duration,
+            accentColor: settings.backgroundColorChoice.color,
+            onSeek: { newTime in
+                Task {
+                    await playerEngine.seek(to: newTime)
+                }
             }
-        }
-        .padding(.horizontal, 8)
+        )
     }
 
     // MARK: - Controls Section
@@ -715,29 +807,47 @@ struct PlayerView: View {
     }
     
     private func loadCurrentArtwork() async {
-        if let track = playerEngine.currentTrack {
-            currentArtwork = await artworkManager.getArtwork(for: track)
-        } else {
+        guard let track = playerEngine.currentTrack else {
             currentArtwork = nil
+            return
         }
+
+        let trackId = track.stableId
+        let artwork = await artworkManager.getArtwork(for: track)
+        guard playerEngine.currentTrack?.stableId == trackId else { return }
+        currentArtwork = artwork
     }
     
     private func loadNextArtwork() async {
+        let currentTrackId = playerEngine.currentTrack?.stableId
         let nextTrack = getNextTrack()
-        if let track = nextTrack {
-            nextArtwork = await artworkManager.getArtwork(for: track)
-        } else {
+        guard let track = nextTrack else {
+            guard playerEngine.currentTrack?.stableId == currentTrackId else { return }
             nextArtwork = nil
+            return
         }
+
+        let nextTrackId = track.stableId
+        let artwork = await artworkManager.getArtwork(for: track)
+        guard playerEngine.currentTrack?.stableId == currentTrackId,
+              getNextTrack()?.stableId == nextTrackId else { return }
+        nextArtwork = artwork
     }
     
     private func loadPreviousArtwork() async {
+        let currentTrackId = playerEngine.currentTrack?.stableId
         let prevTrack = getPreviousTrack()
-        if let track = prevTrack {
-            previousArtwork = await artworkManager.getArtwork(for: track)
-        } else {
+        guard let track = prevTrack else {
+            guard playerEngine.currentTrack?.stableId == currentTrackId else { return }
             previousArtwork = nil
+            return
         }
+
+        let previousTrackId = track.stableId
+        let artwork = await artworkManager.getArtwork(for: track)
+        guard playerEngine.currentTrack?.stableId == currentTrackId,
+              getPreviousTrack()?.stableId == previousTrackId else { return }
+        previousArtwork = artwork
     }
     
     private func getNextTrack() -> Track? {
@@ -780,12 +890,6 @@ struct PlayerView: View {
         }
     }
     
-    private func formatTime(_ time: TimeInterval) -> String {
-        let minutes = Int(time) / 60
-        let seconds = Int(time) % 60
-        return String(format: "%d:%02d", minutes, seconds)
-    }
-    
     private func checkFavoriteStatus() {
         guard let currentTrack = playerEngine.currentTrack else {
             isFavorite = false
@@ -822,6 +926,69 @@ struct PlayerView: View {
                 break
             }
         }
+    }
+}
+
+/// Owns the fast-changing progress observation so the complete PlayerView
+/// (artwork, sheets and controls) is not recomputed four times per second.
+private struct PlayerProgressSection: View {
+    @ObservedObject private var progress = PlayerEngine.shared.progress
+    let duration: TimeInterval
+    let accentColor: Color
+    let onSeek: (TimeInterval) -> Void
+
+    private var fraction: Double {
+        guard duration > 0 else { return 0 }
+        let value = progress.playbackTime / duration
+        guard value.isFinite else { return 0 }
+        return max(0, min(1, value))
+    }
+
+    var body: some View {
+        VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 12 : 16) {
+            InteractiveProgressBar(
+                progress: fraction,
+                onSeek: { onSeek($0 * duration) },
+                accentColor: accentColor
+            )
+            .frame(height: 1)
+
+            HStack {
+                Text(formatTime(progress.playbackTime))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Text(formatTime(duration))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let safeTime = time.isFinite ? max(0, time) : 0
+        let minutes = Int(safeTime) / 60
+        let seconds = Int(safeTime) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+/// Keeps lyric timing updates inside the presented lyrics content instead of
+/// invalidating the player and any underlying list.
+private struct LiveLyricsSheet: View {
+    @ObservedObject private var progress = PlayerEngine.shared.progress
+    let lyrics: Lyrics?
+    let isLoading: Bool
+
+    var body: some View {
+        LyricsView(
+            lyrics: lyrics,
+            currentTime: progress.playbackTime,
+            isLoading: isLoading
+        )
     }
 }
 
@@ -957,20 +1124,10 @@ struct MiniPlayerView: View {
                         VStack(spacing: 0) {
                             Spacer()
                             
-                            ZStack(alignment: .leading) {
-                                // Background track
-                                Rectangle()
-                                    .fill(Color.secondary.opacity(0.2))
-                                    .frame(height: 2)
-                                
-                                // Progress fill with selected accent color
-                                GeometryReader { geometry in
-                                    Rectangle()
-                                        .fill(settings.backgroundColorChoice.color)
-                                        .frame(width: geometry.size.width * (playerEngine.duration > 0 ? playerEngine.playbackTime / playerEngine.duration : 0), height: 2)
-                                }
-                            }
-                            .frame(height: 2)
+                            MiniPlayerProgressBar(
+                                duration: playerEngine.duration,
+                                accentColor: settings.backgroundColorChoice.color
+                            )
                         }
                     )
                     .cornerRadius(16)
@@ -1025,6 +1182,35 @@ struct MiniPlayerView: View {
     }
 }
 
+/// A render-only progress leaf. Scaling a full-width rectangle changes only
+/// its transform; it does not resize the safe-area inset or ask the underlying
+/// Library List to perform a collection diff on every playback tick.
+private struct MiniPlayerProgressBar: View {
+    @ObservedObject private var progress = PlayerEngine.shared.progress
+    let duration: TimeInterval
+    let accentColor: Color
+
+    private var fraction: CGFloat {
+        guard duration > 0 else { return 0 }
+        let value = progress.playbackTime / duration
+        return CGFloat(max(0, min(1, value.isFinite ? value : 0)))
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.2))
+
+            Rectangle()
+                .fill(accentColor)
+                .scaleEffect(x: fraction, y: 1, anchor: .leading)
+                .animation(.linear(duration: 0.25), value: fraction)
+        }
+        .frame(height: 2)
+        .clipped()
+    }
+}
+
 
 struct TrackRowView: View, @MainActor Equatable {
     // 1. Pass these in instead of observing PlayerEngine
@@ -1059,7 +1245,6 @@ struct TrackRowView: View, @MainActor Equatable {
         lhs.activeTrackId == rhs.activeTrackId &&
         lhs.isAudioPlaying == rhs.isAudioPlaying &&
         lhs.artistName == rhs.artistName &&
-        lhs.isFavorite == rhs.isFavorite &&
         lhs.playlist?.id == rhs.playlist?.id
     }
 
@@ -1225,7 +1410,7 @@ struct TrackRowView: View, @MainActor Equatable {
     
     private func loadArtwork() {
         Task {
-            artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+            artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
         }
     }
     

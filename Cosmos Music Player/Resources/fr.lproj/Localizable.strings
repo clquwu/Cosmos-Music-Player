@@ -102,6 +102,12 @@
 "choose_visible_sections" = "Choisissez quelles sections sont visibles sur l'écran d'accueil";
 "remove_from_library_only" = "Supprimer de la bibliothèque uniquement";
 "remove_from_library_only_description" = "Lorsque cette option est activée, la suppression d'une piste la retire uniquement de la bibliothèque. Le fichier restera sur le disque.";
+"auto_folder_playlists" = "Créer automatiquement des playlists depuis les dossiers";
+"auto_folder_playlists_description" = "Lorsque cette option est activée, une playlist est créée automatiquement pour chaque dossier de fichiers musicaux et synchronisée avec son contenu.";
+"delete_folder_playlists_title" = "Supprimer les playlists de dossiers ?";
+"delete_folder_playlists_message" = "La création automatique est désormais désactivée. Voulez-vous supprimer les playlists de dossiers déjà créées ? Vos fichiers musicaux ne seront pas touchés.";
+"delete_folder_playlists_confirm" = "Supprimer les playlists";
+"keep_folder_playlists" = "Conserver les playlists";
 "player_controls" = "Contrôles du lecteur";
 "show_lyrics_button" = "Afficher le bouton Paroles";
 "show_lyrics_button_description" = "Affiche le bouton des paroles dans le lecteur lorsque le bouton de minuterie de sommeil est désactivé.";
@@ -288,3 +294,95 @@
 "selected_count_singular" = "%d sélectionné";
 "selected_count_plural" = "%d sélectionnés";
 "delete_files_confirmation_message" = "Êtes-vous sûr de vouloir supprimer %d fichier(s) ? Cette action ne peut pas être annulée.";
+
+/* ============================================================
+   App Intents (Siri / Raccourcis) — ajouté lors de la
+   modernisation Siri.
+   ============================================================ */
+
+/* Titres et descriptions des intents */
+"Resume Playback" = "Reprendre la lecture";
+"Resumes playing your music where you left off." = "Reprend la lecture de votre musique là où vous vous étiez arrêté.";
+"Audio" = "Audio";
+"Play Music" = "Lire de la musique";
+"Plays a song, album, artist or playlist from your Cosmos library." = "Lit un titre, un album, un artiste ou une playlist de votre bibliothèque Cosmos.";
+"Playback" = "Lecture";
+"Add to Playlist" = "Ajouter à une playlist";
+"Generate Mix" = "Générer un mix";
+"Builds a mix from your Cosmos library matching a mood or description and starts playing it." = "Crée un mix à partir de votre bibliothèque Cosmos selon une ambiance ou une description, puis lance la lecture.";
+"Toggle Favorite" = "Basculer le favori";
+"Favorite Current Song" = "Ajouter le morceau en cours aux favoris";
+"Adds the currently playing Cosmos song to Liked Songs." = "Ajoute le morceau en cours de lecture dans Cosmos aux favoris.";
+"%@ is already in your Liked Songs." = "%@ est déjà dans vos favoris.";
+"Added %@ to your Liked Songs." = "%@ a été ajouté à vos favoris.";
+"There isn't a song playing in Cosmos right now." = "Aucun morceau n'est en cours de lecture dans Cosmos.";
+"Add to Queue" = "Ajouter à la file d'attente";
+"Play Playlist" = "Lire la playlist";
+"Save Mix as Playlist" = "Enregistrer le mix comme playlist";
+"Song Card" = "Fiche titre";
+"Playlist Card" = "Fiche playlist";
+"Mix Card" = "Fiche mix";
+
+/* Titres de paramètres et invites */
+"Track" = "Titre";
+"Play Next" = "Lire ensuite";
+"Playlist" = "Playlist";
+"Description" = "Description";
+"What kind of mix do you want?" = "Quel genre de mix voulez-vous ?";
+
+/* Dialogues */
+"Added %@ to your favorites." = "%@ a été ajouté à vos favoris.";
+"Removed %@ from your favorites." = "%@ a été retiré de vos favoris.";
+"Added %@ to %@." = "%1$@ a été ajouté à %2$@.";
+"Added" = "Ajouté";
+"Playing your mix: %@." = "Lecture de votre mix : %@.";
+"Now playing" = "En cours de lecture";
+
+/* Erreurs */
+"There's no music in your Cosmos library yet." = "Il n'y a pas encore de musique dans votre bibliothèque Cosmos.";
+"No matching music was found in your library." = "Aucune musique correspondante n'a été trouvée dans votre bibliothèque.";
+"You can only take that action on individual songs." = "Cette action n'est possible que sur des titres individuels.";
+"That song is already in this playlist." = "Ce titre est déjà dans cette playlist.";
+"Playback failed. Please try again in the app." = "La lecture a échoué. Veuillez réessayer dans l'app.";
+"Your library is empty, so there's nothing to build a mix from." = "Votre bibliothèque est vide, il n'y a donc rien pour créer un mix.";
+"That mix isn't available anymore. Ask for a new one." = "Ce mix n'est plus disponible. Demandez-en un nouveau.";
+
+/* Libellés des cas d'énumération */
+"Shuffle" = "Aléatoire";
+"Repeat" = "Répéter";
+"Next" = "Suivant";
+"Last" = "En dernier";
+"Like" = "J'aime";
+"Dislike" = "Je n'aime pas";
+"Unset" = "Aucun";
+
+/* Représentations des entités */
+"%@ by %@" = "%1$@ par %2$@";
+"album %@" = "album %@";
+"%@ playlist" = "playlist %@";
+"playlist %@" = "playlist %@";
+"^[%lld song](inflect: true)" = "^[%lld titre](inflect: true)";
+"Warmup Audio Queue Result" = "Résultat de préparation de la file audio";
+
+/* Fiches de résultat (snippets) */
+"Play next" = "Lire ensuite";
+"Add to queue" = "Ajouter à la file d'attente";
+"Remove from favorites" = "Retirer des favoris";
+"Add to favorites" = "Ajouter aux favoris";
+"Play playlist" = "Lire la playlist";
+"^[%lld song](inflect: true) · %lld min" = "^[%lld titre](inflect: true) · %lld min";
+"Saved" = "Enregistré";
+"Save" = "Enregistrer";
+"Save mix as playlist" = "Enregistrer le mix comme playlist";
+
+/* Génération de playlist par IA (dans l'app) */
+"ai_playlist_title" = "Playlist IA";
+"ai_playlist_description" = "Décrivez la playlist souhaitée — l'IA embarquée choisit les titres correspondants dans votre bibliothèque.";
+"ai_playlist_placeholder" = "Soirée détente, sport énergique, un artiste…";
+"ai_playlist_generate" = "Générer";
+"ai_playlist_generating" = "Génération…";
+"ai_playlist_failed" = "Impossible de générer une playlist. Essayez une autre description.";
+"ai_playlist_button" = "Créer une playlist avec l'IA";
+
+"ai_playlist_created_title" = "Playlist créée";
+"ai_playlist_created_message" = "« %@ » a été créée avec %d titres.";

@@ -51,6 +51,10 @@ struct Track: Codable, FetchableRecord, PersistableRecord, Equatable {
     var channels: Int?
     var path: String
     var fileSize: Int64?
+    /// Filesystem modification timestamp in microseconds since 1970.
+    /// Optional so databases created by older app versions decode safely and
+    /// receive a one-time metadata refresh on their next library scan.
+    var modificationDate: Int64? = nil
     var replaygainTrackGain: Double?
     var replaygainAlbumGain: Double?
     var replaygainTrackPeak: Double?
@@ -73,6 +77,7 @@ struct Track: Codable, FetchableRecord, PersistableRecord, Equatable {
         case sampleRate = "sample_rate"
         case bitDepth = "bit_depth"
         case channels, fileSize = "file_size"
+        case modificationDate = "modification_date"
         case replaygainTrackGain = "replaygain_track_gain"
         case replaygainAlbumGain = "replaygain_album_gain"
         case replaygainTrackPeak = "replaygain_track_peak"
@@ -201,5 +206,31 @@ struct EQSettings: Codable, FetchableRecord, PersistableRecord {
         case activePresetId = "active_preset_id"
         case globalGain = "global_gain"
         case updatedAt = "updated_at"
+    }
+}
+
+/// A track paired with its position and a ForEach-safe unique row ID.
+///
+/// Queues and playlists may contain the same track more than once. Using the
+/// bare stableId as a ForEach identifier then produces duplicate IDs, which
+/// UICollectionView rejects at runtime ("invalid number of items in section")
+/// when the List animates an update.
+struct IdentifiedTrackRow {
+    let index: Int
+    let track: Track
+    let rowId: String
+}
+
+extension Array where Element == Track {
+    /// Rows for a SwiftUI ForEach that stay unique even when the same track
+    /// appears multiple times: repeat occurrences get "#n" appended to their ID.
+    func uniquelyIdentifiedRows() -> [IdentifiedTrackRow] {
+        var occurrences: [String: Int] = [:]
+        return enumerated().map { index, track in
+            let n = occurrences[track.stableId, default: 0]
+            occurrences[track.stableId] = n + 1
+            let rowId = n == 0 ? track.stableId : "\(track.stableId)#\(n)"
+            return IdentifiedTrackRow(index: index, track: track, rowId: rowId)
+        }
     }
 }

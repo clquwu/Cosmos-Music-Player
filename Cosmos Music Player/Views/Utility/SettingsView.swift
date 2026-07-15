@@ -3,7 +3,22 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var deleteSettings = DeleteSettings.load()
-    
+    @State private var showDeleteFolderPlaylistsPrompt = false
+
+    private func deleteExistingFolderPlaylists() {
+        do {
+            let folderPlaylists = try DatabaseManager.shared.getAllFolderPlaylists()
+            for playlist in folderPlaylists {
+                if let id = playlist.id {
+                    try DatabaseManager.shared.deletePlaylist(playlistId: id)
+                }
+            }
+            print("🗑️ Deleted \(folderPlaylists.count) folder playlist(s) after disabling auto-creation")
+        } catch {
+            print("❌ Failed to delete folder playlists: \(error)")
+        }
+    }
+
     var body: some View {
         NavigationView {
             Form {
@@ -118,6 +133,30 @@ struct SettingsView: View {
                     Text(Localized.removeFromLibraryOnlyDescription)
                         .font(.caption)
                         .foregroundColor(.secondary)
+
+                    Toggle(Localized.autoFolderPlaylists, isOn: $deleteSettings.autoCreateFolderPlaylists)
+                        .onChange(of: deleteSettings.autoCreateFolderPlaylists) { _, newValue in
+                            deleteSettings.save()
+                            if newValue {
+                                // Re-enabled: clear tombstones so folder playlists
+                                // can be recreated on the next scan
+                                try? DatabaseManager.shared.clearDeletedFolderPlaylistTombstones()
+                            } else {
+                                showDeleteFolderPlaylistsPrompt = true
+                            }
+                        }
+
+                    Text(Localized.autoFolderPlaylistsDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .alert(Localized.deleteFolderPlaylistsTitle, isPresented: $showDeleteFolderPlaylistsPrompt) {
+                    Button(Localized.deleteFolderPlaylistsConfirm, role: .destructive) {
+                        deleteExistingFolderPlaylists()
+                    }
+                    Button(Localized.keepFolderPlaylists, role: .cancel) {}
+                } message: {
+                    Text(Localized.deleteFolderPlaylistsMessage)
                 }
 
                 Section(Localized.playerControls) {

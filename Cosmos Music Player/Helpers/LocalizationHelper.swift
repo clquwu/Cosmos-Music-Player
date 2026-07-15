@@ -29,6 +29,17 @@ struct Localized {
     static let createNewPlaylist = "create_new_playlist".localized
     static let createPlaylist = "create_playlist".localized
     static let playlistNamePlaceholder = "playlist_name_placeholder".localized
+    static let aiPlaylistTitle = "ai_playlist_title".localized
+    static let aiPlaylistDescription = "ai_playlist_description".localized
+    static let aiPlaylistPlaceholder = "ai_playlist_placeholder".localized
+    static let aiPlaylistGenerate = "ai_playlist_generate".localized
+    static let aiPlaylistGenerating = "ai_playlist_generating".localized
+    static let aiPlaylistFailed = "ai_playlist_failed".localized
+    static let aiPlaylistButton = "ai_playlist_button".localized
+    static let aiPlaylistCreatedTitle = "ai_playlist_created_title".localized
+    static func aiPlaylistCreatedMessage(_ title: String, _ count: Int) -> String {
+        "ai_playlist_created_message".localized(with: title, count)
+    }
     static let enterPlaylistName = "enter_playlist_name".localized
     static let deletePlaylist = "delete_playlist".localized
     static let delete = "delete".localized
@@ -117,6 +128,12 @@ struct Localized {
     static let chooseVisibleSections = "choose_visible_sections".localized
     static let removeFromLibraryOnly = "remove_from_library_only".localized
     static let removeFromLibraryOnlyDescription = "remove_from_library_only_description".localized
+    static let autoFolderPlaylists = "auto_folder_playlists".localized
+    static let autoFolderPlaylistsDescription = "auto_folder_playlists_description".localized
+    static let deleteFolderPlaylistsTitle = "delete_folder_playlists_title".localized
+    static let deleteFolderPlaylistsMessage = "delete_folder_playlists_message".localized
+    static let deleteFolderPlaylistsConfirm = "delete_folder_playlists_confirm".localized
+    static let keepFolderPlaylists = "keep_folder_playlists".localized
     static let playerControls = "player_controls".localized
     static let showLyricsButton = "show_lyrics_button".localized
     static let showLyricsButtonDescription = "show_lyrics_button_description".localized

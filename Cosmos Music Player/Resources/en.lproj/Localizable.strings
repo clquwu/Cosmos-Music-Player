@@ -102,6 +102,12 @@
 "choose_visible_sections" = "Choose which sections are visible on the home screen";
 "remove_from_library_only" = "Remove from library only";
 "remove_from_library_only_description" = "When enabled, deleting a track only removes it from the library. The file will remain on disk.";
+"auto_folder_playlists" = "Auto-create playlists from folders";
+"auto_folder_playlists_description" = "When enabled, a playlist is automatically created for each folder of music files and kept in sync with its contents.";
+"delete_folder_playlists_title" = "Delete folder playlists?";
+"delete_folder_playlists_message" = "Auto-creation is now off. Do you want to delete the folder playlists that were already created? Your music files won't be touched.";
+"delete_folder_playlists_confirm" = "Delete playlists";
+"keep_folder_playlists" = "Keep playlists";
 "player_controls" = "Player Controls";
 "show_lyrics_button" = "Show Lyrics Button";
 "show_lyrics_button_description" = "Show the lyrics button in the player when the sleep timer button is disabled.";
@@ -288,3 +294,95 @@
 "selected_count_singular" = "%d selected";
 "selected_count_plural" = "%d selected";
 "delete_files_confirmation_message" = "Are you sure you want to delete %d file(s)? This action cannot be undone.";
+
+/* ============================================================
+   App Intents (Siri / Shortcuts) — added in the Siri
+   modernization pass. Keys are the English source strings.
+   ============================================================ */
+
+/* Intent titles & descriptions */
+"Resume Playback" = "Resume Playback";
+"Resumes playing your music where you left off." = "Resumes playing your music where you left off.";
+"Audio" = "Audio";
+"Play Music" = "Play Music";
+"Plays a song, album, artist or playlist from your Cosmos library." = "Plays a song, album, artist or playlist from your Cosmos library.";
+"Playback" = "Playback";
+"Add to Playlist" = "Add to Playlist";
+"Generate Mix" = "Generate Mix";
+"Builds a mix from your Cosmos library matching a mood or description and starts playing it." = "Builds a mix from your Cosmos library matching a mood or description and starts playing it.";
+"Toggle Favorite" = "Toggle Favorite";
+"Favorite Current Song" = "Favorite Current Song";
+"Adds the currently playing Cosmos song to Liked Songs." = "Adds the currently playing Cosmos song to Liked Songs.";
+"%@ is already in your Liked Songs." = "%@ is already in your Liked Songs.";
+"Added %@ to your Liked Songs." = "Added %@ to your Liked Songs.";
+"There isn't a song playing in Cosmos right now." = "There isn't a song playing in Cosmos right now.";
+"Add to Queue" = "Add to Queue";
+"Play Playlist" = "Play Playlist";
+"Save Mix as Playlist" = "Save Mix as Playlist";
+"Song Card" = "Song Card";
+"Playlist Card" = "Playlist Card";
+"Mix Card" = "Mix Card";
+
+/* Parameter titles & prompts */
+"Track" = "Track";
+"Play Next" = "Play Next";
+"Playlist" = "Playlist";
+"Description" = "Description";
+"What kind of mix do you want?" = "What kind of mix do you want?";
+
+/* Dialogs */
+"Added %@ to your favorites." = "Added %@ to your favorites.";
+"Removed %@ from your favorites." = "Removed %@ from your favorites.";
+"Added %@ to %@." = "Added %1$@ to %2$@.";
+"Added" = "Added";
+"Playing your mix: %@." = "Playing your mix: %@.";
+"Now playing" = "Now playing";
+
+/* Errors */
+"There's no music in your Cosmos library yet." = "There's no music in your Cosmos library yet.";
+"No matching music was found in your library." = "No matching music was found in your library.";
+"You can only take that action on individual songs." = "You can only take that action on individual songs.";
+"That song is already in this playlist." = "That song is already in this playlist.";
+"Playback failed. Please try again in the app." = "Playback failed. Please try again in the app.";
+"Your library is empty, so there's nothing to build a mix from." = "Your library is empty, so there's nothing to build a mix from.";
+"That mix isn't available anymore. Ask for a new one." = "That mix isn't available anymore. Ask for a new one.";
+
+/* Enum case labels */
+"Shuffle" = "Shuffle";
+"Repeat" = "Repeat";
+"Next" = "Next";
+"Last" = "Last";
+"Like" = "Like";
+"Dislike" = "Dislike";
+"Unset" = "Unset";
+
+/* Entity display representations */
+"%@ by %@" = "%1$@ by %2$@";
+"album %@" = "album %@";
+"%@ playlist" = "%@ playlist";
+"playlist %@" = "playlist %@";
+"^[%lld song](inflect: true)" = "^[%lld song](inflect: true)";
+"Warmup Audio Queue Result" = "Warmup Audio Queue Result";
+
+/* Snippet cards */
+"Play next" = "Play next";
+"Add to queue" = "Add to queue";
+"Remove from favorites" = "Remove from favorites";
+"Add to favorites" = "Add to favorites";
+"Play playlist" = "Play playlist";
+"^[%lld song](inflect: true) · %lld min" = "^[%lld song](inflect: true) · %lld min";
+"Saved" = "Saved";
+"Save" = "Save";
+"Save mix as playlist" = "Save mix as playlist";
+
+/* AI playlist generation (in-app) */
+"ai_playlist_title" = "AI Playlist";
+"ai_playlist_description" = "Describe the playlist you want — the on-device AI picks matching songs from your library.";
+"ai_playlist_placeholder" = "Chill evening, energetic workout, an artist…";
+"ai_playlist_generate" = "Generate";
+"ai_playlist_generating" = "Generating…";
+"ai_playlist_failed" = "Couldn't generate a playlist. Try a different description.";
+"ai_playlist_button" = "Create playlist with AI";
+
+"ai_playlist_created_title" = "Playlist Created";
+"ai_playlist_created_message" = "“%@” was created with %d songs.";

@@ -970,7 +970,7 @@ class AppCoordinator: ObservableObject {
 
             if let firstTrack = tracks.first {
                 // Set up background session BEFORE starting playback for Siri
-                await triggerBackgroundLifecycleForSiri()
+                await prepareSiriAudioSession()
                 await playerEngine.playTrack(firstTrack, queue: tracks)
             }
         } catch {
@@ -979,7 +979,7 @@ class AppCoordinator: ObservableObject {
     }
 
 
-    private func triggerBackgroundLifecycleForSiri() async {
+    func prepareSiriAudioSession() async {
         // Delegate to PlayerEngine to handle background session setup for Siri
         await MainActor.run {
             PlayerEngine.shared.setupBackgroundSessionForSiri()
@@ -991,7 +991,7 @@ class AppCoordinator: ObservableObject {
             let tracks = try databaseManager.getTracksByStableIds(identifiers)
             if let firstTrack = tracks.first {
                 // Set up background session BEFORE starting playback for Siri
-                await triggerBackgroundLifecycleForSiri()
+                await prepareSiriAudioSession()
                 await playerEngine.playTrack(firstTrack, queue: tracks)
             }
         } catch {
@@ -1007,6 +1007,12 @@ class AppCoordinator: ObservableObject {
         }
 
         print("🎤 Handling Siri playback intent for: \(identifier)")
+        SiriDiag.log("APP handleSiriPlaybackIntent identifier=\(identifier) title=\(mediaItem.title ?? "nil")")
+
+        guard identifier != "cosmos_not_found" else {
+            completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            return
+        }
 
         do {
             if identifier.hasPrefix("search_song_") {
@@ -1015,7 +1021,7 @@ class AppCoordinator: ObservableObject {
                 let tracks = try databaseManager.searchTracks(query: songName)
                 if let firstTrack = tracks.first {
                     // Set up background session BEFORE starting playback for Siri
-                    await triggerBackgroundLifecycleForSiri()
+                    await prepareSiriAudioSession()
                     await playerEngine.playTrack(firstTrack, queue: tracks)
                     completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                 } else {
@@ -1095,6 +1101,77 @@ class AppCoordinator: ObservableObject {
                 } else {
                     completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
                 }
+            } else if identifier.hasPrefix("search_album_") {
+                let albumName = String(identifier.dropFirst(13))
+                print("🎤 Searching for album: '\(albumName)'")
+                let albums = try databaseManager.searchAlbums(query: albumName)
+                if let album = albums.first, let albumId = album.id {
+                    let tracks = try databaseManager.getTracksByAlbumId(albumId)
+                    if let firstTrack = tracks.first {
+                        await prepareSiriAudioSession()
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                        return
+                    }
+                }
+                completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            } else if identifier.hasPrefix("search_artist_") {
+                let artistName = String(identifier.dropFirst(14))
+                print("🎤 Searching for artist: '\(artistName)'")
+                let artists = try databaseManager.searchArtists(query: artistName)
+                if let artist = artists.first, let artistId = artist.id {
+                    let tracks = try databaseManager.getTracksByArtistId(artistId)
+                    if let firstTrack = tracks.first {
+                        await prepareSiriAudioSession()
+                        await playerEngine.playTrack(firstTrack, queue: tracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                        return
+                    }
+                }
+                completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            } else if identifier.hasPrefix("search_any_") {
+                // iOS 27 Siri often sends untyped media requests — cascade
+                // songs → albums → artists → playlists against the main DB.
+                let name = String(identifier.dropFirst(11))
+                print("🎤 Untyped search: '\(name)'")
+                SiriDiag.log("APP search_any name=\(name)")
+                let tracks = try databaseManager.searchTracks(query: name)
+                if let firstTrack = tracks.first {
+                    await prepareSiriAudioSession()
+                    await playerEngine.playTrack(firstTrack, queue: tracks)
+                    completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    return
+                }
+                if let album = try databaseManager.searchAlbums(query: name).first, let albumId = album.id {
+                    let albumTracks = try databaseManager.getTracksByAlbumId(albumId)
+                    if let firstTrack = albumTracks.first {
+                        await prepareSiriAudioSession()
+                        await playerEngine.playTrack(firstTrack, queue: albumTracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                        return
+                    }
+                }
+                if let artist = try databaseManager.searchArtists(query: name).first, let artistId = artist.id {
+                    let artistTracks = try databaseManager.getTracksByArtistId(artistId)
+                    if let firstTrack = artistTracks.first {
+                        await prepareSiriAudioSession()
+                        await playerEngine.playTrack(firstTrack, queue: artistTracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                        return
+                    }
+                }
+                if let playlist = try databaseManager.searchPlaylists(query: name).first, let playlistId = playlist.id {
+                    let items = try databaseManager.getPlaylistItems(playlistId: playlistId)
+                    let playlistTracks = try databaseManager.getTracksByStableIds(items.map { $0.trackStableId })
+                    if let firstTrack = playlistTracks.first {
+                        await prepareSiriAudioSession()
+                        await playerEngine.playTrack(firstTrack, queue: playlistTracks)
+                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                        return
+                    }
+                }
+                print("❌ Untyped search found nothing for '\(name)'")
+                completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
             } else if identifier == "no_favorites" {
                 // User requested favorites but none exist
                 print("🎵 No favorites found - user needs to add some favorites first")
@@ -1104,7 +1181,7 @@ class AppCoordinator: ObservableObject {
                 let tracks = try databaseManager.getAllTracks()
                 if let firstTrack = tracks.first {
                     // Set up background session BEFORE starting playback for Siri
-                    await triggerBackgroundLifecycleForSiri()
+                    await prepareSiriAudioSession()
                     await playerEngine.playTrack(firstTrack, queue: tracks)
                     completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                 } else {
@@ -1126,7 +1203,7 @@ class AppCoordinator: ObservableObject {
                         print("🎵 Playing regular track with all tracks queue")
                         let allTracks = try databaseManager.getAllTracks()
                         // Set up background session BEFORE starting playback for Siri
-                        await triggerBackgroundLifecycleForSiri()
+                        await prepareSiriAudioSession()
                         await playerEngine.playTrack(track, queue: allTracks)
                     }
                     completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
@@ -1138,6 +1215,63 @@ class AppCoordinator: ObservableObject {
             print("❌ Error handling Siri playback: \(error)")
             completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
         }
+    }
+
+    /// "Add this song to favorites / to <playlist>" via the legacy
+    /// INAddMediaIntent route the SiriIntentsExtension hands to the app.
+    func handleSiriAddMediaIntent(_ intent: INAddMediaIntent, completion: @escaping (INIntentResponse) -> Void) async {
+        let identifier = intent.mediaItems?.first?.identifier ?? "current_track"
+        SiriDiag.log("APP handleSiriAddMediaIntent id=\(identifier) destination=\(String(describing: intent.mediaDestination))")
+
+        let track: Track?
+        if identifier == "current_track" {
+            track = playerEngine.currentTrack
+        } else {
+            track = try? databaseManager.getTrack(byStableId: identifier)
+        }
+        guard let track else {
+            print("❌ AddMedia: no track to act on")
+            completion(INAddMediaIntentResponse(code: .failure, userActivity: nil))
+            return
+        }
+
+        do {
+            if case .playlist(let playlistName)? = intent.mediaDestination,
+               !Self.isFavoritesDestination(playlistName) {
+                let playlists = try databaseManager.searchPlaylists(query: playlistName)
+                guard let playlist = playlists.first, let playlistId = playlist.id else {
+                    print("❌ AddMedia: playlist '\(playlistName)' not found")
+                    completion(INAddMediaIntentResponse(code: .failure, userActivity: nil))
+                    return
+                }
+                try addToPlaylist(playlistId: playlistId, trackStableId: track.stableId)
+                print("✅ AddMedia: added '\(track.title)' to playlist '\(playlist.title)'")
+            } else {
+                // Library/favorites destination — add to favorites, idempotent.
+                if try !isFavorite(trackStableId: track.stableId) {
+                    try toggleFavorite(trackStableId: track.stableId)
+                }
+                print("✅ AddMedia: '\(track.title)' is now a favorite")
+            }
+            completion(INAddMediaIntentResponse(code: .success, userActivity: nil))
+        } catch {
+            print("❌ AddMedia failed: \(error)")
+            completion(INAddMediaIntentResponse(code: .failure, userActivity: nil))
+        }
+    }
+
+    /// Siri phrases "add this to my favorites" as a playlist destination
+    /// named "my favourites" — map those names onto the favorites feature
+    /// instead of looking for a playlist that doesn't exist.
+    private static func isFavoritesDestination(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        let keywords = [
+            "favorite", "favourite", "liked", "loved",
+            "favori", "favoris", "préféré", "préférés", "préférées",
+            "prefere", "preferes", "aimé", "aimés", "aimées", "aime",
+            "coup de coeur", "coups de coeur", "coup de cœur", "coups de cœur"
+        ]
+        return keywords.contains { lowered.contains($0) }
     }
 }
 

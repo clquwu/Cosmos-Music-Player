@@ -6,12 +6,12 @@ import Combine
 // MARK: - Responsive Font Helper
 extension View {
     func responsiveLibraryTitleFont() -> some View {
-        self.font(.largeTitle)
+        self.font(.title)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .fontWeight(.bold)
     }
-    
+
     func responsiveSectionTitleFont() -> some View {
         self.font(.title2)
             .lineLimit(1)
@@ -49,11 +49,11 @@ struct LibraryView: View {
     @State private var newTracksFoundCount = 0
     @State private var syncCompleted = false
     @State private var showMusicPicker = false
-    
+
     // Helper function to show sync feedback
     private func showSyncFeedback(trackCountBefore: Int, trackCountAfter: Int) {
         let trackDifference = trackCountAfter - trackCountBefore
-        
+
         // Set appropriate message and icon based on changes
         if trackDifference > 0 {
             // New tracks added
@@ -90,49 +90,49 @@ struct LibraryView: View {
                 syncToastMessage = NSLocalizedString("sync_no_changes", value: "Library is up to date", comment: "")
             }
         }
-        
+
         withAnimation(.easeInOut(duration: 0.2)) {
             showSyncToast = true
         }
-        
+
         // Auto-hide toast after 3 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             withAnimation(.easeInOut(duration: 0.3)) {
                 showSyncToast = false
             }
         }
-        
+
         // Reset tracking variables
         newTracksFoundCount = 0
         syncCompleted = false
     }
-    
+
     private func importMusicFiles(_ urls: [URL]) {
         Task {
             var addedCount = 0
             var skippedCount = 0
-            
+
             for url in urls {
                 // Reject network URLs
                 if let scheme = url.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
                     print("❌ Rejected network URL: \(url.absoluteString)")
                     continue
                 }
-                
+
                 // Start accessing security-scoped resource
                 guard url.startAccessingSecurityScopedResource() else {
                     print("Failed to access security scoped resource for: \(url.lastPathComponent)")
                     continue
                 }
-                
+
                 defer {
                     url.stopAccessingSecurityScopedResource()
                 }
-                
+
                 do {
                     // Create bookmark data for persistent access
                     let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
-                    
+
                     // Store bookmark data for this file
                     await storeBookmarkData(bookmarkData, for: url)
 
@@ -145,10 +145,10 @@ struct LibraryView: View {
                         skippedCount += 1
                         print("⏭️ Skipped import (already exists/excluded/error): \(url.lastPathComponent)")
                     }
-                    
+
                 } catch {
                     print("Failed to create bookmark for \(url.lastPathComponent): \(error)")
-                    
+
                     // Still try to process the file even if bookmark creation fails
                     let imported = await libraryIndexer.processExternalFile(url, allowExcludedReimport: true)
                     if imported {
@@ -160,7 +160,7 @@ struct LibraryView: View {
                     }
                 }
             }
-            
+
             // Show feedback
             await MainActor.run {
                 if addedCount > 0 || skippedCount > 0 {
@@ -179,11 +179,11 @@ struct LibraryView: View {
                     } else {
                         syncToastMessage = "\(addedCount) imported, \(skippedCount) skipped"
                     }
-                    
+
                     withAnimation(.easeInOut(duration: 0.2)) {
                         showSyncToast = true
                     }
-                    
+
                     // Auto-hide toast after 3 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                         withAnimation(.easeInOut(duration: 0.3)) {
@@ -192,18 +192,18 @@ struct LibraryView: View {
                     }
                 }
             }
-            
+
             // Trigger library refresh to update UI
             if addedCount > 0, let onManualSync = onManualSync {
                 _ = await onManualSync()
             }
         }
     }
-    
+
     private func storeBookmarkData(_ bookmarkData: Data, for url: URL) async {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-        
+
         do {
             // Load existing bookmarks or create new dictionary
             var bookmarks: [String: Data] = [:]
@@ -213,17 +213,17 @@ struct LibraryView: View {
                     bookmarks = plist
                 }
             }
-            
+
             // Generate stableId for this file
             let stableId = try libraryIndexer.generateStableId(for: url)
-            
+
             // Store bookmark using stableId as key (survives file moves)
             bookmarks[stableId] = bookmarkData
-            
+
             // Save updated bookmarks
             let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
             try plistData.write(to: bookmarksURL)
-            
+
             print("Stored bookmark for external file: \(url.lastPathComponent) with stableId: \(stableId)")
         } catch {
             print("Failed to store bookmark data: \(error)")
@@ -317,61 +317,69 @@ struct LibraryView: View {
         NavigationStack {
             ZStack {
                 ScreenSpecificBackgroundView(screen: .library)
-                
+
                 VStack(spacing: 0) {
-                    
+
                     // Compact processing status at the top of library
                     if libraryIndexer.isIndexing && !libraryIndexer.currentlyProcessing.isEmpty {
                         HStack(spacing: 8) {
                             ProgressView()
                                 .scaleEffect(0.6)
                                 .frame(width: 12, height: 12)
-                            
+
                             Text("\(Localized.processing): \(libraryIndexer.currentlyProcessing)")
                                 .font(.caption2)
                                 .foregroundColor(settings.backgroundColorChoice.color)
                                 .lineLimit(1)
-                            
+
                             Spacer()
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                         .background(settings.backgroundColorChoice.color.opacity(0.05))
                     }
-                    
+
                     // Large section rows
                     ScrollView {
                         VStack(spacing: 16) {
                             // Library title with icons that scrolls with content
                             HStack(alignment: .center) {
-                                Text(Localized.library)
-                                    .responsiveLibraryTitleFont()
-                                    .foregroundColor(.primary)
-                                
+                                HStack(spacing: 10) {
+                                    Image("AppLogo")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 32, height: 32)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                    Text(Localized.library)
+                                        .responsiveLibraryTitleFont()
+                                        .foregroundColor(.primary)
+                                }
+
                                 Spacer()
-                                
+
                                 HStack(spacing: 20) {
                                     // Sync button (if available)
                                     if let onManualSync = onManualSync {
                                         Button(action: {
                                             guard !isRefreshing else { return }
-                                            
+
                                             // Provide immediate haptic feedback
                                             let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
                                             impactFeedback.impactOccurred()
-                                            
+
                                             withAnimation(.easeInOut(duration: 0.1)) {
                                                 isRefreshing = true
                                             }
-                                            
+
                                             Task {
                                                 // Wait for any ongoing indexing to complete first
                                                 while libraryIndexer.isIndexing {
                                                     try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
                                                 }
-                                                
+
                                                 let result = await onManualSync()
-                                                
+
                                                 await MainActor.run {
                                                     isRefreshing = false
                                                     showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
@@ -395,7 +403,7 @@ struct LibraryView: View {
                                         }
                                         .disabled(isRefreshing)
                                     }
-                                    
+
                                     // Search button (center)
                                     Button(action: {
                                         showSearch = true
@@ -404,7 +412,7 @@ struct LibraryView: View {
                                             .font(.system(size: 26, weight: .medium))
                                             .foregroundColor(settings.backgroundColorChoice.color)
                                     }
-                                    
+
                                     // Settings button
                                     Button(action: {
                                         showSettings = true
@@ -430,29 +438,29 @@ struct LibraryView: View {
                 .refreshable {
                     // Prevent multiple concurrent refreshes
                     guard !isRefreshing else { return }
-                    
+
                     // Provide haptic feedback for pull-to-refresh
                     let impactFeedback = UIImpactFeedbackGenerator(style: .light)
                     impactFeedback.impactOccurred()
-                    
+
                     // Wait for any ongoing indexing to complete before starting sync
                     while libraryIndexer.isIndexing {
                         try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
                     }
-                    
+
                     // For pull-to-refresh, use manual sync if available, otherwise just refresh
                     let result = if let onManualSync = onManualSync {
                         await onManualSync() // Full sync + refresh
                     } else {
                         await onRefresh()    // Just refresh
                     }
-                    
+
                     // Show feedback after sync/refresh is complete
                     await MainActor.run {
                         showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
                     }
                 }
-                
+
                 // Hidden NavigationLink for programmatic navigation from player
                 NavigationLink(
                     destination: artistToNavigate.map { artist in
@@ -466,7 +474,7 @@ struct LibraryView: View {
                     EmptyView()
                 }
                 .hidden()
-                
+
                 // Hidden NavigationLink for album navigation from player
                 NavigationLink(
                     destination: albumToNavigate.map { album in
@@ -480,14 +488,14 @@ struct LibraryView: View {
                     EmptyView()
                 }
                 .hidden()
-                
+
             }
             .navigationDestination(isPresented: Binding(
                 get: { searchArtistToNavigate != nil },
                 set: { if !$0 { searchArtistToNavigate = nil } }
             )) {
                 if let artist = searchArtistToNavigate {
-                    
+
                     ArtistDetailScreen(artist: artist, allTracks: searchArtistTracks)
                 }
             }
@@ -519,7 +527,7 @@ struct LibraryView: View {
         .background(.clear)
         .toolbarBackground(.clear, for: .navigationBar)
         .toolbarBackground(.clear, for: .automatic)
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToArtistFromPlayer"))) { notification in
@@ -612,7 +620,7 @@ struct LibrarySectionRowView: View {
     let icon: String
     let color: Color
     @State private var settings = DeleteSettings.load()
-    
+
     var body: some View {
         HStack(spacing: 16) {
             // Icon
@@ -626,26 +634,26 @@ struct LibrarySectionRowView: View {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(color.opacity(0.2))
                         .frame(width: 60, height: 60)
-                    
+
                     Image(systemName: icon)
                         .font(.system(size: 24, weight: .medium))
                         .foregroundColor(color)
                 }
             }
-            
+
             // Text content
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .responsiveSectionTitleFont()
                     .foregroundColor(.primary)
-                
+
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
             // Chevron
             Image(systemName: "chevron.right")
                 .font(.body)
@@ -661,7 +669,7 @@ struct LibrarySectionRowView: View {
         )
         .cornerRadius(12)
         .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
@@ -674,7 +682,7 @@ struct AllSongsScreen: View {
     let tracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var settings = DeleteSettings.load()
-    
+
     var body: some View {
         TrackListView(tracks: tracks, listIdentifier: "all_songs")
             .background(ScreenSpecificBackgroundView(screen: .allSongs))
@@ -691,11 +699,11 @@ struct AllSongsScreen: View {
                     .disabled(tracks.isEmpty)
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                 settings = DeleteSettings.load()
             }
     }
-    
+
     private func shuffleAllSongs() {
         guard !tracks.isEmpty else { return }
         let shuffled = tracks.shuffled()
@@ -710,7 +718,7 @@ struct LikedSongsScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var likedTracks: [Track] = []
     @State private var settings = DeleteSettings.load()
-    
+
     var body: some View {
         TrackListView(tracks: likedTracks, listIdentifier: "liked_songs", isLikedSongsScreen: true)
             .background(ScreenSpecificBackgroundView(screen: .likedSongs))
@@ -733,11 +741,11 @@ struct LikedSongsScreen: View {
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
                 loadLikedTracks()
             }
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                 settings = DeleteSettings.load()
             }
     }
-    
+
     private func shuffleLikedSongs() {
         guard !likedTracks.isEmpty else { return }
         let shuffled = likedTracks.shuffled()
@@ -745,7 +753,7 @@ struct LikedSongsScreen: View {
             await appCoordinator.playTrack(shuffled[0], queue: shuffled)
         }
     }
-    
+
     private func loadLikedTracks() {
         do {
             let favoriteIds = try appCoordinator.getFavorites()
@@ -766,7 +774,7 @@ enum TrackSortOption: String, CaseIterable {
     case artistZA
     case sizeLargest
     case sizeSmallest
-    
+
     var localizedString: String {
         switch self {
         case .playlistOrder: return "Manual Order"
@@ -788,20 +796,20 @@ struct TrackListView: View {
     let isEditMode: Bool
     let listIdentifier: String?
     let isLikedSongsScreen: Bool
-    
+
     @EnvironmentObject private var appCoordinator: AppCoordinator
-    
+
     // Local State
     @State private var sortOption: TrackSortOption = .dateNewest
     @State private var recentlyActedTracks: Set<String> = []
-    
+
     // Bulk selection state
     @State private var isBulkMode = false
     @State private var selectedTracks: Set<String> = []
     @State private var showBulkPlaylistDialog = false
     @State private var showBulkDeleteConfirmation = false
     @State private var settings = DeleteSettings.load()
-    
+
     init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil, isLikedSongsScreen: Bool = false) {
         self.tracks = tracks
         self.playlist = playlist
@@ -809,7 +817,7 @@ struct TrackListView: View {
         self.listIdentifier = listIdentifier
         self.isLikedSongsScreen = isLikedSongsScreen
     }
-    
+
     // Sorting logic stays here
     private var sortedTracks: [Track] {
         let filteredTracks: [Track]
@@ -821,7 +829,7 @@ struct TrackListView: View {
         } else {
             filteredTracks = tracks
         }
-        
+
         switch sortOption {
         case .playlistOrder: return filteredTracks
         case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
@@ -848,11 +856,11 @@ struct TrackListView: View {
         case .sizeSmallest: return filteredTracks.sorted { ($0.fileSize ?? 0) < ($1.fileSize ?? 0) }
         }
     }
-    
+
     private func buildArtistCache(for tracks: [Track]) -> [Int64: String] {
         // Get unique artist IDs
         let artistIds = Set(tracks.compactMap { $0.artistId })
-        
+
         // Fetch all artists in one query
         var cache: [Int64: String] = [:]
         do {
@@ -869,22 +877,22 @@ struct TrackListView: View {
         }
         return cache
     }
-    
+
     // Bulk Helpers
     private func enterBulkMode(initialSelection: String? = nil) {
         isBulkMode = true
         if let trackId = initialSelection { selectedTracks.insert(trackId) }
     }
-    
+
     private func exitBulkMode() {
         isBulkMode = false
         selectedTracks.removeAll()
     }
-    
+
     private func selectAll() {
         selectedTracks = Set(sortedTracks.map { $0.stableId })
     }
-    
+
     private func bulkAddToLikedSongs() {
         for trackId in selectedTracks {
             if let track = sortedTracks.first(where: { $0.stableId == trackId }) {
@@ -893,7 +901,7 @@ struct TrackListView: View {
         }
         exitBulkMode()
     }
-    
+
     private func bulkDelete() {
         Task {
             let deleteSettings = DeleteSettings.load()
@@ -911,7 +919,7 @@ struct TrackListView: View {
             exitBulkMode()
         }
     }
-    
+
     // Persistence
     private func loadSortPreference() {
         guard let identifier = listIdentifier else { return }
@@ -920,12 +928,12 @@ struct TrackListView: View {
             sortOption = saved
         }
     }
-    
+
     private func saveSortPreference() {
         guard let identifier = listIdentifier else { return }
         UserDefaults.standard.set(sortOption.rawValue, forKey: "sortPreference_\(identifier)")
     }
-    
+
     var body: some View {
         // We pass the sorted tracks and state bindings to the Inner View.
         // The Inner View observes PlayerEngine, so IT updates, but THIS view (and the Toolbar) remains stable.
@@ -946,7 +954,7 @@ struct TrackListView: View {
                     Button(Localized.cancel) { exitBulkMode() }
                         .foregroundColor(settings.backgroundColorChoice.color)
                 }
-                
+
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Button(action: { selectAll() }) {
@@ -957,7 +965,7 @@ struct TrackListView: View {
                             Label(isLikedSongsScreen ? Localized.removeFromLiked : Localized.addToLiked, systemImage: "heart.fill")
                         }
                         .disabled(selectedTracks.isEmpty)
-                        
+
                         Button(action: { showBulkPlaylistDialog = true }) {
                             Label(Localized.addToPlaylist, systemImage: "music.note.list")
                         }
@@ -1020,19 +1028,20 @@ struct TrackListContentView: View {
     let tracks: [Track]
     let playlist: Playlist?
     let isEditMode: Bool
-    
+
     // Bindings to parent state
     @Binding var isBulkMode: Bool
     @Binding var selectedTracks: Set<String>
     @Binding var recentlyActedTracks: Set<String>
     let onEnterBulkMode: (String?) -> Void
-    
+
     // Only THIS view updates when the song progresses
     @StateObject private var playerEngine = PlayerEngine.shared
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var settings = DeleteSettings.load()
     @State private var displayLimit = 50
     @State private var artistNameCache: [Int64: String] = [:]
+    @State private var artistDisplayNameCache: [String: String] = [:]
     private let pageSize = 50
     private let largeQueueCap = 5000
 
@@ -1043,7 +1052,7 @@ struct TrackListContentView: View {
     private var trackDisplaySignature: String {
         "\(tracks.count)-\(tracks.first?.stableId ?? "")-\(tracks.last?.stableId ?? "")"
     }
-    
+
     private func toggleSelection(for track: Track) {
         if selectedTracks.contains(track.stableId) {
             selectedTracks.remove(track.stableId)
@@ -1051,7 +1060,7 @@ struct TrackListContentView: View {
             selectedTracks.insert(track.stableId)
         }
     }
-    
+
     private func markAsActed(_ trackId: String) {
         recentlyActedTracks.insert(trackId)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -1072,6 +1081,15 @@ struct TrackListContentView: View {
     private func loadArtistNameCache() {
         do {
             artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+            let fallbackArtistIds = tracks.reduce(into: [String: Int64]()) { result, track in
+                if let artistId = track.artistId {
+                    result[track.stableId] = artistId
+                }
+            }
+            artistDisplayNameCache = try DatabaseManager.shared.getArtistDisplayNames(
+                forTrackStableIds: tracks.map(\.stableId),
+                fallbackArtistIdsByStableId: fallbackArtistIds
+            )
         } catch {
             print("Failed to load artist name cache: \(error)")
         }
@@ -1085,7 +1103,20 @@ struct TrackListContentView: View {
             prefetchTrackIds: prefetchIds
         )
     }
-    
+
+    private func loadNextPageIfNeeded() {
+        guard displayLimit < tracks.count else { return }
+
+        // Scroll geometry only reaches this point when the user is actually
+        // near the bottom. Unlike a List row's onAppear, it is not fired by
+        // UICollectionView prefetching every newly appended page.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            displayLimit = min(displayLimit + pageSize, tracks.count)
+        }
+    }
+
     var body: some View {
         if tracks.isEmpty {
             VStack(spacing: 16) {
@@ -1107,12 +1138,12 @@ struct TrackListContentView: View {
                                 .contentShape(Rectangle())
                                 .onTapGesture { toggleSelection(for: track) }
                         }
-                        
+
                         TrackRowView(
                             track: track,
                             activeTrackId: playerEngine.currentTrack?.stableId,
                             isAudioPlaying: playerEngine.isPlaying,
-                            artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
+                            artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
                             onTap: {
                                 if isBulkMode {
                                     toggleSelection(for: track)
@@ -1159,20 +1190,23 @@ struct TrackListContentView: View {
                 .listRowSeparator(.hidden).listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             }
-                if displayLimit < tracks.count {
-                    Color.clear
-                        .frame(height: 1)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                        .onAppear {
-                            displayLimit = min(displayLimit + pageSize, tracks.count)
-                        }
-                }
             }
             .listStyle(PlainListStyle())
             .scrollContentBackground(.hidden)
             .contentMargins(.bottom, 100, for: .scrollContent)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                guard displayLimit < tracks.count,
+                      geometry.containerSize.height > 0,
+                      geometry.contentSize.height > geometry.containerSize.height else {
+                    return false
+                }
+
+                let visibleBottom = max(0, geometry.contentOffset.y) + geometry.containerSize.height
+                return visibleBottom >= geometry.contentSize.height - 500
+            } action: { wasNearBottom, isNearBottom in
+                guard isNearBottom, !wasNearBottom else { return }
+                loadNextPageIfNeeded()
+            }
             .onAppear {
                 displayLimit = min(pageSize, tracks.count)
                 if artistNameCache.isEmpty {
@@ -1182,6 +1216,7 @@ struct TrackListContentView: View {
             }
             .onChange(of: trackDisplaySignature) { _, _ in
                 displayLimit = min(pageSize, tracks.count)
+                loadArtistNameCache()
                 updateArtworkWindow()
             }
             .onChange(of: displayLimit) { _, _ in
@@ -1202,7 +1237,7 @@ struct BulkPlaylistSelectionView: View {
     @State private var showCreatePlaylist = false
     @State private var newPlaylistName = ""
     @State private var settings = DeleteSettings.load()
-    
+
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
@@ -1210,21 +1245,21 @@ struct BulkPlaylistSelectionView: View {
                     Text(Localized.addToPlaylist)
                         .font(.title2)
                         .fontWeight(.semibold)
-                    
+
                     Text(Localized.songsCountOnly(trackIds.count))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
-                
+
                 if playlists.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "music.note.list")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
-                        
+
                         Text(Localized.noPlaylistsYet)
                             .font(.headline)
-                        
+
                         Text(Localized.createFirstPlaylist)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -1239,12 +1274,12 @@ struct BulkPlaylistSelectionView: View {
                                 HStack {
                                     Image(systemName: "music.note.list")
                                         .foregroundColor(settings.backgroundColorChoice.color)
-                                    
+
                                     Text(playlist.title)
                                         .foregroundColor(.primary)
-                                    
+
                                     Spacer()
-                                    
+
                                     Image(systemName: "plus.circle")
                                         .foregroundColor(settings.backgroundColorChoice.color)
                                 }
@@ -1253,7 +1288,7 @@ struct BulkPlaylistSelectionView: View {
                         }
                     }
                 }
-                
+
                 Button(Localized.createNewPlaylist) {
                     showCreatePlaylist = true
                 }
@@ -1284,7 +1319,7 @@ struct BulkPlaylistSelectionView: View {
             loadPlaylists()
         }
     }
-    
+
     private func loadPlaylists() {
         do {
             playlists = try DatabaseManager.shared.getAllPlaylists()
@@ -1292,40 +1327,40 @@ struct BulkPlaylistSelectionView: View {
             print("Failed to load playlists: \(error)")
         }
     }
-    
+
     private func createPlaylist() {
         guard !newPlaylistName.isEmpty else { return }
-        
+
         do {
             let playlist = try appCoordinator.createPlaylist(title: newPlaylistName)
             playlists.append(playlist)
             newPlaylistName = ""
-            
+
             // Automatically add the tracks to the new playlist
             if let playlistId = playlist.id {
                 for trackId in trackIds {
                     try? appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
                 }
             }
-            
+
             onComplete()
             dismiss()
         } catch {
             print("Failed to create playlist: \(error)")
         }
     }
-    
+
     private func addToPlaylist(_ playlist: Playlist) {
         do {
             guard let playlistId = playlist.id else {
                 print("Error: Playlist has no ID")
                 return
             }
-            
+
             for trackId in trackIds {
                 try? appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: trackId)
             }
-            
+
             onComplete()
             dismiss()
         } catch {
@@ -1359,7 +1394,7 @@ struct SearchView: View {
         case artists = "Artists"
         case albums = "Albums"
         case playlists = "Playlists"
-        
+
         var localizedString: String {
             switch self {
             case .all: return Localized.all
@@ -1370,7 +1405,7 @@ struct SearchView: View {
             }
         }
     }
-    
+
     private func performSearch(query: String) {
         // Cancel any existing search task
         searchTask?.cancel()
@@ -1443,19 +1478,19 @@ struct SearchView: View {
             }
         }
     }
-    
+
     var body: some View {
         NavigationStack {
             ZStack {
                 ScreenSpecificBackgroundView(screen: .library)
-                
+
                 VStack(spacing: 0) {
                     // Search bar
                     HStack {
                         HStack {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(.secondary)
-                            
+
                             TextField("Search your library", text: $searchText)
                                 .textFieldStyle(PlainTextFieldStyle())
                                 .autocorrectionDisabled()
@@ -1468,7 +1503,7 @@ struct SearchView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
-                    
+
                     // Category filters
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
@@ -1498,7 +1533,7 @@ struct SearchView: View {
                         .padding(.horizontal, 16)
                     }
                     .padding(.top, 12)
-                    
+
                     // Results
                     if debouncedSearchText.isEmpty {
                         VStack(spacing: 16) {
@@ -1563,7 +1598,7 @@ struct SearchView: View {
                     }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                 settings = DeleteSettings.load()
             }
             .onAppear {
@@ -1577,26 +1612,26 @@ struct SearchView: View {
             }
         }
     }
-    
+
     struct SearchResults {
         let songs: [Track]
         let artists: [Artist]
         let albums: [Album]
         let playlists: [Playlist]
-        
+
         init(songs: [Track] = [], artists: [Artist] = [], albums: [Album] = [], playlists: [Playlist] = []) {
             self.songs = songs
             self.artists = artists
             self.albums = albums
             self.playlists = playlists
         }
-        
+
         var isEmpty: Bool {
             songs.isEmpty && artists.isEmpty && albums.isEmpty && playlists.isEmpty
         }
     }
-    
-    
+
+
     struct SearchResultsView: View {
         let results: SearchResults
         let selectedCategory: SearchView.SearchCategory
@@ -1607,25 +1642,35 @@ struct SearchView: View {
         let onNavigateToPlaylist: (Playlist) -> Void
         @State private var settings = DeleteSettings.load()
         @State private var artistNameCache: [Int64: String] = [:]
+        @State private var artistDisplayNameCache: [String: String] = [:]
 
         private func loadArtistCache() {
             do {
                 artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+                let fallbackArtistIds = results.songs.reduce(into: [String: Int64]()) { result, track in
+                    if let artistId = track.artistId {
+                        result[track.stableId] = artistId
+                    }
+                }
+                artistDisplayNameCache = try DatabaseManager.shared.getArtistDisplayNames(
+                    forTrackStableIds: results.songs.map(\.stableId),
+                    fallbackArtistIdsByStableId: fallbackArtistIds
+                )
             } catch {
                 print("Failed to load search artist cache: \(error)")
             }
         }
-        
+
         var body: some View {
             if results.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "magnifyingglass.circle")
                         .font(.system(size: 40))
                         .foregroundColor(.secondary)
-                    
+
                     Text(Localized.noResultsFound)
                         .font(.headline)
-                    
+
                     Text(Localized.tryDifferentKeywords)
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -1646,7 +1691,7 @@ struct SearchView: View {
                                     SearchSongRowView(
                                         track: track,
                                         allTracks: allTracks,
-                                        artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
+                                        artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
                                         onDismiss: onDismiss
                                     )
                                     .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
@@ -1753,10 +1798,13 @@ struct SearchView: View {
                     let visibleIds = Array(results.songs.prefix(20)).map { $0.stableId }
                     ArtworkManager.shared.updateVisibleArtworkWindow(visibleTrackIds: visibleIds)
                 }
+                .onChange(of: results.songs.map(\.stableId)) { _, _ in
+                    loadArtistCache()
+                }
             }
         }
     }
-    
+
     struct SearchSongRowView: View {
         let track: Track
         let allTracks: [Track]
@@ -1998,7 +2046,7 @@ struct SearchView: View {
 
         private func loadArtwork() {
             Task {
-                artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+                artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
             }
         }
 
@@ -2032,12 +2080,12 @@ struct SearchView: View {
         }
 
     }
-    
+
     struct SearchArtistRowView: View {
         let artist: Artist
         let onDismiss: () -> Void
         let onNavigate: (Artist, [Track]) -> Void
-        
+
         var body: some View {
             Button(action: {
                 let artistTracks: [Track]
@@ -2056,7 +2104,7 @@ struct SearchView: View {
                         .font(.title2)
                         .foregroundColor(.purple)
                         .frame(width: 24, height: 24)
-                    
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text(artist.name)
                             .font(.body)
@@ -2064,14 +2112,14 @@ struct SearchView: View {
                             .foregroundColor(.primary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
-                        
+
                         Text(Localized.artist)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
                     Spacer()
-                    
+
                     Image(systemName: "chevron.right")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -2083,7 +2131,7 @@ struct SearchView: View {
             .buttonStyle(PlainButtonStyle())
         }
     }
-    
+
     struct SearchArtistAlbumsRow: View {
         let artist: Artist
         let onDismiss: () -> Void
@@ -2169,7 +2217,7 @@ struct SearchView: View {
                 let albumTracks = tracks.filter { $0.albumId == album.id }
                 guard let firstTrack = albumTracks.first else { return }
                 Task {
-                    let image = await ArtworkManager.shared.getArtwork(for: firstTrack)
+                    let image = await ArtworkManager.shared.getThumbnail(for: firstTrack, maxPixelSize: 320)
                     await MainActor.run { artworkImage = image }
                 }
             }
@@ -2185,7 +2233,7 @@ struct SearchView: View {
         @State private var settings = DeleteSettings.load()
         @State private var artworkImage: UIImage?
         @State private var albumTracks: [Track] = []
-        
+
         var body: some View {
             Button(action: {
                 onDismiss()
@@ -2209,7 +2257,7 @@ struct SearchView: View {
                     .frame(width: 40, height: 40)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .background(Color(.systemGray5))
-                    
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text(album.title)
                             .font(.body)
@@ -2217,7 +2265,7 @@ struct SearchView: View {
                             .foregroundColor(.primary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
-                        
+
                         HStack(spacing: 4) {
                             if let albumArtistName, !albumArtistName.isEmpty {
                                 Text(albumArtistName)
@@ -2230,13 +2278,13 @@ struct SearchView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
-                    
+
                     Spacer()
-                    
+
                     Text(Localized.songsCountOnly(albumTracks.count))
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     Image(systemName: "chevron.right")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -2250,7 +2298,7 @@ struct SearchView: View {
                 loadAlbumData()
             }
         }
-        
+
         private func loadAlbumData() {
             guard let albumId = album.id else { return }
 
@@ -2261,20 +2309,20 @@ struct SearchView: View {
                 }
 
                 guard let firstTrack = tracks.first else { return }
-                let artwork = await ArtworkManager.shared.getArtwork(for: firstTrack)
+                let artwork = await ArtworkManager.shared.getThumbnail(for: firstTrack)
                 await MainActor.run {
                     artworkImage = artwork
                 }
             }
         }
     }
-    
+
     struct SearchPlaylistRowView: View {
         let playlist: Playlist
         let onDismiss: () -> Void
         let onNavigate: (Playlist) -> Void
         @State private var settings = DeleteSettings.load()
-        
+
         var body: some View {
             Button(action: {
                 onDismiss()
@@ -2287,7 +2335,7 @@ struct SearchView: View {
                         .font(.title2)
                         .foregroundColor(.green)
                         .frame(width: 24, height: 24)
-                    
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text(playlist.title)
                             .font(.body)
@@ -2295,14 +2343,14 @@ struct SearchView: View {
                             .foregroundColor(.primary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
-                        
+
                         Text(Localized.playlist)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
                     Spacer()
-                    
+
                     Image(systemName: "chevron.right")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -2318,56 +2366,56 @@ struct SearchView: View {
 
 struct MusicFilePicker: UIViewControllerRepresentable {
     let onFilesPicked: ([URL]) -> Void
-    
+
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [
             UTType.audio,
             UTType("public.mp3")!,
             UTType("org.xiph.flac")!
         ])
-        
+
         picker.delegate = context.coordinator
         picker.allowsMultipleSelection = true
         picker.modalPresentationStyle = .formSheet
-        
+
         // Store reference to prevent premature deallocation
         context.coordinator.picker = picker
-        
+
         return picker
     }
-    
+
     func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-    
+
     static func dismantleUIViewController(_ uiViewController: UIDocumentPickerViewController, coordinator: Coordinator) {
         // Clean up to prevent DocumentManager crash
         uiViewController.delegate = nil
         coordinator.picker = nil
     }
-    
+
     func makeCoordinator() -> Coordinator {
         Coordinator(onFilesPicked: onFilesPicked)
     }
-    
+
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         let onFilesPicked: ([URL]) -> Void
         weak var picker: UIDocumentPickerViewController?
-        
+
         init(onFilesPicked: @escaping ([URL]) -> Void) {
             self.onFilesPicked = onFilesPicked
             super.init()
         }
-        
+
         deinit {
             // Ensure delegate is cleared on deallocation
             picker?.delegate = nil
         }
-        
+
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             onFilesPicked(urls)
             // Clean up delegate to prevent DocumentManager issues
             controller.delegate = nil
         }
-        
+
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             // User cancelled, clean up delegate
             controller.delegate = nil

@@ -11,6 +11,7 @@
 			<key>IntentsSupported</key>
 			<array>
 				<string>INPlayMediaIntent</string>
+				<string>INAddMediaIntent</string>
 			</array>
 			<key>SupportedMediaCategories</key>
 			<array>

@@ -9,6 +9,7 @@ import Foundation
 import UIKit
 import CloudKit
 
+@MainActor
 class TutorialViewModel: ObservableObject {
     @Published var currentStep: Int = 0
     @Published var isSignedIntoAppleID: Bool = false
@@ -32,7 +33,9 @@ class TutorialViewModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             print("📱 iCloud Drive status changed - rechecking...")
-            self?.checkiCloudDriveStatus()
+            Task { @MainActor in
+                self?.checkiCloudDriveStatus()
+            }
         }
         
         // Monitor CloudKit account changes  
@@ -42,7 +45,9 @@ class TutorialViewModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             print("📱 CloudKit account status changed - rechecking...")
-            self?.checkAppleIDStatus()
+            Task { @MainActor in
+                self?.checkAppleIDStatus()
+            }
         }
     }
     
@@ -69,7 +74,7 @@ class TutorialViewModel: ObservableObject {
     func checkAppleIDStatus() {
         // Use Apple's recommended CloudKit approach for detecting iCloud sign-in status
         CKContainer.default().accountStatus { [weak self] accountStatus, error in
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 guard let self = self else { return }
                 
                 if let error = error {
@@ -249,7 +254,7 @@ class TutorialViewModel: ObservableObject {
         print("✅ Tutorial completed and saved to UserDefaults")
     }
     
-    static func shouldShowTutorial() -> Bool {
+    nonisolated static func shouldShowTutorial() -> Bool {
         return !UserDefaults.standard.bool(forKey: "HasCompletedTutorial")
     }
 }

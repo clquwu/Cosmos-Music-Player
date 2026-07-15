@@ -21,6 +21,11 @@ private struct ParsedAudioFile {
     let albumArtistIds: [Int64]
 }
 
+private struct FileFingerprint {
+    let modificationDate: Int64?
+    let fileSize: Int64?
+}
+
 @MainActor
 class LibraryIndexer: NSObject, ObservableObject {
     static let shared = LibraryIndexer()
@@ -30,6 +35,7 @@ class LibraryIndexer: NSObject, ObservableObject {
     @Published var tracksFound = 0
     @Published var currentlyProcessing: String = ""
     @Published var queuedFiles: [String] = []
+    private var hasPendingLibraryRefresh = false
 
     private let metadataQuery = NSMetadataQuery()
     private let databaseManager = DatabaseManager.shared
@@ -144,6 +150,138 @@ class LibraryIndexer: NSObject, ObservableObject {
         startOfflineMode()
     }
 
+    private static func modificationTimestamp(_ date: Date?) -> Int64? {
+        guard let date else { return nil }
+        // Microseconds retain sub-second filesystem precision while remaining
+        // stable when round-tripped through SQLite INTEGER.
+        return Int64((date.timeIntervalSince1970 * 1_000_000).rounded())
+    }
+
+    private func fileFingerprint(for url: URL) throws -> FileFingerprint {
+        let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        return FileFingerprint(
+            modificationDate: Self.modificationTimestamp(values.contentModificationDate),
+            fileSize: values.fileSize.map(Int64.init)
+        )
+    }
+
+    private func metadataFingerprint(for item: NSMetadataItem) -> FileFingerprint {
+        let modificationDate = item.value(forAttribute: NSMetadataItemFSContentChangeDateKey) as? Date
+        let fileSize = (item.value(forAttribute: NSMetadataItemFSSizeKey) as? NSNumber)?.int64Value
+        return FileFingerprint(
+            modificationDate: Self.modificationTimestamp(modificationDate),
+            fileSize: fileSize
+        )
+    }
+
+    private func needsMetadataRefresh(_ track: Track, fingerprint: FileFingerprint) -> Bool {
+        // Existing users have NULL here after the additive migration. Refresh
+        // once so their metadata and fingerprint are brought up to date.
+        guard let storedModificationDate = track.modificationDate else {
+            return true
+        }
+
+        if let currentModificationDate = fingerprint.modificationDate,
+           currentModificationDate != storedModificationDate {
+            return true
+        }
+
+        if let currentFileSize = fingerprint.fileSize,
+           currentFileSize != track.fileSize {
+            return true
+        }
+
+        return false
+    }
+
+    private func existingTrack(stableId: String, path: String) throws -> Track? {
+        if let existing = try databaseManager.getTrack(byStableId: stableId) {
+            return existing
+        }
+
+        guard var existing = try databaseManager.getTrack(byPath: path) else {
+            return nil
+        }
+
+        print("🔁 Track already exists by path with old stable ID: \(existing.stableId)")
+        try databaseManager.migrateTrackStableIdAndPath(
+            oldStableId: existing.stableId,
+            newStableId: stableId,
+            newPath: path
+        )
+        existing.stableId = stableId
+        existing.path = path
+        return existing
+    }
+
+    private func saveParsedFile(
+        _ parsedFile: ParsedAudioFile,
+        replacing existingTrack: Track?,
+        sourceDescription: String,
+        notifyImmediately: Bool = false
+    ) async throws {
+        var track = parsedFile.track
+        track.id = existingTrack?.id
+
+        try databaseManager.upsertTrack(track)
+        try databaseManager.setTrackArtists(
+            trackStableId: track.stableId,
+            artistIds: parsedFile.trackArtistIds
+        )
+        if let albumId = track.albumId {
+            try databaseManager.setAlbumArtists(
+                albumId: albumId,
+                artistIds: parsedFile.albumArtistIds
+            )
+        }
+
+        if let existingTrack {
+            // Once a row has a fingerprint, a changed timestamp means cached
+            // artwork may also be stale. Legacy rows are all refreshed once;
+            // avoid synchronously re-extracting artwork for an entire large
+            // upgraded library when no prior fingerprint can prove it changed.
+            if existingTrack.modificationDate != nil {
+                _ = await ArtworkManager.shared.forceRefreshArtwork(for: track)
+            }
+            print("🔄 Refreshed metadata for \(sourceDescription): \(track.title)")
+            if notifyImmediately {
+                // A changed album/artist can leave the old relationship empty.
+                try databaseManager.cleanupOrphanedLibraryEntries()
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("LibraryNeedsRefresh"),
+                    object: nil
+                )
+            } else {
+                // Large upgraded libraries can refresh thousands of legacy
+                // rows. Coalesce those UI reloads into one scan-end event.
+                hasPendingLibraryRefresh = true
+            }
+        } else {
+            await ArtworkManager.shared.cacheArtwork(for: track)
+            tracksFound += 1
+            print("📢 Posting TrackFound notification for \(sourceDescription): \(track.title)")
+            NotificationCenter.default.post(
+                name: NSNotification.Name("TrackFound"),
+                object: track
+            )
+        }
+    }
+
+    private func postPendingLibraryRefresh() {
+        guard hasPendingLibraryRefresh else { return }
+        hasPendingLibraryRefresh = false
+        do {
+            // Run once for the whole scan instead of once per refreshed row.
+            try databaseManager.cleanupOrphanedLibraryEntries()
+        } catch {
+            print("⚠️ Failed to clean orphaned metadata after refresh: \(error)")
+        }
+        NotificationCenter.default.post(
+            name: NSNotification.Name("LibraryNeedsRefresh"),
+            object: nil
+        )
+    }
+
     @discardableResult
     func processExternalFile(_ fileURL: URL, allowExcludedReimport: Bool = false) async -> Bool {
         // Reject network URLs
@@ -160,9 +298,11 @@ class LibraryIndexer: NSObject, ObservableObject {
             let stableId = try generateStableId(for: fileURL)
             print("🆔 Generated stable ID: \(stableId)")
 
-            // Check if track already exists in database
-            if let existingTrack = try databaseManager.getTrack(byStableId: stableId) {
-                print("⏭️ Track already exists in database: \(fileURL.lastPathComponent)")
+            let fingerprint = try fileFingerprint(for: fileURL)
+            let existingTrack = try existingTrack(stableId: stableId, path: fileURL.path)
+
+            if let existingTrack, !needsMetadataRefresh(existingTrack, fingerprint: fingerprint) {
+                print("⏭️ Track metadata is current: \(fileURL.lastPathComponent)")
                 print("📍 Existing DB path: \(existingTrack.path)")
                 if allowExcludedReimport && DeleteSettings.isTrackExcluded(stableId) {
                     DeleteSettings.removeExcludedTrack(stableId)
@@ -172,6 +312,9 @@ class LibraryIndexer: NSObject, ObservableObject {
                     NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
                 }
                 return false
+            }
+            if existingTrack != nil {
+                print("🔄 File changed; reparsing external metadata: \(fileURL.lastPathComponent)")
             }
 
             // Check if track was excluded (removed from library only)
@@ -186,26 +329,13 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             print("🎶 Parsing external audio file: \(fileURL.lastPathComponent)")
             let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
-            let track = parsedFile.track
-            print("✅ External audio file parsed successfully: \(track.title)")
-
-            print("💾 Inserting external track into database: \(track.title)")
-            try databaseManager.upsertTrack(track)
-            try databaseManager.setTrackArtists(trackStableId: track.stableId, artistIds: parsedFile.trackArtistIds)
-            if let albumId = track.albumId {
-                try databaseManager.setAlbumArtists(albumId: albumId, artistIds: parsedFile.albumArtistIds)
-            }
-            print("✅ External track inserted into database: \(track.title)")
-
-            // Pre-cache artwork for instant loading later
-            await ArtworkManager.shared.cacheArtwork(for: track)
-
-            await MainActor.run {
-                tracksFound += 1
-                print("📢 Posting TrackFound notification for external file: \(track.title)")
-                // Notify UI immediately that a new track was found
-                NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
-            }
+            print("✅ External audio file parsed successfully: \(parsedFile.track.title)")
+            try await saveParsedFile(
+                parsedFile,
+                replacing: existingTrack,
+                sourceDescription: "external file",
+                notifyImmediately: true
+            )
 
             // Remove only this track from exclusion after successful explicit re-import.
             if isExcluded && allowExcludedReimport {
@@ -213,7 +343,7 @@ class LibraryIndexer: NSObject, ObservableObject {
                 print("✅ Cleared exclusion for re-imported track: \(fileURL.lastPathComponent)")
             }
 
-            return true
+            return existingTrack == nil
 
         } catch LibraryIndexerError.parseTimeout {
             print("⏰ Timeout parsing external audio file: \(fileURL.lastPathComponent)")
@@ -262,12 +392,26 @@ class LibraryIndexer: NSObject, ObservableObject {
         
         for i in 0..<itemCount {
             guard let item = metadataQuery.result(at: i) as? NSMetadataItem else { continue }
-            
+
             await processMetadataItem(item)
-            
+
             processedCount += 1
-            indexingProgress = Double(processedCount) / Double(itemCount)
+            // Throttle progress updates and yield so the UI stays responsive
+            // during large imports
+            if processedCount % 10 == 0 || processedCount == itemCount {
+                indexingProgress = Double(processedCount) / Double(itemCount)
+            }
+            await Task.yield()
         }
+
+        // The query completed successfully, so it is safe to reconcile only
+        // the iCloud root it actually scanned. Never infer deletion from a
+        // failed or unavailable root.
+        if AppCoordinator.shared.iCloudStatus == .available,
+           let musicFolderURL = stateManager.getMusicFolderURL() {
+            await FileCleanupManager.shared.reconcileMissingFiles(in: [musicFolderURL])
+        }
+        postPendingLibraryRefresh()
         
         isIndexing = false
         print("Library indexing completed. Found \(tracksFound) tracks.")
@@ -277,6 +421,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         print("🔄 Starting fallback direct scan of both iCloud and local folders")
         
         var allMusicFiles: [URL] = []
+        var successfullyScannedRoots: [URL] = []
         
         // First, copy any new files from shared container to Documents
         await copyFilesFromSharedContainer()
@@ -288,6 +433,9 @@ class LibraryIndexer: NSObject, ObservableObject {
                 let iCloudFiles = try await findMusicFiles(in: iCloudMusicFolderURL)
                 print("📁 Found \(iCloudFiles.count) files in iCloud folder")
                 allMusicFiles.append(contentsOf: iCloudFiles)
+                if AppCoordinator.shared.iCloudStatus == .available {
+                    successfullyScannedRoots.append(iCloudMusicFolderURL)
+                }
             } catch {
                 print("⚠️ Failed to scan iCloud folder: \(error)")
             }
@@ -303,6 +451,7 @@ class LibraryIndexer: NSObject, ObservableObject {
                 print("  📄 Local file: \(file.lastPathComponent)")
             }
             allMusicFiles.append(contentsOf: localFiles)
+            successfullyScannedRoots.append(documentsPath)
         } catch {
             print("⚠️ Failed to scan local Documents folder: \(error)")
         }
@@ -311,6 +460,10 @@ class LibraryIndexer: NSObject, ObservableObject {
         print("📁 Total music files found (iCloud + local): \(totalFiles)")
         
         guard totalFiles > 0 else {
+            // An empty, successfully enumerated root is meaningful: all of
+            // its former tracks may have been deleted.
+            await FileCleanupManager.shared.reconcileMissingFiles(in: successfullyScannedRoots)
+            postPendingLibraryRefresh()
             isIndexing = false
             print("❌ No music files found in any location")
             return
@@ -322,28 +475,33 @@ class LibraryIndexer: NSObject, ObservableObject {
             currentlyProcessing = ""
         }
         
+        let allFileNames = allMusicFiles.map { $0.lastPathComponent }
         for (index, url) in allMusicFiles.enumerated() {
             let fileName = url.lastPathComponent
             let isLocalFile = !url.path.contains("Mobile Documents")
-            print("🎵 Processing \(index + 1)/\(totalFiles): \(fileName) \(isLocalFile ? "[LOCAL]" : "[iCLOUD]")")
-            
-            // Update UI to show current file being processed
-            await MainActor.run {
-                currentlyProcessing = fileName
-                queuedFiles = Array(allMusicFiles.suffix(from: index + 1).map { $0.lastPathComponent })
+
+            // Throttle @Published updates: rebuilding the 2000-element
+            // queuedFiles array per file made SwiftUI re-diff the whole list
+            // for every import - a major cause of freezes on large libraries
+            if index % 20 == 0 || index == totalFiles - 1 {
+                await MainActor.run {
+                    currentlyProcessing = fileName
+                    queuedFiles = Array(allFileNames.suffix(from: index + 1))
+                    indexingProgress = Double(index) / Double(totalFiles)
+                }
             }
-            
+
             // Skip iCloud processing if we're in offline mode due to auth issues
             if !isLocalFile && (AppCoordinator.shared.iCloudStatus == .authenticationRequired || !AppCoordinator.shared.isiCloudAvailable) {
                 print("🚫 Skipping iCloud file processing - iCloud authentication required: \(fileName)")
                 continue
             }
-            
+
             await processLocalFile(url)
-            
-            await MainActor.run {
-                indexingProgress = Double(index + 1) / Double(totalFiles)
-            }
+
+            // Let the main run loop handle UI events between files so the
+            // watchdog never sees the app as unresponsive
+            await Task.yield()
         }
         
         // Clear processing state when done
@@ -351,6 +509,9 @@ class LibraryIndexer: NSObject, ObservableObject {
             currentlyProcessing = ""
             queuedFiles = []
         }
+
+        await FileCleanupManager.shared.reconcileMissingFiles(in: successfullyScannedRoots)
+        postPendingLibraryRefresh()
         
         isIndexing = false
         print("✅ Direct scan completed. Found \(tracksFound) tracks from both iCloud and local folders.")
@@ -360,6 +521,10 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
 
     private func processFolderPlaylists(allMusicFiles: [URL]) async {
+        guard DeleteSettings.load().autoCreateFolderPlaylists else {
+            print("📁 Folder playlist auto-creation disabled in settings - skipping")
+            return
+        }
         print("📁 Processing folder playlists...")
 
         // Group music files by their parent directory
@@ -441,12 +606,18 @@ class LibraryIndexer: NSObject, ObservableObject {
             
             for fileURL in musicFiles {
                 await processLocalFile(fileURL)
-                
+
                 processedFiles += 1
-                await MainActor.run {
-                    indexingProgress = Double(processedFiles) / Double(totalFiles)
+                if processedFiles % 10 == 0 || processedFiles == totalFiles {
+                    await MainActor.run {
+                        indexingProgress = Double(processedFiles) / Double(totalFiles)
+                    }
                 }
+                await Task.yield()
             }
+
+            await FileCleanupManager.shared.reconcileMissingFiles(in: [documentsPath])
+            postPendingLibraryRefresh()
             
             await MainActor.run {
                 isIndexing = false
@@ -540,10 +711,15 @@ class LibraryIndexer: NSObject, ObservableObject {
             let stableId = try generateStableId(for: fileURL)
             print("🆔 Generated stable ID: \(stableId)")
 
-            // Check if track already exists in database
-            if try databaseManager.getTrack(byStableId: stableId) != nil {
-                print("⏭️ Track already exists in database: \(fileURL.lastPathComponent)")
+            let fingerprint = try fileFingerprint(for: fileURL)
+            let existingTrack = try existingTrack(stableId: stableId, path: fileURL.path)
+
+            if let existingTrack, !needsMetadataRefresh(existingTrack, fingerprint: fingerprint) {
+                print("⏭️ Track metadata is current: \(fileURL.lastPathComponent)")
                 return
+            }
+            if existingTrack != nil {
+                print("🔄 File changed; reparsing metadata: \(fileURL.lastPathComponent)")
             }
 
             // Check if track was excluded (removed from library only)
@@ -554,26 +730,12 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             print("🎶 Parsing audio file: \(fileURL.lastPathComponent)")
             let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
-            let track = parsedFile.track
-            print("✅ Audio file parsed successfully: \(track.title)")
-
-            print("💾 Inserting track into database: \(track.title)")
-            try databaseManager.upsertTrack(track)
-            try databaseManager.setTrackArtists(trackStableId: track.stableId, artistIds: parsedFile.trackArtistIds)
-            if let albumId = track.albumId {
-                try databaseManager.setAlbumArtists(albumId: albumId, artistIds: parsedFile.albumArtistIds)
-            }
-            print("✅ Track inserted into database: \(track.title)")
-
-            // Pre-cache artwork for instant loading later
-            await ArtworkManager.shared.cacheArtwork(for: track)
-
-            await MainActor.run {
-                tracksFound += 1
-                print("📢 Posting TrackFound notification for: \(track.title)")
-                // Notify UI immediately that a new track was found
-                NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
-            }
+            print("✅ Audio file parsed successfully: \(parsedFile.track.title)")
+            try await saveParsedFile(
+                parsedFile,
+                replacing: existingTrack,
+                sourceDescription: "file"
+            )
             
             // Check if file is downloaded (for iCloud files)
             await checkDownloadStatus(for: fileURL)
@@ -621,9 +783,14 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         do {
             let stableId = try generateStableId(for: fileURL)
+            let fingerprint = metadataFingerprint(for: item)
+            let existingTrack = try existingTrack(stableId: stableId, path: fileURL.path)
 
-            if try databaseManager.getTrack(byStableId: stableId) != nil {
+            if let existingTrack, !needsMetadataRefresh(existingTrack, fingerprint: fingerprint) {
                 return
+            }
+            if existingTrack != nil {
+                print("🔄 iCloud file changed; reparsing metadata: \(fileURL.lastPathComponent)")
             }
 
             if DeleteSettings.isTrackExcluded(stableId) {
@@ -633,21 +800,11 @@ class LibraryIndexer: NSObject, ObservableObject {
             try await CloudDownloadManager.shared.ensureLocal(fileURL)
 
             let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
-            let track = parsedFile.track
-            try databaseManager.upsertTrack(track)
-            try databaseManager.setTrackArtists(trackStableId: track.stableId, artistIds: parsedFile.trackArtistIds)
-            if let albumId = track.albumId {
-                try databaseManager.setAlbumArtists(albumId: albumId, artistIds: parsedFile.albumArtistIds)
-            }
-
-            // Pre-cache artwork for instant loading later
-            await ArtworkManager.shared.cacheArtwork(for: track)
-
-            await MainActor.run {
-                tracksFound += 1
-                // Notify UI immediately that a new track was found
-                NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
-            }
+            try await saveParsedFile(
+                parsedFile,
+                replacing: existingTrack,
+                sourceDescription: "iCloud file"
+            )
             
             // Check if file is downloaded (for iCloud files)
             await checkDownloadStatus(for: fileURL)
@@ -699,14 +856,20 @@ class LibraryIndexer: NSObject, ObservableObject {
         } else {
             artist = try databaseManager.upsertArtist(name: Localized.unknownArtist)
         }
+        // Key the album on the ALBUM artist, not the track's artist - keying
+        // on the track artist split albums whenever a track featured a guest
+        // (issue #81). candidateArtistIds lets upsertAlbum group tracks whose
+        // artist order differs (e.g. "Guest; Main") into the existing album.
+        let albumPrimaryArtist = albumArtists.first ?? artist
         let album = try databaseManager.upsertAlbum(
             title: metadata.album ?? Localized.unknownAlbum,
-            artistId: artist.id,
+            artistId: albumPrimaryArtist.id,
             year: metadata.year,
-            albumArtist: displayAlbumArtist
+            albumArtist: displayAlbumArtist,
+            candidateArtistIds: (artists + albumArtists).compactMap(\.id)
         )
         
-        let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey])
+        let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         
         let track = Track(
             stableId: stableId,
@@ -721,6 +884,7 @@ class LibraryIndexer: NSObject, ObservableObject {
             channels: metadata.channels,
             path: url.path,
             fileSize: Int64(resourceValues.fileSize ?? 0),
+            modificationDate: Self.modificationTimestamp(resourceValues.contentModificationDate),
             replaygainTrackGain: metadata.replaygainTrackGain,
             replaygainAlbumGain: metadata.replaygainAlbumGain,
             replaygainTrackPeak: metadata.replaygainTrackPeak,
@@ -739,12 +903,21 @@ class LibraryIndexer: NSObject, ObservableObject {
         let rawName = artistName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !rawName.isEmpty else { return [Localized.unknownArtist] }
 
-        let delimiter = "\\\\"
-        let rawComponents: [String]
-        if rawName.contains(delimiter) {
-            rawComponents = rawName.components(separatedBy: delimiter)
-        } else {
-            rawComponents = [rawName]
+        // Treat "feat."-style credits as additional artists so featured
+        // tracks group under the same artists and albums (issues #16, #81)
+        let featSeparated = rawName.replacingOccurrences(
+            of: "(?i)\\s*[\\(\\[]?\\s*\\b(?:featuring|feat\\.?|ft\\.?)\\s+",
+            with: ";",
+            options: .regularExpression
+        )
+
+        // Split on the common multi-artist separators (issue #16):
+        // "\\" (ID3 joined-value convention), ";" (most taggers), and
+        // NUL (ID3v2.4 multi-value text frames)
+        let delimiters = ["\\\\", ";", "\u{0}"]
+        var rawComponents = [featSeparated]
+        for delimiter in delimiters {
+            rawComponents = rawComponents.flatMap { $0.components(separatedBy: delimiter) }
         }
 
         var seenNames = Set<String>()
@@ -787,7 +960,14 @@ class LibraryIndexer: NSObject, ObservableObject {
         if let bracketStart = cleaned.firstIndex(of: "[") {
             cleaned = String(cleaned[..<bracketStart]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        
+
+        // Drop unbalanced trailing brackets left over when a "(feat. X)"
+        // credit was converted into a separator (keeps names like "(G)I-DLE")
+        while let last = cleaned.last,
+              (last == ")" && !cleaned.contains("(")) || (last == "]" && !cleaned.contains("[")) {
+            cleaned = String(cleaned.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         return cleaned.isEmpty ? Localized.unknownArtist : cleaned
     }
     
@@ -899,6 +1079,10 @@ class LibraryIndexer: NSObject, ObservableObject {
 
     private func processSharedFolderPlaylists(folderGroups: [String: [URL]]) async {
         guard !folderGroups.isEmpty else { return }
+        guard DeleteSettings.load().autoCreateFolderPlaylists else {
+            print("📁 Folder playlist auto-creation disabled in settings - skipping shared folders")
+            return
+        }
 
         print("📁 Processing \(folderGroups.count) shared folder playlists...")
 
@@ -1039,14 +1223,15 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         do {
             let data = try Data(contentsOf: bookmarksURL)
-            guard let bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else {
+            guard var bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else {
                 print("❌ Invalid external bookmarks format")
                 return
             }
+            var bookmarksChanged = false
 
             print("📁 Found \(bookmarks.count) stored external file bookmarks")
 
-            for (stableId, bookmarkData) in bookmarks {
+            for (stableId, bookmarkData) in Array(bookmarks) {
                 do {
                     // Resolve bookmark to get current file location
                     var isStale = false
@@ -1063,28 +1248,42 @@ class LibraryIndexer: NSObject, ObservableObject {
                         continue
                     }
 
-                    // Check if this file is in the database
+                    let resolvedStableId = try generateStableId(for: resolvedURL)
+
+                    // Check if this file is in the database. Existing files
+                    // still flow through processExternalFile below so a
+                    // changed modification date can refresh their metadata.
+                    var trackAlreadyExists = false
                     if let existingTrack = try databaseManager.getTrack(byStableId: stableId) {
+                        trackAlreadyExists = true
                         // File exists in DB - check if path has changed
                         if existingTrack.path != resolvedURL.path {
                             print("📍 File moved detected! Old: \(existingTrack.path)")
                             print("📍 File moved detected! New: \(resolvedURL.path)")
 
-                            // Update the track's path in the database
-                            try databaseManager.write { db in
-                                var updatedTrack = existingTrack
-                                updatedTrack.path = resolvedURL.path
-                                try updatedTrack.update(db)
-                            }
+                            try databaseManager.migrateTrackStableIdAndPath(
+                                oldStableId: stableId,
+                                newStableId: resolvedStableId,
+                                newPath: resolvedURL.path
+                            )
+                            bookmarks.removeValue(forKey: stableId)
+                            bookmarks[resolvedStableId] = bookmarkData
+                            bookmarksChanged = true
                             print("✅ Updated database path for: \(resolvedURL.lastPathComponent)")
                         } else {
-                            print("⏭️ External file path unchanged: \(resolvedURL.lastPathComponent)")
+                            print("📍 External file path unchanged: \(resolvedURL.lastPathComponent)")
                         }
-                        continue
+                    } else if try databaseManager.getTrack(byStableId: resolvedStableId) != nil {
+                        trackAlreadyExists = true
+                        bookmarks.removeValue(forKey: stableId)
+                        bookmarks[resolvedStableId] = bookmarkData
+                        bookmarksChanged = true
+                        print("🔁 Updated stale bookmark key for existing track: \(resolvedURL.lastPathComponent)")
                     }
 
                     // Check if track was excluded (removed from library only)
-                    if DeleteSettings.isTrackExcluded(stableId) {
+                    if !trackAlreadyExists &&
+                        (DeleteSettings.isTrackExcluded(stableId) || DeleteSettings.isTrackExcluded(resolvedStableId)) {
                         print("⏭️ Track excluded from library: \(resolvedURL.lastPathComponent)")
                         continue
                     }
@@ -1100,13 +1299,20 @@ class LibraryIndexer: NSObject, ObservableObject {
                         resolvedURL.stopAccessingSecurityScopedResource()
                     }
 
-                    // Process the file
+                    // Import a new file or refresh an existing file whose
+                    // fingerprint changed.
                     await processExternalFile(resolvedURL)
                     print("✅ Processed stored external file: \(resolvedURL.lastPathComponent)")
 
                 } catch {
                     print("❌ Failed to resolve bookmark for stableId \(stableId): \(error)")
                 }
+            }
+
+            if bookmarksChanged {
+                let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
+                try plistData.write(to: bookmarksURL, options: .atomic)
+                print("✅ Updated external bookmark keys after stable ID migration")
             }
 
         } catch {
@@ -1279,7 +1485,9 @@ class AudioMetadataParser {
                             return
                         }
                         
-                        coordinatedData = try Data(contentsOf: freshURL)
+                        // Map instead of loading the whole file - metadata lives at
+                        // the start, and 2000 x full FLAC reads spikes memory
+                        coordinatedData = try Data(contentsOf: freshURL, options: .mappedIfSafe)
                         print("✅ FLAC data read successfully via NSFileCoordinator: \(coordinatedData?.count ?? 0) bytes")
                     } catch {
                         print("❌ Failed to read FLAC data via NSFileCoordinator: \(error)")
@@ -1420,7 +1628,18 @@ class AudioMetadataParser {
             if let commentString = String(data: data.subdata(in: offset..<offset + commentLength), encoding: .utf8) {
                 let parts = commentString.split(separator: "=", maxSplits: 1)
                 if parts.count == 2 {
-                    comments[String(parts[0]).uppercased()] = String(parts[1])
+                    let key = String(parts[0]).uppercased()
+                    let value = String(parts[1])
+                    // Vorbis allows repeating a field for multiple values -
+                    // the standard way to tag multiple artists. Accumulate
+                    // them so they aren't silently overwritten (issue #16);
+                    // parseArtistNames splits on ";" downstream
+                    let multiValueKeys: Set<String> = ["ARTIST", "ARTISTE", "ALBUMARTIST"]
+                    if multiValueKeys.contains(key), let existing = comments[key], !existing.isEmpty {
+                        comments[key] = existing + "; " + value
+                    } else {
+                        comments[key] = value
+                    }
                 }
             }
             
@@ -2126,7 +2345,7 @@ class AudioMetadataParser {
             return (nil, nil, nil, nil, nil, nil, nil, false, 0, 0)
         }
 
-        let data = try Data(contentsOf: url)
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
 
         // Validate DSF signature: 'D', 'S', 'D', ' ' (includes 1 space)
         guard data.count >= 28,

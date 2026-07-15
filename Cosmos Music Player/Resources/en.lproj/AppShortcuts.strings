@@ -1,0 +1,22 @@
+/*
+  AppShortcuts.strings (English)
+  Cosmos Music Player
+
+  Siri invocation phrases for the App Shortcuts declared in
+  CosmosAppShortcuts.swift. Keys must match the phrases exactly,
+  with ${applicationName} as the app-name placeholder.
+*/
+
+"Resume playback in ${applicationName}" = "Resume playback in ${applicationName}";
+"Resume my music in ${applicationName}" = "Resume my music in ${applicationName}";
+"Continue playing in ${applicationName}" = "Continue playing in ${applicationName}";
+
+"Like this song in ${applicationName}" = "Like this song in ${applicationName}";
+"Add this song to favorites in ${applicationName}" = "Add this song to favorites in ${applicationName}";
+"Add this song to my favorites in ${applicationName}" = "Add this song to my favorites in ${applicationName}";
+"Add this song to Liked Songs in ${applicationName}" = "Add this song to Liked Songs in ${applicationName}";
+"Add the current song to favorites in ${applicationName}" = "Add the current song to favorites in ${applicationName}";
+
+"Make me a mix in ${applicationName}" = "Make me a mix in ${applicationName}";
+"Generate a mix in ${applicationName}" = "Generate a mix in ${applicationName}";
+"Play me something new in ${applicationName}" = "Play me something new in ${applicationName}";

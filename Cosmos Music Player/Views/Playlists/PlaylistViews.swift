@@ -2,6 +2,9 @@ import SwiftUI
 import GRDB
 import PhotosUI
 import WidgetKit
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 fileprivate extension UIImage {
     func squarePlaylistCover(targetSize: CGFloat = 1024) -> UIImage {
@@ -36,21 +39,22 @@ struct PlaylistsScreen: View {
     @State private var showEditDialog = false
     @State private var showDeleteConfirmation = false
     @State private var editPlaylistName = ""
-    
+    @State private var showAIPlaylistSheet = false
+
     var body: some View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .playlists)
-            
+
             VStack {
                 if playlists.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "music.note.list")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
-                        
+
                         Text(Localized.noPlaylistsYet)
                             .font(.headline)
-                        
+
                         Text(Localized.createPlaylistsInstruction)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -131,9 +135,58 @@ struct PlaylistsScreen: View {
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
                 loadPlaylists()
             }
+
+            #if canImport(FoundationModels)
+            if isAIAvailable {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            showAIPlaylistSheet = true
+                        } label: {
+                            Image(systemName: "wand.and.stars")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+                                .frame(width: 56, height: 56)
+                                .background(Circle().fill(Color.accentColor))
+                                .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                        }
+                        .accessibilityLabel(Localized.aiPlaylistButton)
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 110) // clear the mini player
+                    }
+                }
+            }
+            #endif
+        }
+        .sheet(isPresented: $showAIPlaylistSheet) {
+            #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                AIPlaylistSheet {
+                    loadPlaylists()
+                }
+                .environmentObject(appCoordinator)
+            }
+            #endif
         }
     }
-    
+
+    /// Only offer the AI playlist button when Apple Intelligence is actually
+    /// usable on this device (model downloaded and enabled), not merely when
+    /// the OS version supports it.
+    private var isAIAvailable: Bool {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            if case .available = SystemLanguageModel.default.availability {
+                return true
+            }
+        }
+        #endif
+        return false
+    }
+
     private func getAllPlaylistTracks(_ playlist: Playlist) -> [Track] {
         guard let playlistId = playlist.id else { return [] }
         do {
@@ -145,7 +198,7 @@ struct PlaylistsScreen: View {
             return []
         }
     }
-    
+
     private func loadPlaylists() {
         do {
             playlists = try appCoordinator.databaseManager.getAllPlaylists()
@@ -178,6 +231,124 @@ struct PlaylistsScreen: View {
     }
 }
 
+#if canImport(FoundationModels)
+/// Bottom sheet behind the playlists screen's floating AI button: describe a
+/// playlist, the on-device model picks tracks (MixGenerator), and the result
+/// is saved as a regular playlist.
+@available(iOS 26.0, *)
+struct AIPlaylistSheet: View {
+    @EnvironmentObject private var appCoordinator: AppCoordinator
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var prompt = ""
+    @State private var isGenerating = false
+    @State private var showError = false
+    @State private var showCreated = false
+    @State private var createdTitle = ""
+    @State private var createdTracks: [Track] = []
+    @FocusState private var promptFocused: Bool
+
+    var onCreated: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(Localized.aiPlaylistDescription)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+
+                TextField(Localized.aiPlaylistPlaceholder, text: $prompt, axis: .vertical)
+                    .lineLimit(2...4)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($promptFocused)
+                    .disabled(isGenerating)
+                    .onSubmit(generate)
+
+                if showError {
+                    Text(Localized.aiPlaylistFailed)
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                }
+
+                Button(action: generate) {
+                    HStack {
+                        if isGenerating {
+                            ProgressView()
+                                .tint(.white)
+                            Text(Localized.aiPlaylistGenerating)
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                            Text(Localized.aiPlaylistGenerate)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isGenerating || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Spacer()
+            }
+            .padding(20)
+            .navigationTitle(Localized.aiPlaylistTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(Localized.cancel) { dismiss() }
+                        .disabled(isGenerating)
+                }
+            }
+            .onAppear { promptFocused = true }
+            .alert(Localized.aiPlaylistCreatedTitle, isPresented: $showCreated) {
+                Button(Localized.play) {
+                    let tracks = createdTracks
+                    Task { @MainActor in
+                        if let first = tracks.first {
+                            await appCoordinator.playTrack(first, queue: tracks)
+                        }
+                        dismiss()
+                    }
+                }
+                Button(Localized.done, role: .cancel) { dismiss() }
+            } message: {
+                Text(Localized.aiPlaylistCreatedMessage(createdTitle, createdTracks.count))
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private func generate() {
+        let request = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.isEmpty, !isGenerating else { return }
+        isGenerating = true
+        showError = false
+
+        Task { @MainActor in
+            do {
+                let mix = try await MixGenerator().generate(matching: request)
+                guard !mix.tracks.isEmpty else { throw MixGenerationError.emptyLibrary }
+
+                let playlist = try appCoordinator.createPlaylist(title: mix.title)
+                if let playlistId = playlist.id {
+                    for track in mix.tracks {
+                        try appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: track.stableId)
+                    }
+                }
+                onCreated()
+                createdTitle = playlist.title
+                createdTracks = mix.tracks
+                isGenerating = false
+                showCreated = true
+            } catch {
+                print("❌ AI playlist generation failed: \(error)")
+                showError = true
+                isGenerating = false
+            }
+        }
+    }
+}
+#endif // canImport(FoundationModels)
+
 struct PlaylistCardView: View {
     let playlist: Playlist
     let allTracks: [Track]
@@ -197,7 +368,7 @@ struct PlaylistCardView: View {
         self.onEdit = onEdit
         self.onDelete = onDelete
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Artwork area
@@ -260,7 +431,7 @@ struct PlaylistCardView: View {
                     .padding(8)
                     .zIndex(1000)
                 }
-                
+
                 // Artwork content - same in both edit and normal mode
                 // Show custom cover if available, otherwise show auto-generated mashup
                 if let customCover = customCoverImage {
@@ -305,7 +476,7 @@ struct PlaylistCardView: View {
                 Text(playlist.title)
                     .font(.headline)
                     .lineLimit(1)
-                
+
                 Text(Localized.songsCount(allTracks.count))
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -324,7 +495,7 @@ struct PlaylistCardView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private func artworkView(at index: Int, size: CGFloat?) -> some View {
         if index < artworks.count {
@@ -345,13 +516,13 @@ struct PlaylistCardView: View {
                 )
         }
     }
-    
+
     private func loadArtworks() async {
         var loadedArtworks: [UIImage] = []
         let tracksToLoad = Array(allTracks.prefix(4))
 
         for track in tracksToLoad {
-            if let artwork = await artworkManager.getArtwork(for: track) {
+            if let artwork = await artworkManager.getThumbnail(for: track, maxPixelSize: 256) {
                 loadedArtworks.append(artwork)
             }
         }
@@ -446,6 +617,7 @@ struct PlaylistDetailScreen: View {
     @State private var customCoverImage: UIImage?
     @State private var showCoverOptions = false
     @State private var artistNameCache: [Int64: String] = [:]
+    @State private var artistDisplayNameCache: [String: String] = [:]
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
@@ -665,12 +837,14 @@ struct PlaylistDetailScreen: View {
                 // Track list section
                 if !sortedTracks.isEmpty {
                     Section {
-                        ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { index, track in
+                        ForEach(sortedTracks.uniquelyIdentifiedRows(), id: \.rowId) { row in
+                            let index = row.index
+                            let track = row.track
                             PlaylistTrackRowView(
                                 track: track,
                                 playlist: playlist,
                                 isEditMode: isEditMode,
-                                artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
+                                artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
                                 onTap: {
                                     Task {
                                         guard let playlistId = playlist.id else { return }
@@ -855,6 +1029,7 @@ struct PlaylistDetailScreen: View {
             let playlistItems = try appCoordinator.databaseManager.getPlaylistItems(playlistId: playlistId)
             let trackIds = playlistItems.map { $0.trackStableId }
             tracks = try appCoordinator.databaseManager.getTracksByStableIdsPreservingOrder(trackIds)
+            loadArtistNameCache()
 
             // Load artworks for the first 4 tracks
             Task {
@@ -870,7 +1045,7 @@ struct PlaylistDetailScreen: View {
         let tracksToLoad = Array(tracks.prefix(4))
 
         for track in tracksToLoad {
-            if let artwork = await artworkManager.getArtwork(for: track) {
+            if let artwork = await artworkManager.getThumbnail(for: track, maxPixelSize: 256) {
                 loadedArtworks.append(artwork)
             }
         }
@@ -892,6 +1067,15 @@ struct PlaylistDetailScreen: View {
     private func loadArtistNameCache() {
         do {
             artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+            let fallbackArtistIds = tracks.reduce(into: [String: Int64]()) { result, track in
+                if let artistId = track.artistId {
+                    result[track.stableId] = artistId
+                }
+            }
+            artistDisplayNameCache = try DatabaseManager.shared.getArtistDisplayNames(
+                forTrackStableIds: tracks.map(\.stableId),
+                fallbackArtistIdsByStableId: fallbackArtistIds
+            )
         } catch {
             print("Failed to load playlist artist cache: \(error)")
         }
@@ -1175,7 +1359,7 @@ struct PlaylistTrackRowView: View {
 
     private func loadArtwork() {
         Task {
-            artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+            artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
         }
     }
 
@@ -1217,17 +1401,17 @@ struct PlaylistTrackRowView: View {
 struct PlaylistListView: View {
     let playlists: [Playlist]
     let onPlaylistTap: (Playlist) -> Void
-    
+
     var body: some View {
         if playlists.isEmpty {
             VStack(spacing: 16) {
                 Image(systemName: "music.note.list")
                     .font(.system(size: 40))
                     .foregroundColor(.secondary)
-                
+
                 Text("No playlists yet")
                     .font(.headline)
-                
+
                 Text("Create playlists by adding songs to them from the library")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -1241,18 +1425,18 @@ struct PlaylistListView: View {
                     Image(systemName: "music.note.list")
                         .foregroundColor(.green)
                         .frame(width: 24, height: 24)
-                    
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text(playlist.title)
                             .font(.headline)
-                        
+
                         Text(Localized.playlist)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
                     Spacer()
-                    
+
                     Image(systemName: "chevron.right")
                         .foregroundColor(.secondary)
                         .font(.caption)
@@ -1281,14 +1465,14 @@ struct PlaylistSelectionView: View {
     @State private var showDeleteConfirmation = false
     @State private var playlistToDelete: Playlist?
     @State private var settings = DeleteSettings.load()
-    
+
     var sortedPlaylists: [Playlist] {
-        // Sort playlists: first those where song is NOT in playlist (sorted by most recent played), 
+        // Sort playlists: first those where song is NOT in playlist (sorted by most recent played),
         // then those where song IS in playlist (also sorted by most recent played)
         return playlists.sorted { playlist1, playlist2 in
             let isInPlaylist1 = (try? appCoordinator.isTrackInPlaylist(playlistId: playlist1.id ?? 0, trackStableId: track.stableId)) ?? false
             let isInPlaylist2 = (try? appCoordinator.isTrackInPlaylist(playlistId: playlist2.id ?? 0, trackStableId: track.stableId)) ?? false
-            
+
             // If one is not in playlist and the other is, prioritize the one not in playlist
             if !isInPlaylist1 && isInPlaylist2 {
                 return true
@@ -1304,7 +1488,7 @@ struct PlaylistSelectionView: View {
             }
         }
     }
-    
+
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
@@ -1312,21 +1496,21 @@ struct PlaylistSelectionView: View {
                     Text(Localized.addToPlaylist)
                         .font(.title2)
                         .fontWeight(.semibold)
-                    
+
                     Text(track.title)
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
-                
+
                 if playlists.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "music.note.list")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
-                        
+
                         Text(Localized.noPlaylistsYet)
                             .font(.headline)
-                        
+
                         Text(Localized.createFirstPlaylist)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -1337,18 +1521,18 @@ struct PlaylistSelectionView: View {
                         ForEach(sortedPlaylists, id: \.id) { playlist in
                             let isInPlaylist = (try? appCoordinator.isTrackInPlaylist(playlistId: playlist.id ?? 0, trackStableId:
                                                                                         track.stableId)) ?? false
-                            
+
                             HStack(spacing: 8) {
                                 // Main clickable area for add/remove
                                 HStack {
                                     Image(systemName: "music.note.list")
                                         .foregroundColor(settings.backgroundColorChoice.color)
-                                    
+
                                     Text(playlist.title)
                                         .foregroundColor(.primary)
-                                    
+
                                     Spacer()
-                                    
+
                                     // Status indicator (not clickable, just visual feedback)
                                     if isInPlaylist {
                                         Image(systemName: "checkmark.circle.fill")
@@ -1366,11 +1550,11 @@ struct PlaylistSelectionView: View {
                                         addToPlaylist(playlist)
                                     }
                                 }
-                                
+
                                 // Separator line
                                 Divider()
                                     .frame(height: 30)
-                                
+
                                 // Delete button - clearly separated
                                 Button(action: {
                                     playlistToDelete = playlist
@@ -1388,7 +1572,7 @@ struct PlaylistSelectionView: View {
                         }
                     }
                 }
-                
+
                 Button(Localized.createNewPlaylist) {
                     showCreatePlaylist = true
                 }
@@ -1429,7 +1613,7 @@ struct PlaylistSelectionView: View {
             loadPlaylists()
         }
     }
-    
+
     private func loadPlaylists() {
         do {
             playlists = try DatabaseManager.shared.getAllPlaylists()
@@ -1437,15 +1621,15 @@ struct PlaylistSelectionView: View {
             print("Failed to load playlists: \(error)")
         }
     }
-    
+
     private func createPlaylist() {
         guard !newPlaylistName.isEmpty else { return }
-        
+
         do {
             let playlist = try appCoordinator.createPlaylist(title: newPlaylistName)
             playlists.append(playlist)
             newPlaylistName = ""
-            
+
             // Automatically add the track to the new playlist
             guard let playlistId = playlist.id else {
                 print("Error: Created playlist has no ID")
@@ -1457,7 +1641,7 @@ struct PlaylistSelectionView: View {
             print("Failed to create playlist: \(error)")
         }
     }
-    
+
     private func addToPlaylist(_ playlist: Playlist) {
         do {
             guard let playlistId = playlist.id else {
@@ -1470,7 +1654,7 @@ struct PlaylistSelectionView: View {
             print("Failed to add to playlist: \(error)")
         }
     }
-    
+
     private func removeFromPlaylist(_ playlist: Playlist) {
         do {
             guard let playlistId = playlist.id else {
@@ -1483,11 +1667,11 @@ struct PlaylistSelectionView: View {
             print("Failed to remove from playlist: \(error)")
         }
     }
-    
+
     private func deletePlaylistInSelection() {
         guard let playlist = playlistToDelete,
               let playlistId = playlist.id else { return }
-        
+
         do {
             try appCoordinator.deletePlaylist(playlistId: playlistId)
             playlists.removeAll { $0.id == playlistId }
@@ -1504,7 +1688,7 @@ struct PlaylistManagementView: View {
     @State private var playlists: [Playlist] = []
     @State private var playlistToDelete: Playlist?
     @State private var showDeleteConfirmation = false
-    
+
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
@@ -1513,10 +1697,10 @@ struct PlaylistManagementView: View {
                         Image(systemName: "music.note.list")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
-                        
+
                         Text(Localized.noPlaylistsYet)
                             .font(.headline)
-                        
+
                         Text(Localized.createPlaylistsInstruction)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -1531,14 +1715,14 @@ struct PlaylistManagementView: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(playlist.title)
                                         .font(.headline)
-                                    
+
                                     Text(Localized.createdDate(formatDate(Date(timeIntervalSince1970: TimeInterval(playlist.createdAt)))))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
-                                
+
                                 Spacer()
-                                
+
                                 Button(action: {
                                     playlistToDelete = playlist
                                     showDeleteConfirmation = true
@@ -1578,7 +1762,7 @@ struct PlaylistManagementView: View {
             loadPlaylists()
         }
     }
-    
+
     private func loadPlaylists() {
         do {
             playlists = try DatabaseManager.shared.getAllPlaylists()
@@ -1586,11 +1770,11 @@ struct PlaylistManagementView: View {
             print("Failed to load playlists: \(error)")
         }
     }
-    
+
     private func deletePlaylist() {
         guard let playlist = playlistToDelete,
               let playlistId = playlist.id else { return }
-        
+
         do {
             try appCoordinator.deletePlaylist(playlistId: playlistId)
             playlists.removeAll { $0.id == playlistId }
@@ -1599,7 +1783,7 @@ struct PlaylistManagementView: View {
             print("Failed to delete playlist: \(error)")
         }
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium

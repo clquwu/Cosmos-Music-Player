@@ -10,6 +10,7 @@ import AVFoundation
 import AudioToolbox
 import SFBAudioEngine
 import UIKit
+import CarPlay
 
 private struct AVAudioUnitEQBox: @unchecked Sendable {
     let node: AVAudioUnitEQ
@@ -33,7 +34,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             let numberOfBands = equalizer.bands.count
             let minFreq = 20.0
             let maxFreq = 20000.0
-    
+
             for i in 0..<numberOfBands {
                 let band = equalizer.bands[i]
                 let frequency = minFreq * pow(maxFreq / minFreq, Double(i) / Double(numberOfBands - 1))
@@ -44,10 +45,10 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                 band.bypass = false
             }
         }
-    
+
     private func cleanupEqualizer() {
         if let equalizer = sfbEqualizer {
-            audioPlayer?.withEngine { [weak self] engine in
+            audioPlayer?.modifyProcessingGraph { [weak self] engine in
                 guard let self else { return }
                 if engine.attachedNodes.contains(equalizer) {
                     self.removeEqualizer(equalizer, from: engine)
@@ -56,28 +57,28 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         }
         sfbEqualizer = nil
     }
-    
+
     nonisolated private func removeEqualizer(_ equalizer: AVAudioUnitEQ, from engine: AVAudioEngine) {
         guard engine.attachedNodes.contains(equalizer) else {
             print("ℹ️ EQ node already detached")
             return
         }
-        
+
         let mixerConnection = engine.inputConnectionPoint(for: engine.mainMixerNode, inputBus: 0)
         let isEQFeedingMixer = mixerConnection?.node === equalizer
-        
+
         let upstreamConnection = engine.inputConnectionPoint(for: equalizer, inputBus: 0)
         let upstreamNode = upstreamConnection?.node
-        
+
         if isEQFeedingMixer, let upstreamNode {
             let upstreamBus = upstreamConnection?.bus ?? 0
             let reconnectFormat = upstreamNode.outputFormat(forBus: upstreamBus)
-            
+
             engine.disconnectNodeInput(engine.mainMixerNode)
             engine.disconnectNodeOutput(equalizer)
             engine.disconnectNodeInput(equalizer)
             engine.detach(equalizer)
-            
+
             engine.connect(upstreamNode, to: engine.mainMixerNode, format: reconnectFormat)
             print("🔗 Restored \(upstreamNode) → mainMixerNode after EQ removal")
         } else {
@@ -87,7 +88,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             print("🧹 Removed SFBAudioEngine EQ (no upstream reconnection needed)")
         }
     }
-    
+
     private func attachEqualizerToEngine(with format: AVAudioFormat?, retryCount: Int = 0) {
         guard let player = audioPlayer else { return }
 
@@ -109,7 +110,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
         guard formatSupportsSFBEQ(format) else {
             print("⚠️ SFBAudioEngine EQ not supported for format: \(format?.description ?? "nil")")
-            player.withEngine { [weak self] engine in
+            player.modifyProcessingGraph { [weak self] engine in
                 guard let self else { return }
                 if let existing = engine.attachedNodes.compactMap({ $0 as? AVAudioUnitEQ }).first {
                     self.removeEqualizer(existing, from: engine)
@@ -119,7 +120,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             return
         }
 
-        player.withEngine { [weak self] engine in
+        player.modifyProcessingGraph { [weak self] engine in
             guard let self else { return }
 
             var equalizer = self.sfbEqualizer
@@ -135,7 +136,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                 self.configureDefaultSFBBands(for: newEQ)
                 engine.attach(newEQ)
                 equalizer = newEQ
-                print("✅ EQ node attached via withEngine")
+                print("✅ EQ node attached via modifyProcessingGraph")
             } else if let eq = equalizer, !engine.attachedNodes.contains(where: { $0 === eq }) {
                 engine.attach(eq)
                 print("✅ Reattached existing SFBAudioEngine EQ node")
@@ -162,7 +163,11 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                let upstreamNode = connection.node,
                upstreamNode !== equalizer {
                 let bus = connection.bus
-                let connectFormat = format ?? upstreamNode.outputFormat(forBus: bus)
+                // Prefer the node's actual render format - the decoder format can
+                // differ from what the player node outputs, and a mismatched
+                // connect throws
+                let nodeFormat = upstreamNode.outputFormat(forBus: bus)
+                let connectFormat = nodeFormat.sampleRate > 0 ? nodeFormat : format
                 engine.disconnectNodeInput(engine.mainMixerNode)
 
                 // Try to connect - if it fails, mark EQ as failed
@@ -173,6 +178,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     })
                 } catch {
                     print("❌ EQ connection failed in attachEqualizerToEngine: \(error.localizedDescription)")
+                    // CRITICAL: the mixer input was already disconnected above.
+                    // Restore the original connection or ALL SFB playback
+                    // (Opus/Vorbis/DSD) stays silent (issue #75).
+                    try? ObjCExceptionCatcher.tryCatch({
+                        engine.disconnectNodeOutput(equalizer)
+                        engine.connect(upstreamNode, to: engine.mainMixerNode, format: nodeFormat.sampleRate > 0 ? nodeFormat : nil)
+                    })
+                    print("🔗 Restored direct connection after EQ failure")
                     Task { @MainActor [weak self] in
                         self?.eqAttachmentFailed = true
                     }
@@ -190,7 +203,8 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             })
 
             if let sourceNode = fallbackNode {
-                let connectFormat = format ?? sourceNode.outputFormat(forBus: 0)
+                let nodeFormat = sourceNode.outputFormat(forBus: 0)
+                let connectFormat = nodeFormat.sampleRate > 0 ? nodeFormat : format
                 engine.disconnectNodeInput(engine.mainMixerNode)
                 engine.disconnectNodeOutput(sourceNode)
 
@@ -202,6 +216,13 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                     })
                 } catch {
                     print("❌ EQ connection failed (fallback): \(error.localizedDescription)")
+                    // CRITICAL: restore the direct connection or SFB playback
+                    // stays silent (issue #75)
+                    try? ObjCExceptionCatcher.tryCatch({
+                        engine.disconnectNodeOutput(equalizer)
+                        engine.connect(sourceNode, to: engine.mainMixerNode, format: nodeFormat.sampleRate > 0 ? nodeFormat : nil)
+                    })
+                    print("🔗 Restored direct connection after EQ failure (fallback)")
                     Task { @MainActor [weak self] in
                         self?.eqAttachmentFailed = true
                     }
@@ -249,11 +270,12 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
     /// Detects if the app is running in a CarPlay environment
     private static func detectCarPlay() -> Bool {
-        // Check if CarPlay scene is active
+        // Check if a CarPlay template scene is connected. The scene exists
+        // before AVAudioSession necessarily exposes a `.carAudio` route.
         if #available(iOS 13.0, *) {
             for scene in UIApplication.shared.connectedScenes {
-                // Check for CarPlay scene role using string comparison
-                if scene.session.role.rawValue == "CPTemplateApplicationSceneSessionRole" {
+                if scene is CPTemplateApplicationScene
+                    || scene.session.role == .carTemplateApplication {
                     print("🚗 CarPlay scene detected: \(scene)")
                     return true
                 }
@@ -321,7 +343,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         audioPlayer?.delegate = self
         print("🔄 SFBAudioEngine AudioPlayer reset")
     }
-    
+
     nonisolated private func formatSupportsSFBEQ(_ format: AVAudioFormat?) -> Bool {
         guard let format else { return true }
         let streamDescription = format.streamDescription.pointee
@@ -334,6 +356,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
     func loadAndPlay(url: URL) async throws {
         print("🚀 SFBAudioEngine.loadAndPlay called for: \(url.lastPathComponent)")
+        try Task.checkCancellation()
 
         // Don't use SFBAudioEngine in CarPlay environment
         if isCarPlayEnvironment {
@@ -356,12 +379,16 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         // Stop any current playback and cleanup
         audioPlayer?.stop()
         cleanupEqualizer()
+        try Task.checkCancellation()
 
         print("🔍 SFBAudioEngine attempting to load: \(url.lastPathComponent)")
 
-        // Create track and get properties/metadata first to get sample rate
+        // Create track and get properties/metadata first to get sample rate.
+        // SFBTrack's init does a synchronous TagLib read of the whole file's
+        // metadata - run it off the main actor so the UI doesn't hitch
         print("🔍 Creating SFBTrack for: \(url.lastPathComponent)")
-        let track = SFBTrack(url: url)
+        let track = await Task.detached(priority: .userInitiated) { SFBTrack(url: url) }.value
+        try Task.checkCancellation()
         currentTrack = track
 
         // Set duration from track
@@ -393,6 +420,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         }
 
         print("🔍 Getting decoder for: \(url.lastPathComponent), enableDoP: \(enableDoP)")
+        try Task.checkCancellation()
 
         guard let decoder = try track.decoder(enableDoP: enableDoP) else {
             print("❌ No decoder available for: \(url.lastPathComponent)")
@@ -406,6 +434,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         // Try to open the decoder to ensure format properties are available
         do {
             try decoder.open()
+            try Task.checkCancellation()
             print("🔧 Decoder opened successfully")
         } catch {
             print("⚠️ Failed to open decoder: \(error)")
@@ -460,13 +489,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         // Use the determined sample rate for accurate configuration
         let actualSampleRate = self.decoderSampleRate
         print("🔍 Using determined sample rate: \(actualSampleRate)Hz")
+        try Task.checkCancellation()
 
         do {
             try configureAudioSessionForDecoder(decoder: decoder, isDSD: isDSDFile, enableDoP: enableDoP)
         } catch {
             print("⚠️ Audio session configuration had warnings (ignoring): \(error)")
         }
-        
+
         if isDSDFile {
             print("🔄 Resetting AudioPlayer for DSD file to prevent state issues")
             resetAudioPlayer()
@@ -478,6 +508,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
         // Start playback with proper error handling
         print("🎵 Starting SFBAudioEngine playback...")
+        try Task.checkCancellation()
         do {
             guard let player = audioPlayer else {
                 throw NSError(domain: "SFBAudioEngine", code: -1, userInfo: [
@@ -546,33 +577,18 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         print("✅ SFBAudioEngineManager paused")
     }
 
-    /// Stop the internal AVAudioEngine so it fully releases audio hardware.
-    /// Call this during an audio session interruption (alarm, phone call) so the
-    /// system sound can play unimpeded.
+    /// Pause playback for an audio session interruption (alarm, phone call).
+    /// SFBAudioPlayer observes AVAudioSessionInterruptionNotification itself:
+    /// it pauses on .began and restarts its engine on .ended. Never stop or
+    /// start the engine behind its back - SFBAudioPlayer asserts that the
+    /// engine's run state matches its cached flag, and the system has
+    /// already stopped the engine by the time the notification arrives, so
+    /// doing so aborts the app (App Store crash group on 1.2.2).
     func stopEngineForInterruption() {
         audioPlayer?.pause()
-        audioPlayer?.withEngine { engine in
-            if engine.isRunning {
-                engine.stop()
-                print("🛑 SFBAudioEngine internal AVAudioEngine stopped for interruption")
-            }
-        }
         isPlaying = false
         updateTimer?.invalidate()
-    }
-
-    /// Restart the internal AVAudioEngine after an interruption ends.
-    func restartEngineAfterInterruption() {
-        audioPlayer?.withEngine { engine in
-            if !engine.isRunning {
-                do {
-                    try engine.start()
-                    print("🔊 SFBAudioEngine internal AVAudioEngine restarted after interruption")
-                } catch {
-                    print("⚠️ Failed to restart SFBAudioEngine AVAudioEngine: \(error)")
-                }
-            }
-        }
+        print("⏸️ SFBAudioEngine paused for interruption")
     }
 
     func stop() {

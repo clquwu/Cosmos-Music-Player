@@ -288,3 +288,15 @@
 "selected_count_singular" = "已选择 %d 项";
 "selected_count_plural" = "已选择 %d 项";
 "delete_files_confirmation_message" = "你确定要彻底删除这 %d 个源文件吗？此操作将从硬盘抹除，无法撤销。";
+
+/* AI playlist generation (in-app, English fallback) */
+"ai_playlist_title" = "AI Playlist";
+"ai_playlist_description" = "Describe the playlist you want — the on-device AI picks matching songs from your library.";
+"ai_playlist_placeholder" = "Chill evening, energetic workout, an artist…";
+"ai_playlist_generate" = "Generate";
+"ai_playlist_generating" = "Generating…";
+"ai_playlist_failed" = "Couldn't generate a playlist. Try a different description.";
+"ai_playlist_button" = "Create playlist with AI";
+
+"ai_playlist_created_title" = "Playlist Created";
+"ai_playlist_created_message" = "“%@” was created with %d songs.";

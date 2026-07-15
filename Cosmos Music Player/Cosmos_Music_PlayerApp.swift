@@ -11,23 +11,32 @@ import Intents
 
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, handle intent: INIntent, completionHandler: @escaping (INIntentResponse) -> Void) {
-        guard let playMediaIntent = intent as? INPlayMediaIntent else {
+        SiriDiag.log("APP AppDelegate.handle intent=\(type(of: intent))")
+        if let playMediaIntent = intent as? INPlayMediaIntent {
+            Task { @MainActor in
+                await AppCoordinator.shared.handleSiriPlaybackIntent(playMediaIntent, completion: completionHandler)
+            }
+        } else if let addMediaIntent = intent as? INAddMediaIntent {
+            Task { @MainActor in
+                await AppCoordinator.shared.handleSiriAddMediaIntent(addMediaIntent, completion: completionHandler)
+            }
+        } else {
             completionHandler(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
-            return
-        }
-
-        Task { @MainActor in
-            await AppCoordinator.shared.handleSiriPlaybackIntent(playMediaIntent, completion: completionHandler)
         }
     }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        SiriDiag.log("APP didFinishLaunching")
         // Set up Siri vocabulary and media context
         setupSiriIntegration()
         return true
     }
 
     private func setupSiriIntegration() {
+        // Donate vocabulary on every OS version: Siri keeps routing by-name
+        // media requests through the legacy SiriKit extension even on iOS 27
+        // with assistant schemas registered, so the old recognizer still
+        // needs playlist/artist names.
         DispatchQueue.global(qos: .userInitiated).async {
             // Set up vocabulary for playlists, artists, and albums
             Task { @MainActor in
@@ -39,7 +48,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     // Add French playlist generic terms to help recognition
                     playlistVocabulary.append(contentsOf: [
                         "ma playlist", "ma liste de lecture", "mes playlists",
-                        "liste de lecture", "playlist", "playlists"
+                        "liste de lecture", "playlist", "playlists",
+                        "Liked Songs", "Favorites", "Favourites", "Favoris"
                     ])
 
                     let playlistNames = NSOrderedSet(array: playlistVocabulary)
@@ -71,13 +81,25 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 struct Cosmos_Music_PlayerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appCoordinator = AppCoordinator.shared
-    
+
+    init() {
+        if #available(iOS 26.0, *) {
+            AppIntentsDependencies.register()
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(appCoordinator)
                 .task {
+                    DatabaseSuspensionCoordinator.shared.start()
                     await appCoordinator.initialize()
+                    #if canImport(MediaIntents)
+                    if #available(iOS 27.0, *) {
+                        SpotlightLibraryIndexer.shared.activate()
+                    }
+                    #endif
                     await createiCloudContainerPlaceholder()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIScene.didEnterBackgroundNotification)) { _ in
@@ -109,8 +131,10 @@ struct Cosmos_Music_PlayerApp: App {
                 return
             }
 
-            // Optimize SFBAudioEngine for lock screen stability
-            if PlayerEngine.shared.isPlaying {
+            // Optimize SFBAudioEngine for lock screen stability.
+            // Only when SFB is actually in use - on CarPlay / native playback,
+            // reconfiguring the session here stops AVAudioEngine mid-playback.
+            if PlayerEngine.shared.isPlaying && PlayerEngine.shared.isUsingSFBEngine {
                 await optimizeSFBAudioForBackground()
             }
 
@@ -124,7 +148,7 @@ struct Cosmos_Music_PlayerApp: App {
         // Restart timers when foregrounding
         Task { @MainActor in
             // Restore audio configuration and all UI timers
-            if PlayerEngine.shared.isPlaying {
+            if PlayerEngine.shared.isPlaying && PlayerEngine.shared.isUsingSFBEngine {
                 await optimizeSFBAudioForForeground()
             }
             PlayerEngine.shared.resumeUITimersForForeground()
@@ -178,11 +202,12 @@ struct Cosmos_Music_PlayerApp: App {
             return
         }
 
-        // Re-assert the session as we background - no mixWithOthers in background
+        // Re-assert the session as we background. Do NOT call setCategory here:
+        // changing category/options on a live session forces an audio hardware
+        // reconfiguration that stops AVAudioEngine mid-playback (CarPlay pauses
+        // every time the phone locks).
         do {
-            let s = AVAudioSession.sharedInstance()
-            try s.setCategory(.playback, mode: .default, options: []) // no mixWithOthers in bg
-            try s.setActive(true, options: [])
+            try AVAudioSession.sharedInstance().setActive(true, options: [])
             print("🎧 Session keepalive on resign active - success")
         } catch {
             print("❌ Session keepalive fail:", error)
@@ -279,7 +304,9 @@ struct Cosmos_Music_PlayerApp: App {
     private func optimizeSFBAudioForBackground() async {
         print("🔒 Optimizing SFBAudioEngine for background/lock screen")
 
-        // Increase buffer size significantly for background stability
+        // Increase buffer size significantly for background stability.
+        // Do NOT call setCategory here - changing category/options on a live
+        // session forces a hardware reconfiguration that stops playback.
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setPreferredIOBufferDuration(0.100) // 100ms buffer for lock screen
@@ -287,36 +314,20 @@ struct Cosmos_Music_PlayerApp: App {
         } catch {
             print("⚠️ Failed to increase buffer for background: \(error)")
         }
-
-        // Simplified audio session for background
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [])
-            print("✅ Audio session optimized for background playback")
-        } catch {
-            print("⚠️ Failed to optimize audio session for background: \(error)")
-        }
     }
 
     private func optimizeSFBAudioForForeground() async {
         print("🔓 Restoring SFBAudioEngine for foreground")
 
-        // Restore normal buffer size
+        // Restore normal buffer size.
+        // Do NOT call setCategory here - changing category/options on a live
+        // session forces a hardware reconfiguration that stops playback.
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setPreferredIOBufferDuration(0.040) // Back to 40ms
             print("✅ Restored buffer to 40ms for foreground")
         } catch {
             print("⚠️ Failed to restore buffer for foreground: \(error)")
-        }
-
-        // Restore full audio session options
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
-            print("✅ Audio session restored for foreground playback")
-        } catch {
-            print("⚠️ Failed to restore audio session for foreground: \(error)")
         }
     }
 }

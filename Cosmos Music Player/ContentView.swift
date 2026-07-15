@@ -2,9 +2,8 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
-    @StateObject private var playerEngine = PlayerEngine.shared
     @StateObject private var libraryIndexer = LibraryIndexer.shared
-    
+
     @State private var tracks: [Track] = []
     @State private var selectedTab = 0
     @State private var refreshTimer: Timer?
@@ -12,7 +11,7 @@ struct ContentView: View {
     @State private var showPlaylistManagement = false
     @State private var showSettings = false
     @State private var settings = DeleteSettings.load()
-    
+
     var body: some View {
         mainContent
             .background(.clear)
@@ -35,12 +34,12 @@ struct ContentView: View {
                 showSettings: $showSettings
             ))
     }
-    
+
     private var mainContent: some View {
         LibraryView(
-            tracks: tracks, 
-            showTutorial: $showTutorial, 
-            showPlaylistManagement: $showPlaylistManagement, 
+            tracks: tracks,
+            showTutorial: $showTutorial,
+            showPlaylistManagement: $showPlaylistManagement,
             showSettings: $showSettings,
             onRefresh: performRefresh,
             onManualSync: performManualSync
@@ -54,14 +53,16 @@ struct ContentView: View {
                 await refreshLibrary()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
     }
-    
+
     @Sendable private func refreshLibrary() async {
         do {
-            let allTracks = try appCoordinator.getAllTracks()
+            let allTracks = try await Task.detached(priority: .userInitiated) {
+                try DatabaseManager.shared.getAllTracks()
+            }.value
 
             // Filter out incompatible formats when connected to CarPlay
             if SFBAudioEngineManager.shared.isCarPlayEnvironment {
@@ -78,34 +79,34 @@ struct ContentView: View {
             print("Failed to refresh library: \(error)")
         }
     }
-    
+
     @Sendable private func performManualSync() async -> (before: Int, after: Int) {
         let trackCountBefore = tracks.count
         await appCoordinator.manualSync()
-        
+
         // Wait for indexer to finish processing if it's currently running
         while libraryIndexer.isIndexing {
             try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
         }
-        
+
         await refreshLibrary()
         let trackCountAfter = tracks.count
         return (before: trackCountBefore, after: trackCountAfter)
     }
-    
+
     @Sendable private func performRefresh() async -> (before: Int, after: Int) {
         let trackCountBefore = tracks.count
-        
+
         // Wait for indexer to finish processing if it's currently running
         while libraryIndexer.isIndexing {
             try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
         }
-        
+
         await refreshLibrary()
         let trackCountAfter = tracks.count
         return (before: trackCountBefore, after: trackCountAfter)
     }
-    
+
 }
 
 struct LifecycleModifier: ViewModifier {
@@ -115,7 +116,7 @@ struct LifecycleModifier: ViewModifier {
     @Binding var showTutorial: Bool
     let onRefresh: @Sendable () async -> Void
     @State private var hasPendingIndexRefresh = false
-    
+
     func body(content: Content) -> some View {
         content
             .task {
@@ -147,9 +148,11 @@ struct LifecycleModifier: ViewModifier {
                 if isIndexing {
                     refreshTimer?.invalidate()
                     refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
-                        guard hasPendingIndexRefresh else { return }
-                        hasPendingIndexRefresh = false
-                        Task { await onRefresh() }
+                        Task { @MainActor in
+                            guard hasPendingIndexRefresh else { return }
+                            hasPendingIndexRefresh = false
+                            await onRefresh()
+                        }
                     }
                 } else {
                     refreshTimer?.invalidate()
@@ -171,7 +174,7 @@ struct LifecycleModifier: ViewModifier {
 
 struct OverlayModifier: ViewModifier {
     let appCoordinator: AppCoordinator
-    
+
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .top) {
@@ -189,7 +192,7 @@ struct SheetModifier: ViewModifier {
     @Binding var showPlaylistManagement: Bool
     @Binding var showSettings: Bool
     @State private var settings = DeleteSettings.load()
-    
+
     func body(content: Content) -> some View {
         content
             .sheet(isPresented: $showTutorial) {
@@ -216,10 +219,10 @@ struct SheetModifier: ViewModifier {
                 } message: {
                     Text(Localized.librarySyncMessage)
                 }
-                .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+                .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                     settings = DeleteSettings.load()
                 }
-        
+
     }
 }
 

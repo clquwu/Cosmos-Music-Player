@@ -40,6 +40,13 @@
 			remoteGlobalIDString = 23C312D92E78015500342F7C;
 			remoteInfo = SiriIntentsExtension;
 		};
+		7E57AB1E000000000000000A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2312D6042E6090E2007F756D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2312D60B2E6090E2007F756D;
+			remoteInfo = "Cosmos Music Player";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -67,6 +74,7 @@
 		23AF81352E71E15D0005527C /* Share.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = Share.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		23C312DA2E78015500342F7C /* SiriIntentsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SiriIntentsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		23C312DC2E78015500342F7C /* Intents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Intents.framework; path = System/Library/Frameworks/Intents.framework; sourceTree = SDKROOT; };
+		7E57AB1E0000000000000003 /* CosmosSiriTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CosmosSiriTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -141,6 +149,11 @@
 			path = SiriIntentsExtension;
 			sourceTree = "<group>";
 		};
+		7E57AB1E0000000000000001 /* CosmosSiriTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CosmosSiriTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -178,6 +191,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7E57AB1E0000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -189,6 +209,7 @@
 				23AF81362E71E15D0005527C /* Share */,
 				23C312DE2E78015500342F7C /* SiriIntentsExtension */,
 				239B24802EE59BEC009F83F1 /* PlayerWidget */,
+				7E57AB1E0000000000000001 /* CosmosSiriTests */,
 				23C312DB2E78015500342F7C /* Frameworks */,
 				2312D60D2E6090E2007F756D /* Products */,
 			);
@@ -201,6 +222,7 @@
 				23AF81352E71E15D0005527C /* Share.appex */,
 				23C312DA2E78015500342F7C /* SiriIntentsExtension.appex */,
 				239B247B2EE59BEC009F83F1 /* PlayerWidgetExtension.appex */,
+				7E57AB1E0000000000000003 /* CosmosSiriTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -313,6 +335,29 @@
 			productReference = 23C312DA2E78015500342F7C /* SiriIntentsExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		7E57AB1E0000000000000002 /* CosmosSiriTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7E57AB1E0000000000000007 /* Build configuration list for PBXNativeTarget "CosmosSiriTests" */;
+			buildPhases = (
+				7E57AB1E0000000000000004 /* Sources */,
+				7E57AB1E0000000000000005 /* Frameworks */,
+				7E57AB1E0000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7E57AB1E000000000000000B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				7E57AB1E0000000000000001 /* CosmosSiriTests */,
+			);
+			name = CosmosSiriTests;
+			packageProductDependencies = (
+			);
+			productName = CosmosSiriTests;
+			productReference = 7E57AB1E0000000000000003 /* CosmosSiriTests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -335,6 +380,10 @@
 					23C312D92E78015500342F7C = {
 						CreatedOnToolsVersion = 16.4;
 					};
+					7E57AB1E0000000000000002 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 2312D60B2E6090E2007F756D;
+					};
 				};
 			};
 			buildConfigurationList = 2312D6072E6090E2007F756D /* Build configuration list for PBXProject "Cosmos Music Player" */;
@@ -344,6 +393,7 @@
 				en,
 				Base,
 				fr,
+				ru,
 				"zh-Hans",
 			);
 			mainGroup = 2312D6032E6090E2007F756D;
@@ -361,6 +411,7 @@
 				23AF81342E71E15D0005527C /* Share */,
 				23C312D92E78015500342F7C /* SiriIntentsExtension */,
 				239B247A2EE59BEC009F83F1 /* PlayerWidgetExtension */,
+				7E57AB1E0000000000000002 /* CosmosSiriTests */,
 			);
 		};
 /* End PBXProject section */
@@ -388,6 +439,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		23C312D82E78015500342F7C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7E57AB1E0000000000000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -425,6 +483,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7E57AB1E0000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -442,6 +507,11 @@
 			isa = PBXTargetDependency;
 			target = 23C312D92E78015500342F7C /* SiriIntentsExtension */;
 			targetProxy = 23C312E22E78015500342F7C /* PBXContainerItemProxy */;
+		};
+		7E57AB1E000000000000000B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2312D60B2E6090E2007F756D /* Cosmos Music Player */;
+			targetProxy = 7E57AB1E000000000000000A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -578,7 +648,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Cosmos Music Player/Cosmos Music Player.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -588,7 +658,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -609,7 +679,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Cosmos Music Player/Cosmos Music Player.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -619,7 +689,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -640,7 +710,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = PlayerWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PlayerWidget/Info.plist;
@@ -652,7 +722,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.PlayerWidget";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -672,7 +742,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = PlayerWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PlayerWidget/Info.plist;
@@ -684,7 +754,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.PlayerWidget";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -702,7 +772,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Share/Share.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Share/Info.plist;
@@ -713,7 +783,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.Share";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -728,7 +798,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Share/Share.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Share/Info.plist;
@@ -739,7 +809,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.Share";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -754,7 +824,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = SiriIntentsExtension/SiriIntentsExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SiriIntentsExtension/Info.plist;
@@ -765,7 +835,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.SiriIntentsExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -780,7 +850,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = SiriIntentsExtension/SiriIntentsExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				DEVELOPMENT_TEAM = PC237X7NGJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SiriIntentsExtension/Info.plist;
@@ -791,13 +861,51 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.SiriIntentsExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7E57AB1E0000000000000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PC237X7NGJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.CosmosSiriTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "Cosmos Music Player";
+			};
+			name = Debug;
+		};
+		7E57AB1E0000000000000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PC237X7NGJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.clq.Cosmos-Music-Player.CosmosSiriTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "Cosmos Music Player";
 			};
 			name = Release;
 		};
@@ -849,6 +957,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		7E57AB1E0000000000000007 /* Build configuration list for PBXNativeTarget "CosmosSiriTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7E57AB1E0000000000000008 /* Debug */,
+				7E57AB1E0000000000000009 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -857,7 +974,7 @@
 			repositoryURL = "https://github.com/sbooth/SFBAudioEngine";
 			requirement = {
 				kind = exactVersion;
-				version = 0.7.2;
+				version = 0.13.0;
 			};
 		};
 		2312D6182E6090E4007F756D /* XCRemoteSwiftPackageReference "GRDB" */ = {

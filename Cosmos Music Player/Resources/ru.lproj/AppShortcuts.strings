@@ -1,0 +1,18 @@
+/*
+  AppShortcuts.strings (Russian)
+  Cosmos Music Player
+*/
+
+"Resume playback in ${applicationName}" = "Продолжить воспроизведение в ${applicationName}";
+"Resume my music in ${applicationName}" = "Продолжить мою музыку в ${applicationName}";
+"Continue playing in ${applicationName}" = "Продолжить слушать в ${applicationName}";
+
+"Like this song in ${applicationName}" = "Добавить эту песню в избранное в ${applicationName}";
+"Add this song to favorites in ${applicationName}" = "Добавить эту песню в избранное в ${applicationName}";
+"Add this song to my favorites in ${applicationName}" = "Добавить эту песню в моё избранное в ${applicationName}";
+"Add this song to Liked Songs in ${applicationName}" = "Добавить эту песню в любимые в ${applicationName}";
+"Add the current song to favorites in ${applicationName}" = "Добавить текущую песню в избранное в ${applicationName}";
+
+"Make me a mix in ${applicationName}" = "Создать для меня микс в ${applicationName}";
+"Generate a mix in ${applicationName}" = "Создать микс в ${applicationName}";
+"Play me something new in ${applicationName}" = "Включить что-нибудь новое в ${applicationName}";

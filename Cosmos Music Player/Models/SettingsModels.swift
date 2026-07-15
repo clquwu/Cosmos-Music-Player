@@ -2,6 +2,14 @@ import Foundation
 import SwiftUI
 import UIKit
 
+extension Notification.Name {
+    /// Posted only when Cosmos UI settings change. Playback persistence also
+    /// writes to UserDefaults, so views must not observe the broad
+    /// UserDefaults.didChangeNotification or every state save rebuilds the
+    /// library hierarchy while audio is playing.
+    static let cosmosSettingsDidChange = Notification.Name("CosmosSettingsDidChange")
+}
+
 enum BackgroundColor: String, CaseIterable, Codable {
     case violet = "b11491"
     case red = "e74c3c"
@@ -103,8 +111,9 @@ struct DeleteSettings: Codable {
     var backgroundColorChoice: BackgroundColor = .violet
     var forceDarkMode: Bool = false
     var dsdPlaybackMode: DSDPlaybackMode = .pcm
-    var deleteFromLibraryOnly: Bool = false
+    var deleteFromLibraryOnly: Bool = true
     var lastLibraryScanDate: Date? = nil
+    var autoCreateFolderPlaylists: Bool = true
     var showLyricsButton: Bool = true
     var showSleepTimerButton: Bool = false
 
@@ -120,8 +129,11 @@ struct DeleteSettings: Codable {
         backgroundColorChoice = try container.decodeIfPresent(BackgroundColor.self, forKey: .backgroundColorChoice) ?? .violet
         forceDarkMode = try container.decodeIfPresent(Bool.self, forKey: .forceDarkMode) ?? false
         dsdPlaybackMode = try container.decodeIfPresent(DSDPlaybackMode.self, forKey: .dsdPlaybackMode) ?? .pcm
-        deleteFromLibraryOnly = try container.decodeIfPresent(Bool.self, forKey: .deleteFromLibraryOnly) ?? false
+        // Default to app-only deletion - deleting the user's actual files
+        // should always be an explicit opt-in
+        deleteFromLibraryOnly = try container.decodeIfPresent(Bool.self, forKey: .deleteFromLibraryOnly) ?? true
         lastLibraryScanDate = try container.decodeIfPresent(Date.self, forKey: .lastLibraryScanDate)
+        autoCreateFolderPlaylists = try container.decodeIfPresent(Bool.self, forKey: .autoCreateFolderPlaylists) ?? true
         showLyricsButton = try container.decodeIfPresent(Bool.self, forKey: .showLyricsButton) ?? true
         showSleepTimerButton = try container.decodeIfPresent(Bool.self, forKey: .showSleepTimerButton) ?? false
 
@@ -145,6 +157,14 @@ struct DeleteSettings: Codable {
     func save() {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "DeleteSettings")
+            let notify = {
+                NotificationCenter.default.post(name: .cosmosSettingsDidChange, object: nil)
+            }
+            if Thread.isMainThread {
+                notify()
+            } else {
+                DispatchQueue.main.async(execute: notify)
+            }
         }
     }
 

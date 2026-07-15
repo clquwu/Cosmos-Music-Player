@@ -84,7 +84,7 @@ struct ArtistsScreen: View {
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
                 loadArtists()
             }
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                 settings = DeleteSettings.load()
             }
         }
@@ -207,7 +207,7 @@ struct ArtistDetailScreen: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { loadArtistData() }
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
     }
@@ -788,7 +788,7 @@ struct ArtistTrackRowView: View {
     
     private func loadArtwork() {
         Task {
-            artworkImage = await ArtworkManager.shared.getArtwork(for: track)
+            artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
         }
     }
     
@@ -866,9 +866,9 @@ struct ArtistAlbumCardView: View {
     
     private func loadAlbumArtwork() {
         guard let firstTrack = albumTracks.first else { return }
-        
+
         Task {
-            let image = await ArtworkManager.shared.getArtwork(for: firstTrack)
+            let image = await ArtworkManager.shared.getThumbnail(for: firstTrack, maxPixelSize: 384)
             await MainActor.run {
                 self.artworkImage = image
             }
