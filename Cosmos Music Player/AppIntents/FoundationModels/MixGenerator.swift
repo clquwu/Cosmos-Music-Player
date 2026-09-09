@@ -172,7 +172,7 @@ final class MixGenerator {
         var seen = Set(matched.map(\.stableId))
         var tracks = matched
         if tracks.count < Self.candidateLimit {
-            let favorites = try database.getTracksByStableIds(database.getFavorites())
+            let favorites = try database.getTracksByStableIdsPreservingOrder(database.getFavorites())
                 .filter { seen.insert($0.stableId).inserted }
             tracks.append(contentsOf: favorites.prefix(Self.candidateLimit - tracks.count))
         }

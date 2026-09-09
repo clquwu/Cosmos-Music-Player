@@ -123,23 +123,23 @@ struct Cosmos_Music_PlayerApp: App {
     private func handleDidEnterBackground() {
         print("🔍 DIAGNOSTIC - backgroundTimeRemaining:", UIApplication.shared.backgroundTimeRemaining)
 
-        // Configure audio for background playback - critical for SFBAudioEngine stability
+        // Suspend view-update work after the app has actually entered background.
         Task { @MainActor in
-            // Don't touch audio session if interrupted by alarm/call
-            guard !PlayerEngine.shared.isAudioSessionInterrupted else {
-                print("🎧 Audio session interrupted - skipping background optimization")
-                return
-            }
-
-            // Optimize SFBAudioEngine for lock screen stability.
-            // Only when SFB is actually in use - on CarPlay / native playback,
-            // reconfiguring the session here stops AVAudioEngine mid-playback.
-            if PlayerEngine.shared.isPlaying && PlayerEngine.shared.isUsingSFBEngine {
-                await optimizeSFBAudioForBackground()
+            if PlayerEngine.shared.isAudioSessionInterrupted {
+                print("🎧 Audio session interrupted - suspending UI timers only")
             }
 
             // Stop ALL high-frequency UI timers when backgrounded to prevent
-            // SwiftUI redraws from spiking CPU and triggering the iOS watchdog kill.
+            // SwiftUI redraws from spiking CPU and triggering the iOS watchdog
+            // kill.
+            //
+            // Deliberately NOT behind an interruption guard - this touches no
+            // audio state. It used to be, and that skipped it whenever a call
+            // or alarm started before the user switched away: isInBackground
+            // stayed false, so the auto-resume at the end of the interruption
+            // started the 0.25s SwiftUI timer with the app still in the
+            // background, and it stayed that way for the rest of the session
+            // (only willEnterForeground clears the flag).
             PlayerEngine.shared.suspendUITimersForBackground()
         }
     }
@@ -147,10 +147,9 @@ struct Cosmos_Music_PlayerApp: App {
     private func handleWillEnterForeground() {
         // Restart timers when foregrounding
         Task { @MainActor in
-            // Restore audio configuration and all UI timers
-            if PlayerEngine.shared.isPlaying && PlayerEngine.shared.isUsingSFBEngine {
-                await optimizeSFBAudioForForeground()
-            }
+            // Restore all UI timers. Do not change the preferred I/O buffer on
+            // a live session merely because the screen locked or unlocked:
+            // that forces a route reconfiguration and can interrupt SFB audio.
             PlayerEngine.shared.resumeUITimersForForeground()
 
             // Check for new shared files and refresh library
@@ -159,7 +158,10 @@ struct Cosmos_Music_PlayerApp: App {
             // Only auto-scan if it's been a long time since last scan
             if !LibraryIndexer.shared.isIndexing {
                 let settings = DeleteSettings.load()
-                if shouldPerformAutoScan(lastScanDate: settings.lastLibraryScanDate) {
+                if shouldPerformAutoScan(
+                    lastScanDate: settings.lastLibraryScanDate,
+                    interval: settings.libraryScanInterval
+                ) {
                     print("🔄 Foreground: Starting library scan (been a while since last scan)")
                     LibraryIndexer.shared.start()
                 } else {
@@ -169,21 +171,28 @@ struct Cosmos_Music_PlayerApp: App {
         }
     }
 
-    private func shouldPerformAutoScan(lastScanDate: Date?) -> Bool {
+    private func shouldPerformAutoScan(
+        lastScanDate: Date?,
+        interval: LibraryScanInterval
+    ) -> Bool {
         // If never scanned before, definitely scan
         guard let lastScanDate = lastScanDate else {
             print("🆕 Never scanned before - will perform scan")
             return true
         }
 
-        // Check if it's been more than 1 hour since last scan
+        guard let cooldownHours = interval.cooldownHours else {
+            print("⏭️ Foreground: automatic scanning is disabled")
+            return false
+        }
+
         let hoursSinceLastScan = Date().timeIntervalSince(lastScanDate) / 3600
-        let shouldScan = hoursSinceLastScan >= 1.0
+        let shouldScan = hoursSinceLastScan >= cooldownHours
 
         if shouldScan {
-            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - will scan")
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan))h ago (limit \(cooldownHours)h) - will scan")
         } else {
-            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - skipping")
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan))h ago (limit \(cooldownHours)h) - skipping")
         }
 
         return shouldScan
@@ -191,8 +200,19 @@ struct Cosmos_Music_PlayerApp: App {
     
     private func handleWillResignActive() {
         guard PlayerEngine.shared.isPlaying else {
-            releaseAudioSessionIfIdle()
-            print("🎧 Cosmos is not playing - leaving audio focus with the current app")
+            // willDeactivate fires for every transient overlay - Control
+            // Centre, Notification Centre, a banner, the app switcher, Face ID
+            // - and isPlaying is also false for the whole of a track load. This
+            // used to deactivate unconditionally with
+            // .notifyOthersOnDeactivation, which told other audio apps to take
+            // over: pausing and then pulling down Control Centre to press play
+            // could hand the lock screen to another app, and a banner arriving
+            // mid-load tore the session down underneath the load. Only release
+            // when there is genuinely nothing loaded.
+            if PlayerEngine.shared.canReleaseAudioSession {
+                releaseAudioSessionIfIdle()
+                print("🎧 Cosmos has nothing loaded - leaving audio focus with the current app")
+            }
             return
         }
 
@@ -224,6 +244,13 @@ struct Cosmos_Music_PlayerApp: App {
     
     private func handleOpenURL(_ url: URL) {
         print("🔗 Received URL: \(url.absoluteString)")
+
+        if url.isFileURL {
+            Task { @MainActor in
+                await importOpenedAudioDocument(url)
+            }
+            return
+        }
 
         guard url.scheme == "cosmos-music" else {
             print("❌ Unknown URL scheme: \(url.scheme ?? "nil")")
@@ -268,6 +295,49 @@ struct Cosmos_Music_PlayerApp: App {
         }
     }
 
+    @MainActor
+    private func importOpenedAudioDocument(_ url: URL) async {
+        // A `false` answer is NOT a failure to open. The call returns false
+        // both when access is denied and when the URL is simply not
+        // security-scoped, which is exactly the case for a file that already
+        // lives in Cosmos's own container - so treating it as fatal refused
+        // every "Open in Cosmos" on a file the app could already read. Only a
+        // successful start has to be balanced with a stop.
+        let hasSecurityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        // Opening in place grants temporary access. Save the bookmark before
+        // indexing so the row remains playable after this callback returns.
+        do {
+            await appCoordinator.databaseManager.waitForExternalBookmarkMigration()
+            let bookmarkData = try url.bookmarkData(
+                options: .minimalBookmark,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            let stableId = try LibraryIndexer.shared.generateStableId(for: url)
+            try await ExternalBookmarkStore.shared.store(bookmarkData, for: stableId)
+        } catch {
+            // The immediate import can still succeed under the active scope;
+            // keep the same graceful fallback as the document picker.
+            print("⚠️ Could not persist bookmark for opened document: \(error)")
+        }
+
+        let imported = await LibraryIndexer.shared.processExternalFile(
+            url,
+            allowExcludedReimport: true
+        )
+        if imported {
+            print("✅ Imported opened document: \(url.lastPathComponent)")
+        } else {
+            print("ℹ️ Opened document was already present or could not be imported: \(url.lastPathComponent)")
+        }
+    }
+
     private func handleSiriIntent(_ userActivity: NSUserActivity) {
         print("🎤 Received Siri intent: \(userActivity.activityType)")
         Task { @MainActor in
@@ -299,35 +369,4 @@ struct Cosmos_Music_PlayerApp: App {
         }
     }
 
-    // MARK: - SFBAudioEngine Background Optimization
-
-    private func optimizeSFBAudioForBackground() async {
-        print("🔒 Optimizing SFBAudioEngine for background/lock screen")
-
-        // Increase buffer size significantly for background stability.
-        // Do NOT call setCategory here - changing category/options on a live
-        // session forces a hardware reconfiguration that stops playback.
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setPreferredIOBufferDuration(0.100) // 100ms buffer for lock screen
-            print("✅ Increased buffer to 100ms for lock screen stability")
-        } catch {
-            print("⚠️ Failed to increase buffer for background: \(error)")
-        }
-    }
-
-    private func optimizeSFBAudioForForeground() async {
-        print("🔓 Restoring SFBAudioEngine for foreground")
-
-        // Restore normal buffer size.
-        // Do NOT call setCategory here - changing category/options on a live
-        // session forces a hardware reconfiguration that stops playback.
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setPreferredIOBufferDuration(0.040) // Back to 40ms
-            print("✅ Restored buffer to 40ms for foreground")
-        } catch {
-            print("⚠️ Failed to restore buffer for foreground: \(error)")
-        }
-    }
 }

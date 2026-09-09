@@ -21,6 +21,15 @@ extension String {
 
 /// Localization helper with commonly used strings
 struct Localized {
+    // MARK: - Playback failure strings
+    static let playbackTrackUnavailable = "playback_track_unavailable".localized
+    static let playbackFormatNeedsPhone = "playback_format_needs_phone".localized
+    static let playbackDownloadStalled = "playback_download_stalled".localized
+    static let playbackAudioUnavailable = "playback_audio_unavailable".localized
+    /// CarPlay refuses SFBAudioEngine outright, so Opus/Vorbis/DSD cannot play
+    /// there at all. Saying the file "may have been moved" would send the user
+    /// looking for a problem that does not exist.
+
     // MARK: - Playlist strings
     static let playlists = "playlists".localized
     static let noPlaylistsYet = "no_playlists_yet".localized
@@ -53,6 +62,9 @@ struct Localized {
     static let managePlaylists = "manage_playlists".localized
     static let playlist = "playlist".localized
     static let createFirstPlaylist = "create_first_playlist".localized
+    static let playlistCover = "playlist_cover".localized
+    static let changeCoverImage = "change_cover_image".localized
+    static let removeCustomCover = "remove_custom_cover".localized
     
     // MARK: - General UI strings
     static let allSongs = "all_songs".localized
@@ -61,6 +73,7 @@ struct Localized {
     static let importMusicFiles = "import_music_files".localized
     static let noSongsFound = "no_songs_found".localized
     static let yourMusicWillAppearHere = "your_music_will_appear_here".localized
+    static let unknown = "unknown".localized
     static let ok = "ok".localized
     static let settings = "settings".localized
     static let retry = "retry".localized
@@ -74,12 +87,25 @@ struct Localized {
     // MARK: - Library and Navigation
     static let library = "library".localized
     static let artists = "artists".localized
+    static let albumArtists = "album_artists".localized
+    static let allArtists = "all_artists".localized
+    static let libraryScanFrequency = "library_scan_frequency".localized
+    static let libraryScanFrequencyDescription = "library_scan_frequency_description".localized
+    /// Shown while the one-time Opus-in-M4A sweep reads file headers, which
+    /// happens before indexing starts and would otherwise look like a hang.
+    static let checkingLibraryFormats = "checking_library_formats".localized
+    static let scanEveryLaunch = "scan_every_launch".localized
+    static let scanHourly = "scan_hourly".localized
+    static let scanDaily = "scan_daily".localized
+    static let scanWeekly = "scan_weekly".localized
+    static let scanManualOnly = "scan_manual_only".localized
     static let albums = "albums".localized
     static let search = "search".localized
     static let browse = "browse".localized
     static let songs = "songs".localized
     static let processing = "processing".localized
     static let waiting = "waiting".localized
+    static let searching = "searching".localized
     
     // MARK: - Artist/Album/Track Info
     static let noArtistsFound = "no_artists_found".localized
@@ -101,6 +127,11 @@ struct Localized {
     
     // MARK: - Search
     static let searchYourMusicLibrary = "search_your_music_library".localized
+    // Prompts for the in-place search bars on the library's list screens
+    static let searchSongs = "search_songs".localized
+    static let searchArtists = "search_artists".localized
+    static let searchAlbums = "search_albums".localized
+    static let searchPlaylists = "search_playlists".localized
     static let findSongsArtistsAlbumsPlaylists = "find_songs_artists_albums_playlists".localized
     static let noResultsFound = "no_results_found".localized
     static let tryDifferentKeywords = "try_different_keywords".localized
@@ -114,7 +145,11 @@ struct Localized {
     static let appearance = "appearance".localized
     static let information = "information".localized
     static let minimalistLibraryIcons = "minimalist_library_icons".localized
-    static let forceDarkMode = "force_dark_mode".localized
+    static let appAppearance = "app_appearance".localized
+    static let appAppearanceDescription = "app_appearance_description".localized
+    static let appearanceSystem = "appearance_system".localized
+    static let appearanceLight = "appearance_light".localized
+    static let appearanceDark = "appearance_dark".localized
     static let version = "version".localized
     static let appName = "app_name".localized
     static let cosmosMusicPlayer = "cosmos_music_player".localized
@@ -136,9 +171,11 @@ struct Localized {
     static let keepFolderPlaylists = "keep_folder_playlists".localized
     static let playerControls = "player_controls".localized
     static let showLyricsButton = "show_lyrics_button".localized
-    static let showLyricsButtonDescription = "show_lyrics_button_description".localized
     static let showSleepTimerButton = "show_sleep_timer_button".localized
-    static let showSleepTimerButtonDescription = "show_sleep_timer_button_description".localized
+    static let queueFullListFromSearch = "queue_full_list_from_search".localized
+    static let queueFullListFromSearchDescription = "queue_full_list_from_search_description".localized
+    static let splitArtistsOnComma = "split_artists_on_comma".localized
+    static let splitArtistsOnCommaDescription = "split_artists_on_comma_description".localized
     
     // MARK: - Liked Songs Actions
     static let addToLikedSongs = "add_to_liked_songs".localized
@@ -186,6 +223,9 @@ struct Localized {
     // MARK: - Library Processing
     static let processingColon = "processing_colon".localized
     static let waitingColon = "waiting_colon".localized
+    static let settingUpICloudLibrary = "setting_up_icloud_library".localized
+    static let settingUpOfflineLibrary = "setting_up_offline_library".localized
+    static let settingUpLocalLibrary = "setting_up_local_library".localized
     
     // MARK: - Subtitles and descriptions
     static let yourFavorites = "your_favorites".localized
@@ -236,6 +276,30 @@ struct Localized {
         return "songs_count".localized(with: count)
     }
 
+    static func albumsCount(_ count: Int) -> String {
+        count == 1
+            ? "albums_count_singular".localized(with: count)
+            : "albums_count_plural".localized(with: count)
+    }
+
+    static func discNumber(_ number: Int) -> String {
+        "disc_number".localized(with: number)
+    }
+
+    static func importedSongCount(_ count: Int) -> String {
+        count == 1
+            ? "imported_song_count_singular".localized(with: count)
+            : "imported_song_count_plural".localized(with: count)
+    }
+
+    static func songsAlreadyInLibrary(_ count: Int) -> String {
+        "songs_already_in_library".localized(with: count)
+    }
+
+    static func importSummary(imported: Int, skipped: Int) -> String {
+        "import_summary".localized(with: imported, skipped)
+    }
+
     // MARK: - Equalizer strings
     static let equalizer = "equalizer".localized
     static let graphicEqualizer = "graphic_equalizer".localized
@@ -253,6 +317,25 @@ struct Localized {
     static let frequencyBands = "frequency_bands".localized
     static let editEqualizer = "edit_equalizer".localized
     static let resetToFlat = "reset_to_flat".localized
+    static let manualParametricEQ = "manual_parametric_eq".localized
+    static let createManualEQ = "create_manual_eq".localized
+    static let bands = "bands".localized
+    static let createParametricEQDescription = "create_parametric_eq_description".localized
+    static let editParametricBandsDescription = "edit_parametric_bands_description".localized
+    static let parametricEditor = "parametric_editor".localized
+    static let addBand = "add_band".localized
+    static let removeBand = "remove_band".localized
+    static let selectedBand = "selected_band".localized
+    static let frequency = "frequency".localized
+    static let gain = "gain".localized
+
+    static func bandCount(used: Int, maximum: Int) -> String {
+        "band_count".localized(with: used, maximum)
+    }
+
+    static func bandNumber(_ number: Int) -> String {
+        "band_number".localized(with: number)
+    }
 
     // Imported GraphicEQ Presets
     static let importedPresets = "imported_presets".localized
@@ -340,6 +423,9 @@ struct Localized {
     static let sortDateOldest = "sort_date_oldest".localized
     static let sortNameAZ = "sort_name_az".localized
     static let sortNameZA = "sort_name_za".localized
+    static let sortManualOrder = "sort_manual_order".localized
+    static let sortArtistAZ = "sort_artist_az".localized
+    static let sortArtistZA = "sort_artist_za".localized
     static let sortSizeLargest = "sort_size_largest".localized
     static let sortSizeSmallest = "sort_size_smallest".localized
 
@@ -355,6 +441,24 @@ struct Localized {
     static let sleepTimer45Minutes = "sleep_timer_45_minutes".localized
     static let sleepTimer60Minutes = "sleep_timer_60_minutes".localized
     static let cancelSleepTimer = "cancel_sleep_timer".localized
+
+    // MARK: - Lyrics
+    static let lyrics = "lyrics".localized
+    static let close = "close".localized
+    static let lyricsCopy = "lyrics_copy".localized
+    static let lyricsMoreActions = "lyrics_more_actions".localized
+    static let lyricsSeekHint = "lyrics_seek_hint".localized
+    static let lyricsBackToCurrent = "lyrics_back_to_current".localized
+    static let lyricsInstrumentalBreak = "lyrics_instrumental_break".localized
+    static let lyricsInstrumental = "lyrics_instrumental".localized
+    static let lyricsInstrumentalMessage = "lyrics_instrumental_message".localized
+    static let lyricsUnavailable = "lyrics_unavailable".localized
+    static let lyricsUnavailableMessage = "lyrics_unavailable_message".localized
+    static let lyricsLoading = "lyrics_loading".localized
+    static let lyricsLoadingMessage = "lyrics_loading_message".localized
+    static let lyricsSearchAgain = "lyrics_search_again".localized
+    static let lyricsChooseVersion = "lyrics_choose_version".localized
+    static let lyricsSynced = "lyrics_synced".localized
 
     // MARK: - Bulk Selection
     static let select = "select".localized

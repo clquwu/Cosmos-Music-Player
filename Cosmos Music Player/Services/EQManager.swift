@@ -64,6 +64,22 @@ class EQManager: ObservableObject {
     private var audioEngine: AVAudioEngine?
     private var eqNode: AVAudioUnitEQ?
 
+    /// Where the live node sits in the native graph, remembered so a rebuilt
+    /// node can be put back exactly where the old one was.
+    private var eqGraphInputNode: AVAudioNode?
+    private var eqGraphOutputNode: AVAudioNode?
+    private var eqGraphFormat: AVAudioFormat?
+
+    /// AVAudioUnitEQ's band count is fixed at construction, so PlayerEngine
+    /// has to stop the engine, let us swap the node, and re-schedule the
+    /// playing track around it. Set by PlayerEngine; see
+    /// `nativeEQNodeNeedsRebuild`.
+    var onNativeEQGraphRebuildNeeded: (() -> Void)?
+
+    /// iOS supports more, but AVAudioUnitEQ becomes unreliable well before
+    /// its documented ceiling - keep the same safe cap everywhere.
+    private static let maxSafeBands = 16
+
     private init() {
         loadSettings()
         loadPresets()
@@ -73,16 +89,81 @@ class EQManager: ObservableObject {
 
     func setAudioEngine(_ engine: AVAudioEngine?) {
         audioEngine = engine
+        // The old node belonged to the old engine; its recorded insertion
+        // points are meaningless against a replacement graph.
+        eqGraphInputNode = nil
+        eqGraphOutputNode = nil
+        eqGraphFormat = nil
         setupEQNode()
+    }
+
+    /// How many bands the node should have for the preset currently loaded.
+    private var desiredBandCount: Int {
+        eqFrequencies.isEmpty
+            ? Self.maxSafeBands
+            : min(eqFrequencies.count, Self.maxSafeBands)
+    }
+
+    /// True when the live node is too small for the current preset.
+    ///
+    /// The node is built once, sized for whatever preset happened to be loaded
+    /// at the time - which is the preset active on the session's first native
+    /// playback, or 16 bands when EQ was off. `configureEQBands()` then had to
+    /// squeeze every later preset into that fixed count, and its
+    /// more-bands-than-slots branch *averages* neighbouring bands together: a
+    /// 10-band preset selected after a 5-band one was silently played as five
+    /// smeared bands for the rest of the session while the UI drew the real
+    /// curve.
+    ///
+    /// Deliberately one-directional. Fewer input bands than slots is already
+    /// handled correctly - `configureEQBands()` maps them one-to-one and
+    /// bypasses the remainder - so shrinking the node would be pure churn on
+    /// a live audio graph. And because the target is capped at
+    /// `maxSafeBands`, a 31-band preset asks for 16 and is satisfied by a
+    /// 16-band node; it is still averaged down to 16, which is the iOS limit
+    /// rather than a bug.
+    var nativeEQNodeNeedsRebuild: Bool {
+        guard let eqNode, !eqFrequencies.isEmpty else { return false }
+        return desiredBandCount > eqNode.bands.count
+    }
+
+    /// Swaps in a node sized for the current preset and restores its place in
+    /// the graph. The caller must have stopped the engine first - PlayerEngine
+    /// does that in `rebuildNativeEQGraph()`, which also re-schedules the
+    /// playing track afterwards.
+    func rebuildNativeEQNode() {
+        guard audioEngine != nil, eqNode != nil else { return }
+
+        let input = eqGraphInputNode
+        let output = eqGraphOutputNode
+        let format = eqGraphFormat
+
+        setupEQNode()
+
+        // setupEQNode() only attaches. Without this the graph is left with the
+        // player node wired to nothing and playback goes silent.
+        if let input, let output {
+            insertEQIntoAudioGraph(between: input, and: output, format: format)
+        }
     }
 
     private func setupEQNode() {
         guard let audioEngine = audioEngine else { return }
 
-        // iOS supports up to ~48 bands for AVAudioUnitEQ
-        // Using more may cause issues - limit to safe maximum
-        let maxSafeBands = 16
-        let requestedBands = !eqFrequencies.isEmpty ? min(eqFrequencies.count, maxSafeBands) : maxSafeBands
+        // Detach whatever was there before. Every call used to build and
+        // attach another node without removing the previous one, so repeated
+        // setup left orphans attached to the engine.
+        if let previousNode = eqNode {
+            if audioEngine.attachedNodes.contains(previousNode) {
+                audioEngine.disconnectNodeOutput(previousNode)
+                audioEngine.disconnectNodeInput(previousNode)
+                audioEngine.detach(previousNode)
+            }
+            eqNode = nil
+        }
+
+        let maxSafeBands = Self.maxSafeBands
+        let requestedBands = desiredBandCount
 
         print("🎛️ Original bands: \(eqFrequencies.count), requesting: \(requestedBands) (limited to \(maxSafeBands))")
 
@@ -117,14 +198,47 @@ class EQManager: ObservableObject {
 
         print("✅ EQ node created with \(actualBands) bands")
 
-        // Apply current settings if enabled
+        // Reconcile the brand-new node with `isEnabled`. Neither half of this
+        // is implied by the band configuration above:
+        //
+        // - A fresh AVAudioUnitEQ starts at globalGain 0, and only
+        //   applyGlobalGain() ever writes the preamp. Skipping applyEQSettings()
+        //   below therefore lost the saved preamp on every rebuild that already
+        //   had band data - most visibly on the Opus/DSD -> FLAC transition,
+        //   which rebuilds the whole graph through resetAudioEngineForNative().
+        // - configureEQBands() un-bypasses whatever it maps regardless of the
+        //   toggle, so a node built while EQ is switched off used to come up
+        //   audibly applying the last preset.
+        //
+        // Set the node directly rather than calling applyGlobalGain(): that
+        // also pokes SFBAudioEngineManager, which has nothing to do with
+        // building the native graph.
         if isEnabled {
+            eqNode.globalGain = Float(globalGain)
+        } else {
+            // Disabling EQ disables the preamp with it - same as applyEQSettings().
+            eqNode.globalGain = 0.0
+            eqNode.bands.forEach { $0.bypass = true }
+        }
+
+        // Only reach for the database when we have no band data yet. Calling
+        // this unconditionally made every rebuild re-load the preset it was
+        // just rebuilt for - the branch above has already configured the node
+        // from the bands we hold.
+        if isEnabled && eqFrequencies.isEmpty {
             applyEQSettings()
         }
     }
 
     func insertEQIntoAudioGraph(between inputNode: AVAudioNode, and outputNode: AVAudioNode, format: AVAudioFormat?) {
         guard let audioEngine = audioEngine, let eqNode = eqNode else { return }
+
+        // Remembered so a band-count rebuild can put the replacement node back
+        // in the same place without PlayerEngine having to describe the graph
+        // again.
+        eqGraphInputNode = inputNode
+        eqGraphOutputNode = outputNode
+        eqGraphFormat = format
 
         // Disconnect existing connection
         audioEngine.disconnectNodeInput(outputNode)
@@ -241,12 +355,25 @@ class EQManager: ObservableObject {
                     self.eqFrequencies = newFrequencies
                     self.eqGains = newGains
                     self.eqBandwidths = newBandwidths
-                    
-                    if self.eqNode != nil {
+
+                    if self.eqNode == nil {
+                        print("ℹ️ Stored \(newFrequencies.count) EQ bands for SFBAudioEngine")
+                    } else if self.nativeEQNodeNeedsRebuild {
+                        // Too few slots for this preset. Reconfiguring in place
+                        // would average neighbouring bands together and quietly
+                        // play a coarser curve than the one on screen, so ask
+                        // PlayerEngine to swap the node instead.
+                        print("🎛️ EQ node has \(self.eqNode?.bands.count ?? 0) bands but the preset needs \(self.desiredBandCount) - rebuilding")
+                        if let rebuild = self.onNativeEQGraphRebuildNeeded {
+                            rebuild()
+                        } else {
+                            // No engine owner registered; the node is not in a
+                            // live graph, so swapping it here is safe.
+                            self.rebuildNativeEQNode()
+                        }
+                    } else {
                         self.configureEQBands()
                         print("✅ Reconfigured existing EQ node with \(newFrequencies.count) input bands")
-                    } else {
-                        print("ℹ️ Stored \(newFrequencies.count) EQ bands for SFBAudioEngine")
                     }
                 }
                 

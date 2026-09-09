@@ -8,12 +8,26 @@ struct QueueManagementView: View {
     @State private var draggedTrack: Track?
     @State private var settings = DeleteSettings.load()
     @State private var artistNameCache: [Int64: String] = [:]
-    
+    @State private var hasScrolledToCurrent = false
+
+    /// Stable row ids, computed once per render so the scroll target and the
+    /// ForEach agree on which id belongs to the playing track. Queues can hold
+    /// the same track twice, which is why the ids are not just stable ids.
+    private var queueRows: [IdentifiedTrackRow] {
+        playerEngine.playbackQueue.uniquelyIdentifiedRows()
+    }
+
+    private var currentRowId: String? {
+        let rows = queueRows
+        guard rows.indices.contains(playerEngine.currentIndex) else { return nil }
+        return rows[playerEngine.currentIndex].rowId
+    }
+
     var body: some View {
         NavigationView {
             ZStack {
                 ScreenSpecificBackgroundView(screen: .player)
-                
+
                 VStack(spacing: 20) {
                     // Header
                     HStack {
@@ -21,22 +35,19 @@ struct QueueManagementView: View {
                             dismiss()
                         }
                         .font(.headline)
-                        
+                        .frame(minWidth: 64, alignment: .leading)
+
                         Spacer()
-                        
+
                         Text(Localized.playingQueue)
                             .font(.title2)
                             .fontWeight(.semibold)
-                        
+
                         Spacer()
-                        
-                        // Invisible button for balance
-                        Button(Localized.done) {
-                            dismiss()
-                        }
-                        .font(.headline)
-                        .opacity(0)
-                        .disabled(true)
+
+                        // Empty counterweight so the title stays centred
+                        // against the leading Done button.
+                        Color.clear.frame(width: 64, height: 0)
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 10)
@@ -53,30 +64,45 @@ struct QueueManagementView: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        List {
-                            ForEach(playerEngine.playbackQueue.uniquelyIdentifiedRows(), id: \.rowId) { row in
-                                let index = row.index
-                                let track = row.track
-                                QueueTrackRow(
-                                    track: track,
-                                    index: index,
-                                    isCurrentTrack: index == playerEngine.currentIndex,
-                                    isDragging: draggedTrack?.stableId == track.stableId,
-                                    artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
-                                    onTap: {
-                                        jumpToTrack(at: index)
-                                    }
-                                )
-                                .listRowBackground(Color.clear)
-                                .listRowSeparator(.hidden)
-                                .listRowInsets(EdgeInsets())
+                        ScrollViewReader { proxy in
+                            List {
+                                ForEach(queueRows, id: \.rowId) { row in
+                                    let index = row.index
+                                    let track = row.track
+                                    QueueTrackRow(
+                                        track: track,
+                                        index: index,
+                                        isCurrentTrack: index == playerEngine.currentIndex,
+                                        isDragging: draggedTrack?.stableId == track.stableId,
+                                        artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
+                                        onTap: {
+                                            jumpToTrack(at: index)
+                                        }
+                                    )
+                                    .listRowBackground(Color.clear)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets())
+                                }
+                                .onMove(perform: moveItems)
+                                .onDelete(perform: deleteItems)
                             }
-                            .onMove(perform: moveItems)
-                            .onDelete(perform: deleteItems)
+                            .listStyle(PlainListStyle())
+                            .scrollContentBackground(.hidden)
+                            .padding(.horizontal, 16)
+                            .task {
+                                // Open on the song that is playing rather than
+                                // at the top - after an hour of listening the
+                                // current track is hundreds of rows down. The
+                                // list has to lay out before it can resolve an
+                                // off-screen row id, and the sheet is still
+                                // animating in on the first frames, hence the
+                                // short wait.
+                                guard !hasScrolledToCurrent else { return }
+                                hasScrolledToCurrent = true
+                                try? await Task.sleep(for: .milliseconds(150))
+                                scrollToCurrentTrack(with: proxy)
+                            }
                         }
-                        .listStyle(PlainListStyle())
-                        .scrollContentBackground(.hidden)
-                        .padding(.horizontal, 16)
                     }
                 }
             }
@@ -90,6 +116,11 @@ struct QueueManagementView: View {
         .onAppear {
             loadArtistNameCache()
         }
+    }
+
+    private func scrollToCurrentTrack(with proxy: ScrollViewProxy) {
+        guard let rowId = currentRowId else { return }
+        proxy.scrollTo(rowId, anchor: .center)
     }
 
     private func loadArtistNameCache() {
@@ -128,6 +159,9 @@ struct QueueManagementView: View {
         // Update synchronously - SwiftUI List expects data to match immediately after onMove
         playerEngine.playbackQueue = newQueue
         playerEngine.currentIndex = newCurrentIndex
+        // Gapless playback may already have handed the old successor's audio to
+        // the player node; without this it plays anyway, past the reorder.
+        playerEngine.queueDidChange()
         loadArtistNameCache()
     }
 
@@ -138,9 +172,11 @@ struct QueueManagementView: View {
 
         var newQueue = playerEngine.playbackQueue
         var newCurrentIndex = playerEngine.currentIndex
+        var removedTrackIds: [String] = []
 
         // Sort descending to remove from end first
         for index in deletableOffsets.sorted().reversed() {
+            removedTrackIds.append(newQueue[index].stableId)
             newQueue.remove(at: index)
             if index < newCurrentIndex {
                 newCurrentIndex -= 1
@@ -150,20 +186,14 @@ struct QueueManagementView: View {
         // Must update synchronously - SwiftUI List expects data to match immediately after onDelete
         playerEngine.playbackQueue = newQueue
         playerEngine.currentIndex = newCurrentIndex
+        playerEngine.queueDidRemoveTracks(removedTrackIds)
     }
 
     private func jumpToTrack(at index: Int) {
         guard index >= 0 && index < playerEngine.playbackQueue.count else { return }
 
         Task {
-            playerEngine.currentIndex = index
-            let track = playerEngine.playbackQueue[index]
-            await playerEngine.loadTrack(track, preservePlaybackTime: false)
-
-            // Start playback
-            DispatchQueue.main.async {
-                self.playerEngine.play()
-            }
+            await playerEngine.playQueueTrack(at: index)
         }
     }
 }
@@ -255,6 +285,7 @@ struct QueueTrackRow: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
             settings = DeleteSettings.load()
         }
+        .reloadsArtwork(for: track.stableId) { loadArtwork() }
     }
     
     private func loadArtwork() {

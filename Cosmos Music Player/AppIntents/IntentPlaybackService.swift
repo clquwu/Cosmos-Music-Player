@@ -86,6 +86,10 @@ final class IntentPlaybackService {
         if enabled {
             playerEngine.isLoopingSong = false
         }
+        // Same reason cycleLoopMode() calls this: changing the loop mode
+        // changes which track should play next, and gapless playback may
+        // already have handed the old successor to the player node.
+        playerEngine.queueDidChange()
     }
 
     // MARK: - Library fetch
@@ -96,7 +100,7 @@ final class IntentPlaybackService {
 
     func favoriteTracks() throws -> [Track] {
         let favoriteIds = try database.getFavorites()
-        return try database.getTracksByStableIds(favoriteIds)
+        return try database.getTracksByStableIdsPreservingOrder(favoriteIds)
     }
 
     func tracks(inPlaylist playlistId: Int64) throws -> [Track] {

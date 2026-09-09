@@ -6,22 +6,29 @@ struct ArtistsScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var artists: [Artist] = []
     @State private var settings = DeleteSettings.load()
-    
+    @StateObject private var search = LibrarySearchState()
+
+    private var visibleArtists: [Artist] {
+        let terms = LibrarySearch.terms(in: search.text)
+        guard !terms.isEmpty else { return artists }
+        return artists.filter { LibrarySearch.matches(terms: terms, in: $0.name) }
+    }
+
     var body: some View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .artists)
             
             VStack {
-                if artists.isEmpty {
+                if visibleArtists.isEmpty {
                     VStack(spacing: 16) {
-                        Image(systemName: "person.2")
+                        Image(systemName: artists.isEmpty ? "person.2" : "magnifyingglass")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
                         
-                        Text("No artists found")
+                        Text(artists.isEmpty ? Localized.noArtistsFound : Localized.noResultsFound)
                             .font(.headline)
                         
-                        Text("Artists will appear here once you add music to your library")
+                        Text(artists.isEmpty ? Localized.artistsWillAppear : Localized.tryDifferentKeywords)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -29,7 +36,7 @@ struct ArtistsScreen: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(artists, id: \.id) { artist in
+                    List(visibleArtists, id: \.id) { artist in
                         ZStack {
                             NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allTracks)) {
                                 EmptyView()
@@ -76,8 +83,17 @@ struct ArtistsScreen: View {
                     }
                 }
             }
-            .navigationTitle(Localized.artists)
+            .navigationTitle(settings.artistListMode.displayName)
             .navigationBarTitleDisplayMode(.inline)
+            .librarySearchField(search, prompt: Localized.searchArtists)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack(spacing: 0) {
+                        LibrarySearchButton(state: search)
+                        artistModeMenu
+                    }
+                }
+            }
             .onAppear {
                 loadArtists()
             }
@@ -85,14 +101,42 @@ struct ArtistsScreen: View {
                 loadArtists()
             }
             .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
+                let previousMode = settings.artistListMode
                 settings = DeleteSettings.load()
+                if settings.artistListMode != previousMode { loadArtists() }
             }
         }
     } // end body
     
+    /// Switches between listing album artists and every credited artist.
+    /// It lives in the toolbar rather than in Settings because the difference
+    /// is only meaningful while looking at this list.
+    private var artistModeMenu: some View {
+        Menu {
+            ForEach(ArtistListMode.allCases, id: \.self) { mode in
+                Button {
+                    settings.artistListMode = mode
+                    settings.save()
+                    loadArtists()
+                } label: {
+                    HStack {
+                        Text(mode.displayName)
+                        if settings.artistListMode == mode { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.title3)
+                .foregroundColor(settings.backgroundColorChoice.color)
+                .padding(4)
+                .contentShape(Rectangle())
+        }
+    }
+
     private func loadArtists() {
         do {
-            artists = try appCoordinator.databaseManager.getAllArtists()
+            artists = try appCoordinator.databaseManager.getBrowsableArtists(mode: settings.artistListMode)
         } catch {
             print("Failed to load artists: \(error)")
         }
@@ -110,10 +154,10 @@ struct ArtistListView: View {
                     .font(.system(size: 40))
                     .foregroundColor(.secondary)
                 
-                Text("No artists found")
+                Text(Localized.noArtistsFound)
                     .font(.headline)
                 
-                Text("Artists will appear here once you add music to your library")
+                Text(Localized.artistsWillAppear)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -131,7 +175,7 @@ struct ArtistListView: View {
                         Text(artist.name)
                             .font(.headline)
                         
-                        Text("Artist")
+                        Text(Localized.artist)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -151,6 +195,7 @@ struct ArtistListView: View {
 }
 
 struct ArtistDetailScreen: View {
+
     let artist: Artist
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
@@ -168,7 +213,20 @@ struct ArtistDetailScreen: View {
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
     }
-    
+
+    /// Resolving this costs a database query, so callers that need it more
+    /// than once bind it to a local first.
+    // Subscribed, not merely read: the list has to be rebuilt when the route
+    // changes. Reading the singleton without subscribing meant connecting could
+    // leave incompatible formats on screen and disconnecting left Opus/DSD
+    // missing until some other refresh happened to fire.
+    //
+    // Deliberately CarPlayRouteState and not SFBAudioEngineManager: that class
+    // also publishes `currentTime` from a 0.1s timer, so observing it rebuilt
+    // this whole list ten times a second for the duration of every
+    // Opus/Vorbis/DSD track.
+    @ObservedObject private var carPlayState = CarPlayRouteState.shared
+
     private var artistTracks: [Track] {
         let tracks: [Track]
         if let artistId = artist.id,
@@ -179,10 +237,10 @@ struct ArtistDetailScreen: View {
         }
 
         // Filter out incompatible formats when connected to CarPlay
-        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
+        if carPlayState.isConnected {
             return tracks.filter { track in
                 let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+                let incompatibleFormats = ["ogg", "oga", "opus", "dsf", "dff"]
                 return !incompatibleFormats.contains(ext)
             }
         }
@@ -213,7 +271,9 @@ struct ArtistDetailScreen: View {
             isBulkMode: $isBulkMode,
             selectedTracks: $selectedTracks
         )
-        .onAppear { loadArtistData() }
+        .onAppear {
+            loadArtistData()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
@@ -233,9 +293,10 @@ struct ArtistDetailScreen: View {
             ScrollView {
                 VStack(spacing: 0) {
                     headerSection(geometry: geometry)
+                    let tracks = artistTracks
                     VStack(spacing: 20) {
                         if !artistAlbums.isEmpty { albumsSection }
-                        if !artistTracks.isEmpty { songsSection }
+                        if !tracks.isEmpty { songsSection(tracks) }
                     }
                     .padding(.top, 20)
                     .padding(.bottom, 100) // Add padding for mini player
@@ -248,10 +309,11 @@ struct ArtistDetailScreen: View {
     @ViewBuilder
     private var simpleView: some View {
         ScrollView {
+            let tracks = artistTracks
             VStack(spacing: 20) {
                 simpleHeader
                 if !artistAlbums.isEmpty { albumsSection }
-                if !artistTracks.isEmpty { songsSection }
+                if !tracks.isEmpty { songsSection(tracks) }
             }
             .padding(.bottom, 100) // Add padding for mini player
         }
@@ -456,8 +518,11 @@ struct ArtistDetailScreen: View {
     private var playButtons: some View {
         HStack(spacing: 20) {
             Button {
-                guard let first = artistTracks.first else { return }
-                Task { await playerEngine.playTrack(first, queue: artistTracks) }
+                // Bound to a local because resolving artistTracks costs a
+                // database query.
+                let queue = artistTracks
+                guard let first = queue.first else { return }
+                Task { await playerEngine.playTrack(first, queue: queue) }
             } label: {
                 HStack { Image(systemName: "play.fill"); Text(Localized.play).lineLimit(1).minimumScaleFactor(0.6) }
                     .font(.title3).fontWeight(.semibold)
@@ -485,19 +550,19 @@ struct ArtistDetailScreen: View {
         }
     }
     
-    private var songsSection: some View {
+    private func songsSection(_ tracks: [Track]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(Localized.songs).font(.title3).fontWeight(.bold)
                 Spacer()
-                Text("\(artistTracks.count) song\(artistTracks.count == 1 ? "" : "s")")
+                Text(Localized.songsCount(tracks.count))
                     .font(.body).foregroundColor(.secondary)
             }
             .padding(.horizontal)
             .padding(.bottom, 12)
             LazyVStack(spacing: 0) {
-                ForEach(artistTracks.indices, id: \.self) { index in
-                    let track = artistTracks[index]
+                ForEach(tracks.indices, id: \.self) { index in
+                    let track = tracks[index]
                     HStack(spacing: 12) {
                         if isBulkMode {
                             TrackSelectionIndicator(
@@ -513,7 +578,7 @@ struct ArtistDetailScreen: View {
                             if isBulkMode {
                                 toggleSelection(track)
                             } else {
-                                Task { await playerEngine.playTrack(track, queue: artistTracks) }
+                                Task { await playerEngine.playTrack(track, queue: tracks) }
                             }
                         }
                     }
@@ -524,7 +589,7 @@ struct ArtistDetailScreen: View {
                         selectedTracks.insert(track.stableId)
                     }
 
-                    if index < artistTracks.count - 1 {
+                    if index < tracks.count - 1 {
                         Divider().padding(.leading, 20)
                     }
                 }
@@ -537,7 +602,7 @@ struct ArtistDetailScreen: View {
             HStack {
                 Text(Localized.albums).font(.title3).fontWeight(.bold)
                 Spacer()
-                Text("\(artistAlbums.count) album\(artistAlbums.count == 1 ? "" : "s")")
+                Text(Localized.albumsCount(artistAlbums.count))
                     .font(.body).foregroundColor(.secondary)
             }
             .padding(.horizontal)
@@ -816,6 +881,7 @@ struct ArtistTrackRowView: View {
         } message: {
             Text(Localized.deleteFileConfirmation(track.title))
         }
+        .reloadsArtwork(for: track.stableId) { loadArtwork() }
     }
     
     private func checkFavoriteStatus() {
@@ -844,7 +910,7 @@ struct ArtistTrackRowView: View {
             do {
                 let settings = DeleteSettings.load()
                 if settings.deleteFromLibraryOnly {
-                    DeleteSettings.addExcludedTrack(track.stableId)
+                    DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                 } else {
                     do {
                         try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
@@ -853,7 +919,7 @@ struct ArtistTrackRowView: View {
                     }
                 }
 
-                try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
                 print("❌ Failed to delete track: \(error)")
@@ -902,6 +968,7 @@ struct ArtistAlbumCardView: View {
         .onAppear {
             loadAlbumArtwork()
         }
+        .reloadsArtwork(for: albumTracks.first?.stableId) { loadAlbumArtwork() }
     }
     
     private func loadAlbumArtwork() {

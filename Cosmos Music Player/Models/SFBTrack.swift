@@ -95,22 +95,18 @@ struct SFBTrack: Identifiable {
                     }
                 }
             } else {
-                // For internal audio or non-DoP capable devices, prefer PCM
+                // For internal audio or non-DoP capable devices, PCM is the
+                // only safe delivery mode. A DoP carrier looks like ordinary
+                // full-scale PCM to a speaker, Bluetooth or AirPlay route, so
+                // it must never be used as a fallback when PCM conversion
+                // fails.
                 do {
                     let pcmDecoder = try DSDPCMDecoder(decoder: dsdDecoder)
                     print("✅ DSD PCM decoder created for internal audio")
                     return pcmDecoder
                 } catch {
-                    print("⚠️ DSD PCM conversion failed, trying DoP as fallback: \(error)")
-                    // Fallback to DoP if PCM fails (e.g., high DSD rates)
-                    do {
-                        let dopDecoder = try DoPDecoder(decoder: dsdDecoder)
-                        print("✅ DoP decoder created as PCM fallback")
-                        return dopDecoder
-                    } catch {
-                        print("❌ Both PCM and DoP failed: \(error)")
-                        throw error
-                    }
+                    print("❌ DSD PCM conversion failed; refusing unsafe DoP fallback: \(error)")
+                    throw error
                 }
             }
         }

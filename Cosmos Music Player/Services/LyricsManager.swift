@@ -8,9 +8,22 @@
 import Foundation
 import AVFoundation
 
+/// One timed word from an Enhanced LRC ("A2") line.
+///
+/// A trailing entry with empty text is kept rather than discarded: the format
+/// conventionally closes a line with a bare `<mm:ss.xx>` marking where the last
+/// word *ends*, and that is the only place that information exists.
+struct LyricsWord: Equatable, Codable {
+    let timestamp: TimeInterval
+    let text: String
+}
+
 struct LyricsLine: Equatable, Codable {
     let timestamp: TimeInterval?
     let text: String
+    /// Word timings, when the source carried them. lrclib is line-level only,
+    /// so in practice these come from a file's own embedded lyrics.
+    var words: [LyricsWord]? = nil
 }
 
 struct Lyrics: Codable {
@@ -43,38 +56,89 @@ actor LyricsManager {
 
     // MARK: - Public API
 
+    /// Lyrics for a track, from the fastest source that has them.
+    ///
+    /// Anything found is written to disk, so a track whose lyrics have been
+    /// opened once keeps them with no connection afterwards. A confirmed
+    /// *absence* is recorded too, with a shorter life, so a song lrclib simply
+    /// does not have stops costing three network round trips every time its
+    /// screen is opened.
     func getLyrics(for track: Track) async -> Lyrics? {
-        // Check memory cache first
         if let cached = cache[track.stableId] {
             print("📝 Using cached lyrics for: \(track.title)")
             return cached
         }
 
-        // Check disk cache
         if let diskCached = await loadLyricsFromDisk(trackId: track.stableId) {
             print("📝 Loaded lyrics from disk for: \(track.title)")
             cache[track.stableId] = diskCached
             return diskCached
         }
 
-        // Try embedded lyrics first
+        // Embedded lyrics need no network and are the track's own copy, so they
+        // outrank anything lrclib could answer.
         if let embedded = await getEmbeddedLyrics(for: track) {
             print("📝 Found embedded lyrics for: \(track.title)")
-            cache[track.stableId] = embedded
-            await saveLyricsToDisk(lyrics: embedded, trackId: track.stableId)
+            await store(embedded, for: track.stableId)
             return embedded
         }
 
-        // Fallback to lrclib.net
-        if let fetched = await fetchFromLRCLib(for: track) {
-            print("📝 Fetched lyrics from lrclib.net for: \(track.title)")
-            cache[track.stableId] = fetched
-            await saveLyricsToDisk(lyrics: fetched, trackId: track.stableId)
-            return fetched
+        if isMissRemembered(for: track.stableId) {
+            print("📝 Skipping lrclib - no match remembered for: \(track.title)")
+            return nil
         }
 
-        print("⚠️ No lyrics found for: \(track.title)")
-        return nil
+        switch await fetchFromLRCLib(for: track) {
+        case .found(let lyrics):
+            print("📝 Fetched lyrics from lrclib.net for: \(track.title)")
+            await store(lyrics, for: track.stableId)
+            return lyrics
+
+        case .noMatch:
+            print("⚠️ No lyrics found for: \(track.title)")
+            await rememberMiss(for: track.stableId)
+            return nil
+
+        case .unreachable:
+            // Offline, or lrclib is down. That is not evidence the song has no
+            // lyrics, so nothing is remembered and the next attempt tries again.
+            print("📴 Could not reach lrclib for: \(track.title)")
+            return nil
+        }
+    }
+
+    /// Forces a fresh lookup, ignoring any remembered miss, and keeps whatever
+    /// it finds for offline use. Backs the retry the lyrics screen offers when
+    /// a track came back empty.
+    @discardableResult
+    func refreshLyrics(for track: Track) async -> Lyrics? {
+        cache.removeValue(forKey: track.stableId)
+        forgetMiss(for: track.stableId)
+
+        if let embedded = await getEmbeddedLyrics(for: track) {
+            await store(embedded, for: track.stableId)
+            return embedded
+        }
+
+        guard case .found(let lyrics) = await fetchFromLRCLib(for: track) else {
+            return nil
+        }
+
+        await store(lyrics, for: track.stableId)
+        return lyrics
+    }
+
+    /// Whether this track's lyrics are already on disk and will open offline.
+    func hasOfflineLyrics(for track: Track) -> Bool {
+        if cache[track.stableId] != nil { return true }
+        guard let fileURL = getLyricsFileURL(trackId: track.stableId) else { return false }
+        return fileManager.fileExists(atPath: fileURL.path)
+    }
+
+    private func store(_ lyrics: Lyrics, for stableId: String) async {
+        cache[stableId] = lyrics
+        forgetMiss(for: stableId)
+        await saveLyricsToDisk(lyrics: lyrics, trackId: stableId)
     }
 
     func clearCache() {
@@ -107,7 +171,7 @@ actor LyricsManager {
             if let lyricsText = await extractDSFLyrics(from: url) {
                 return parseLyrics(lyricsText, source: .embedded)
             }
-        case "ogg", "opus":
+        case "ogg", "oga", "opus":
             if let lyricsText = await extractScannedVorbisLyrics(from: url) {
                 return parseLyrics(lyricsText, source: .embedded)
             }
@@ -541,155 +605,407 @@ actor LyricsManager {
 
     // MARK: - LRCLIB API
 
-    private func fetchFromLRCLib(for track: Track) async -> Lyrics? {
-        guard let artistName = try? getArtistName(for: track),
-              let albumName = try? getAlbumName(for: track),
-              !artistName.isEmpty else {
-            print("⚠️ Missing metadata for lrclib.net lookup")
-            return nil
-        }
-
-        let durationSeconds = Double((track.durationMs ?? 0)) / 1000.0
-
-        // Try direct get first
-        if let lyrics = await fetchDirectFromLRCLib(
-            trackName: track.title,
-            artistName: artistName,
-            albumName: albumName,
-            duration: durationSeconds
-        ) {
-            // If we got synced lyrics, return immediately
-            if !lyrics.syncedLyrics.isEmpty {
-                print("✅ Got synced lyrics from /api/get")
-                return lyrics
-            }
-
-            // We got plain lyrics, but let's try to find synced via search
-            print("⚠️ Got plain lyrics, searching for synced version...")
-        }
-
-        // Try search to find synced lyrics
-        if let syncedLyrics = await searchForSyncedLyrics(
-            trackName: track.title,
-            artistName: artistName,
-            duration: durationSeconds
-        ) {
-            print("✅ Found synced lyrics via /api/search")
-            return syncedLyrics
-        }
-
-        // Return whatever we got from direct fetch (could be plain lyrics or nil)
-        return await fetchDirectFromLRCLib(
-            trackName: track.title,
-            artistName: artistName,
-            albumName: albumName,
-            duration: durationSeconds
-        )
+    enum LookupOutcome {
+        case found(Lyrics)
+        /// lrclib answered, and nothing it returned is this song.
+        case noMatch
+        /// We never got an answer - offline, timeout, or lrclib is down.
+        case unreachable
     }
 
-    private func fetchDirectFromLRCLib(
-        trackName: String,
-        artistName: String,
-        albumName: String,
-        duration: Double
-    ) async -> Lyrics? {
-        var components = URLComponents(string: "\(baseURL)/get")
-        components?.queryItems = [
-            URLQueryItem(name: "track_name", value: trackName),
-            URLQueryItem(name: "artist_name", value: artistName),
-            URLQueryItem(name: "album_name", value: albumName),
-            URLQueryItem(name: "duration", value: String(format: "%.0f", duration))
+    private func fetchFromLRCLib(for track: Track) async -> LookupOutcome {
+        // Album and duration are both optional. I checked /api/get against the
+        // live service rather than assuming: it answers 200 with neither
+        // parameter, and supplying an album only changes *which* record wins
+        // (Bohemian Rhapsody returns id 19079 bare, 19080 with the album). So
+        // the exact-match endpoint is worth trying for every track, not only
+        // for one carrying a full set of tags.
+        guard let artistName = try? getArtistName(for: track), !artistName.isEmpty else {
+            print("⚠️ No artist tag - cannot look up lyrics")
+            return .noMatch
+        }
+        let albumName = (try? getAlbumName(for: track)) ?? nil
+        let duration = Double(track.durationMs ?? 0) / 1000.0
+
+        var reachedServer = false
+
+        // 1. /api/get is an exact match. When it hits it is authoritative, so
+        //    take synced lyrics from it and stop. Previously gated on having an
+        //    album, which skipped it entirely for loose files and most singles -
+        //    exactly the tracks whose tags are least likely to survive a search.
+        var directHit: Lyrics?
+        switch await fetchDirect(
+            trackName: track.title,
+            artistName: artistName,
+            albumName: albumName,
+            duration: duration
+        ) {
+        case .found(let lyrics):
+            reachedServer = true
+            if !lyrics.syncedLyrics.isEmpty || lyrics.isInstrumental {
+                return .found(lyrics)
+            }
+            // Plain-only: hold on to it, but see if search has a synced copy.
+            directHit = lyrics
+        case .noMatch:
+            reachedServer = true
+        case .unreachable:
+            break
+        }
+
+        // 2. Search by track+artist, then by a free-text query. Results are
+        //    scored rather than taken in order - the old code accepted
+        //    `first`, which happily returned a different song by a different
+        //    artist whenever the tags were slightly off.
+        let queries: [[URLQueryItem]] = [
+            [URLQueryItem(name: "track_name", value: track.title),
+             URLQueryItem(name: "artist_name", value: artistName)],
+            [URLQueryItem(name: "q", value: "\(track.title) \(artistName)")]
         ]
 
-        guard let url = components?.url else {
-            return nil
+        var best: (candidate: LRCLibResponse, score: Double)?
+
+        for query in queries {
+            switch await search(query) {
+            case .unreachable:
+                continue
+            case .noMatch:
+                reachedServer = true
+                continue
+            case .found(let results):
+                reachedServer = true
+                for candidate in results {
+                    let score = Self.matchScore(
+                        candidate: candidate,
+                        title: track.title,
+                        artist: artistName,
+                        album: albumName,
+                        duration: duration
+                    )
+                    guard score >= Self.minimumMatchScore else { continue }
+                    // A synced copy is the whole reason to keep looking.
+                    let weighted = score + (Self.hasSynced(candidate) ? 0.15 : 0)
+                    if best == nil || weighted > best!.score {
+                        best = (candidate, weighted)
+                    }
+                }
+                // A confident synced match ends the search; a weaker one still
+                // lets the free-text query have a turn.
+                if let best, Self.hasSynced(best.candidate), best.score >= Self.confidentMatchScore {
+                    break
+                }
+            }
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("Cosmos Music Player/1.0 (https://github.com/clquwu/Cosmos-Music-Player)", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 10
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return nil
+        if let best {
+            let lyrics = parseLRCLibResponse(best.candidate)
+            // Never trade a synced result for a plain one.
+            if !lyrics.syncedLyrics.isEmpty || directHit == nil {
+                print("✅ lrclib match: \(best.candidate.artistName) - \(best.candidate.trackName) (score \(String(format: "%.2f", best.score)))")
+                return .found(lyrics)
             }
-
-            if httpResponse.statusCode == 404 {
-                return nil
-            }
-
-            guard httpResponse.statusCode == 200 else {
-                return nil
-            }
-
-            let lrcResponse = try decoder.decode(LRCLibResponse.self, from: data)
-            return parseLRCLibResponse(lrcResponse)
-
-        } catch {
-            print("❌ Failed to fetch from lrclib.net: \(error)")
-            return nil
         }
+
+        if let directHit {
+            return .found(directHit)
+        }
+
+        return reachedServer ? .noMatch : .unreachable
     }
 
-    private func searchForSyncedLyrics(
+    // MARK: Alternate versions
+
+    /// One lyrics record lrclib holds for roughly this song.
+    struct LyricsCandidate: Identifiable, Equatable, Sendable {
+        let id: Int
+        let trackName: String
+        let artistName: String
+        let albumName: String
+        let duration: TimeInterval
+        let hasSyncedLyrics: Bool
+        let isInstrumental: Bool
+    }
+
+    /// Every record lrclib can offer for a track, best match first.
+    ///
+    /// Automatic matching has to pick one and be silent about the rest, and
+    /// when it picks wrong - a live version, a cover, the wrong edit - there
+    /// was nothing the user could do about it. The search results were already
+    /// being fetched and thrown away; this hands them over instead.
+    func alternatives(for track: Track) async -> [LyricsCandidate] {
+        guard let artistName = try? getArtistName(for: track), !artistName.isEmpty else {
+            return []
+        }
+        let albumName = (try? getAlbumName(for: track)) ?? nil
+        let duration = Double(track.durationMs ?? 0) / 1000.0
+
+        var queries: [[URLQueryItem]] = []
+        if let albumName, !albumName.isEmpty {
+            // Verified against the live service: /api/search does accept an
+            // album, and it discriminates between records of the same song.
+            queries.append([
+                URLQueryItem(name: "track_name", value: track.title),
+                URLQueryItem(name: "artist_name", value: artistName),
+                URLQueryItem(name: "album_name", value: albumName)
+            ])
+        }
+        queries.append([
+            URLQueryItem(name: "track_name", value: track.title),
+            URLQueryItem(name: "artist_name", value: artistName)
+        ])
+        queries.append([URLQueryItem(name: "q", value: "\(track.title) \(artistName)")])
+
+        var seen: Set<Int> = []
+        var scored: [(candidate: LyricsCandidate, score: Double)] = []
+
+        for query in queries {
+            guard case .found(let results) = await search(query) else { continue }
+
+            for response in results where !seen.contains(response.id) {
+                seen.insert(response.id)
+                scored.append((
+                    LyricsCandidate(
+                        id: response.id,
+                        trackName: response.trackName,
+                        artistName: response.artistName,
+                        albumName: response.albumName,
+                        duration: response.duration,
+                        hasSyncedLyrics: Self.hasSynced(response),
+                        isInstrumental: response.instrumental
+                    ),
+                    Self.matchScore(
+                        candidate: response,
+                        title: track.title,
+                        artist: artistName,
+                        album: albumName,
+                        duration: duration
+                    )
+                ))
+            }
+        }
+
+        // Deliberately not filtered by `minimumMatchScore`: this list exists
+        // precisely for when the automatic choice was wrong, so a record the
+        // scorer rejected may be the one the user is looking for. Synced
+        // records still sort above plain ones of equal quality.
+        return scored
+            .sorted { ($0.score + ($0.candidate.hasSyncedLyrics ? 0.15 : 0))
+                    > ($1.score + ($1.candidate.hasSyncedLyrics ? 0.15 : 0)) }
+            .prefix(25)
+            .map(\.candidate)
+    }
+
+    /// Adopts a specific lrclib record and keeps it for offline use.
+    ///
+    /// Uses /api/get/{id}, which the automatic path never touches. Writing it
+    /// through the normal cache is what makes the choice stick: every later
+    /// lookup is a cache hit, so it survives relaunches without any separate
+    /// notion of a "user override" to keep in sync.
+    @discardableResult
+    func useAlternative(_ id: Int, for track: Track) async -> Lyrics? {
+        let components = URLComponents(string: "\(baseURL)/get/\(id)")
+
+        guard case .found(let response) = await perform(components, decoding: LRCLibResponse.self) else {
+            return nil
+        }
+
+        let lyrics = parseLRCLibResponse(response)
+        await store(lyrics, for: track.stableId)
+        print("📝 Adopted lrclib record \(id) for: \(track.title)")
+        return lyrics
+    }
+
+    // MARK: Scoring
+
+    /// Below this a candidate is not this song, and showing it would be worse
+    /// than showing nothing.
+    private static let minimumMatchScore = 0.62
+    /// Good enough to stop looking for a better one.
+    private static let confidentMatchScore = 0.85
+
+    private static func hasSynced(_ response: LRCLibResponse) -> Bool {
+        !(response.syncedLyrics?.isEmpty ?? true)
+    }
+
+    private static func matchScore(
+        candidate: LRCLibResponse,
+        title: String,
+        artist: String,
+        album: String?,
+        duration: Double
+    ) -> Double {
+        let titleScore = similarity(candidate.trackName, title)
+        let artistScore = similarity(candidate.artistName, artist)
+
+        // A different artist is a different song, whatever the title says.
+        guard artistScore >= 0.5 else { return 0 }
+
+        // Nor is a title with essentially nothing in common, however well the
+        // artist and the running time line up - that is just another track from
+        // the same album.
+        guard titleScore >= 0.34 else { return 0 }
+
+        // A recording this far from ours is a different one: a live take, an
+        // extended mix, or simply the wrong entry. The words might still be
+        // right, but synced timestamps from it would be nonsense, and from here
+        // there is no telling which of the two we are about to accept.
+        if duration > 0, candidate.duration > 0, abs(candidate.duration - duration) > 25 {
+            return 0
+        }
+
+        var score = titleScore * 0.45 + artistScore * 0.35 + durationScore(candidate.duration, duration) * 0.20
+
+        // Album agreement is a bonus, never a requirement: lrclib's album names
+        // come from whoever uploaded the lyrics.
+        if let album, !album.isEmpty, similarity(candidate.albumName, album) >= 0.8 {
+            score += 0.05
+        }
+
+        return min(score, 1)
+    }
+
+    private static func durationScore(_ candidate: Double, _ target: Double) -> Double {
+        // No duration to compare against - stay neutral rather than punishing.
+        guard target > 0, candidate > 0 else { return 0.5 }
+
+        let delta = abs(candidate - target)
+        if delta <= 2 { return 1 }          // lrclib's own tolerance for /api/get
+        if delta >= 15 { return 0 }
+        return 1 - ((delta - 2) / 13)
+    }
+
+    /// 1 for the same string once decoration is discounted, tapering to 0.
+    private static func similarity(_ lhs: String, _ rhs: String) -> Double {
+        let a = matchKey(lhs)
+        let b = matchKey(rhs)
+
+        guard !a.isEmpty, !b.isEmpty else { return 0 }
+        if a == b { return 1 }
+
+        let aTokens = Set(a.split(separator: " "))
+        let bTokens = Set(b.split(separator: " "))
+        guard !aTokens.isEmpty, !bTokens.isEmpty else { return 0 }
+
+        // One title containing the other is the normal shape of "Song" vs
+        // "Song (Radio Edit)" once the parenthetical survived stripping.
+        if aTokens.isSubset(of: bTokens) || bTokens.isSubset(of: aTokens) {
+            return 0.9
+        }
+
+        let overlap = Double(aTokens.intersection(bTokens).count)
+        return overlap / Double(aTokens.union(bTokens).count)
+    }
+
+    /// Comparison form of a title or artist: lower-cased, accent-folded, and
+    /// stripped of the decoration tag editors and stores add - featured
+    /// artists, remaster and edition markers, bracketed qualifiers - none of
+    /// which lrclib's contributors spell the same way we do.
+    private static func matchKey(_ raw: String) -> String {
+        var value = raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+
+        // "feat." in any of its spellings, to the end of its clause.
+        value = value.replacingOccurrences(
+            of: #"[\(\[]?\s*(feat|ft|featuring|with)\.?\s+[^\)\]]*[\)\]]?"#,
+            with: " ",
+            options: [.regularExpression]
+        )
+
+        // Trailing edition markers, whether parenthesised or after a dash.
+        value = value.replacingOccurrences(
+            of: #"[\(\[\-]\s*[^\)\]]*\b(remaster(ed)?|remix|version|edit|mono|stereo|deluxe|bonus|live|instrumental|explicit|clean|anniversary|expanded|reissue)\b[^\)\]]*[\)\]]?"#,
+            with: " ",
+            options: [.regularExpression]
+        )
+
+        // Everything that is not a letter, digit or space, then collapse runs.
+        value = value.replacingOccurrences(of: #"[^\p{L}\p{N}\s]"#, with: " ", options: [.regularExpression])
+        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: [.regularExpression])
+
+        return value.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: Requests
+
+    private enum RequestOutcome<T> {
+        case found(T)
+        case noMatch
+        case unreachable
+    }
+
+    private func fetchDirect(
         trackName: String,
         artistName: String,
+        albumName: String?,
         duration: Double
-    ) async -> Lyrics? {
-        var components = URLComponents(string: "\(baseURL)/search")
-        components?.queryItems = [
+    ) async -> RequestOutcome<Lyrics> {
+        var components = URLComponents(string: "\(baseURL)/get")
+        var query = [
             URLQueryItem(name: "track_name", value: trackName),
             URLQueryItem(name: "artist_name", value: artistName)
         ]
-
-        guard let url = components?.url else {
-            return nil
+        // Sent only when known. An empty album_name is not the same as no
+        // album_name, and a zero duration would exclude every real record.
+        if let albumName, !albumName.isEmpty {
+            query.append(URLQueryItem(name: "album_name", value: albumName))
         }
+        if duration > 0 {
+            query.append(URLQueryItem(name: "duration", value: String(format: "%.0f", duration)))
+        }
+        components?.queryItems = query
+
+        switch await perform(components, decoding: LRCLibResponse.self) {
+        case .found(let response): return .found(parseLRCLibResponse(response))
+        case .noMatch: return .noMatch
+        case .unreachable: return .unreachable
+        }
+    }
+
+    private func search(_ queryItems: [URLQueryItem]) async -> RequestOutcome<[LRCLibResponse]> {
+        var components = URLComponents(string: "\(baseURL)/search")
+        components?.queryItems = queryItems
+
+        switch await perform(components, decoding: [LRCLibResponse].self) {
+        case .found(let results): return results.isEmpty ? .noMatch : .found(results)
+        case .noMatch: return .noMatch
+        case .unreachable: return .unreachable
+        }
+    }
+
+    private func perform<T: Decodable>(
+        _ components: URLComponents?,
+        decoding: T.Type
+    ) async -> RequestOutcome<T> {
+        guard let url = components?.url else { return .noMatch }
 
         var request = URLRequest(url: url)
-        request.setValue("Cosmos Music Player/1.0 (https://github.com/clquwu/Cosmos-Music-Player)", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 10
+        request.setValue(
+            "Cosmos Music Player/1.0 (https://github.com/clquwu/Cosmos-Music-Player)",
+            forHTTPHeaderField: "User-Agent"
+        )
+        // Lyrics are cosmetic and the caller is a screen the user is looking at.
+        request.timeoutInterval = 8
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                return nil
+            guard let http = response as? HTTPURLResponse else { return .unreachable }
+            if http.statusCode == 404 { return .noMatch }
+            // 5xx and rate limiting are the server's problem, not proof of
+            // absence - remembering them as a miss would hide lyrics that exist.
+            guard http.statusCode != 429, !(500...599).contains(http.statusCode) else {
+                return .unreachable
             }
+            guard http.statusCode == 200 else { return .noMatch }
 
-            let results = try decoder.decode([LRCLibResponse].self, from: data)
+            return .found(try decoder.decode(T.self, from: data))
 
-            // Filter and prioritize:
-            // 1. Must have synced lyrics
-            // 2. Prefer duration match (within ±2 seconds)
-            // 3. Pick the first matching result
-
-            let syncedResults = results.filter {
-                $0.syncedLyrics != nil && !($0.syncedLyrics?.isEmpty ?? true)
-            }
-
-            // Try exact duration match first (±2 seconds)
-            if let exactMatch = syncedResults.first(where: {
-                abs($0.duration - duration) <= 2
-            }) {
-                print("📝 Found exact duration match with synced lyrics")
-                return parseLRCLibResponse(exactMatch)
-            }
-
-            // Otherwise take first synced result
-            if let firstSynced = syncedResults.first {
-                print("📝 Using first synced lyrics result (duration mismatch)")
-                return parseLRCLibResponse(firstSynced)
-            }
-
-            return nil
-
+        } catch let error as URLError {
+            print("📴 lrclib request failed: \(error.code)")
+            return .unreachable
         } catch {
-            print("❌ Failed to search lrclib.net: \(error)")
-            return nil
+            // Reached the server, could not read what it said.
+            print("❌ Could not decode lrclib response: \(error)")
+            return .noMatch
         }
     }
 
@@ -743,14 +1059,82 @@ actor LyricsManager {
                 let fractionDivisor = pow(10.0, Double(fractionText.count))
                 let fraction = (Double(fractionText) ?? 0) / fractionDivisor
                 let textRange = match.range(at: 4)
-                let text = textRange.location == NSNotFound ? "" : nsLine.substring(with: textRange)
+                let body = textRange.location == NSNotFound ? "" : nsLine.substring(with: textRange)
 
                 let timestamp = (minutes * 60) + seconds + fraction
-                lines.append(LyricsLine(timestamp: timestamp, text: text))
+                let parsed = Self.parseEnhancedBody(body, lineStart: timestamp)
+                lines.append(LyricsLine(
+                    timestamp: timestamp,
+                    text: parsed.text,
+                    words: parsed.words
+                ))
             }
         }
 
         return lines.sorted { ($0.timestamp ?? 0) < ($1.timestamp ?? 0) }
+    }
+
+    private nonisolated static let wordTimestampRegex = try? NSRegularExpression(
+        pattern: #"<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>"#
+    )
+
+    /// Splits an Enhanced LRC line body into its timed words.
+    ///
+    /// Enhanced LRC (the "A2" extension) puts a `<mm:ss.xx>` before each word,
+    /// inside a line that still carries its ordinary `[mm:ss.xx]` start. Those
+    /// inline tags were previously left in the text and rendered literally, so
+    /// a track with word-timed embedded lyrics displayed
+    /// `<00:12.00>Never <00:12.45>gonna` on screen. Stripping them is a fix in
+    /// its own right; keeping what they said is what makes an exact sweep
+    /// possible instead of an estimated one.
+    ///
+    /// - Returns: the text with the tags removed, and the words when the line
+    ///   actually carried any.
+    nonisolated static func parseEnhancedBody(
+        _ body: String,
+        lineStart: TimeInterval
+    ) -> (text: String, words: [LyricsWord]?) {
+        guard let regex = wordTimestampRegex else { return (body, nil) }
+
+        let ns = body as NSString
+        let matches = regex.matches(in: body, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return (body, nil) }
+
+        var words: [LyricsWord] = []
+        var text = ""
+
+        // Anything before the first tag is sung from the line's own start.
+        let prefix = ns.substring(with: NSRange(location: 0, length: matches[0].range.location))
+        if !prefix.trimmingCharacters(in: .whitespaces).isEmpty {
+            words.append(LyricsWord(timestamp: lineStart, text: prefix))
+            text += prefix
+        }
+
+        for (index, match) in matches.enumerated() {
+            let from = match.range.upperBound
+            let to = index + 1 < matches.count ? matches[index + 1].range.location : ns.length
+            guard to >= from else { continue }
+
+            let chunk = ns.substring(with: NSRange(location: from, length: to - from))
+            words.append(LyricsWord(timestamp: seconds(of: match, in: ns), text: chunk))
+            text += chunk
+        }
+
+        return (text, words.isEmpty ? nil : words)
+    }
+
+    private nonisolated static func seconds(of match: NSTextCheckingResult, in text: NSString) -> TimeInterval {
+        let minutes = Double(text.substring(with: match.range(at: 1))) ?? 0
+        let seconds = Double(text.substring(with: match.range(at: 2))) ?? 0
+
+        let fractionRange = match.range(at: 3)
+        guard fractionRange.location != NSNotFound else {
+            return minutes * 60 + seconds
+        }
+
+        let fractionText = text.substring(with: fractionRange)
+        let fraction = (Double(fractionText) ?? 0) / pow(10, Double(fractionText.count))
+        return minutes * 60 + seconds + fraction
     }
 
     private func parseLRCLibResponse(_ response: LRCLibResponse) -> Lyrics {
@@ -830,6 +1214,44 @@ actor LyricsManager {
         }
     }
 
+    // MARK: - Remembered misses
+
+    /// How long a confirmed "lrclib does not have this song" is trusted.
+    /// Short enough that lyrics added upstream are picked up before long,
+    /// long enough that reopening a screen is not three network round trips.
+    private static let missLifetime: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Kept beside the hits but under a different extension, so `loadCacheFromDisk`
+    /// (which only reads `.json`) ignores them and older builds are unaffected.
+    private func missFileURL(trackId: String) -> URL? {
+        getLyricsCacheDirectory()?.appendingPathComponent("\(trackId).miss")
+    }
+
+    private func isMissRemembered(for stableId: String) -> Bool {
+        guard let url = missFileURL(trackId: stableId),
+              let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let recordedAt = attributes[.modificationDate] as? Date else {
+            return false
+        }
+
+        guard Date().timeIntervalSince(recordedAt) < Self.missLifetime else {
+            try? fileManager.removeItem(at: url)
+            return false
+        }
+
+        return true
+    }
+
+    private func rememberMiss(for stableId: String) async {
+        guard let url = missFileURL(trackId: stableId) else { return }
+        try? Data().write(to: url, options: .atomic)
+    }
+
+    private func forgetMiss(for stableId: String) {
+        guard let url = missFileURL(trackId: stableId) else { return }
+        try? fileManager.removeItem(at: url)
+    }
+
     private func loadCacheFromDisk() async {
         guard let cacheDir = getLyricsCacheDirectory() else {
             print("❌ Failed to get lyrics cache directory")
@@ -863,6 +1285,54 @@ actor LyricsManager {
             }
         } catch {
             print("❌ Failed to load lyrics cache from disk: \(error)")
+        }
+    }
+
+    /// Moves cached lyrics onto new stable IDs after the library re-keys tracks.
+    ///
+    /// Both the memory cache and the on-disk `lyrics-cache/<stableId>.json`
+    /// are keyed by stable ID, outside the database, so nothing carried them
+    /// across a re-key. A re-keyed track silently lost its lyrics and re-fetched
+    /// them from lrclib on next open.
+    func migrateStableIds(_ remapping: [String: String]) {
+        guard let cacheDir = getLyricsCacheDirectory() else { return }
+        var movedCount = 0
+
+        for (oldStableId, newStableId) in remapping where oldStableId != newStableId {
+            if let cached = cache.removeValue(forKey: oldStableId), cache[newStableId] == nil {
+                cache[newStableId] = cached
+            }
+
+            // The miss marker is re-keyed too, or a re-keyed track pays for the
+            // same three fruitless requests again.
+            let oldMiss = cacheDir.appendingPathComponent("\(oldStableId).miss")
+            if fileManager.fileExists(atPath: oldMiss.path) {
+                let newMiss = cacheDir.appendingPathComponent("\(newStableId).miss")
+                try? fileManager.removeItem(at: newMiss)
+                try? fileManager.moveItem(at: oldMiss, to: newMiss)
+            }
+
+            let oldURL = cacheDir.appendingPathComponent("\(oldStableId).json")
+            let newURL = cacheDir.appendingPathComponent("\(newStableId).json")
+
+            guard fileManager.fileExists(atPath: oldURL.path) else { continue }
+
+            // The surviving row's own lyrics win; this one is then redundant.
+            if fileManager.fileExists(atPath: newURL.path) {
+                try? fileManager.removeItem(at: oldURL)
+                continue
+            }
+
+            do {
+                try fileManager.moveItem(at: oldURL, to: newURL)
+                movedCount += 1
+            } catch {
+                print("⚠️ Failed to re-key cached lyrics \(oldStableId): \(error)")
+            }
+        }
+
+        if movedCount > 0 {
+            print("🔁 Lyrics cache: re-keyed \(movedCount) entr(ies)")
         }
     }
 

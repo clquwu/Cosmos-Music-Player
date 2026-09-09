@@ -32,7 +32,7 @@ final class IntentEntityStore {
 
     /// Favorites first — shown as suggestions in Shortcuts parameter pickers.
     func suggestedSongEntities(limit: Int = 50) throws -> [SongEntity] {
-        let favorites = try database.getTracksByStableIds(database.getFavorites())
+        let favorites = try database.getTracksByStableIdsPreservingOrder(database.getFavorites())
         var tracks = favorites
         if tracks.count < limit {
             let favoriteIds = Set(favorites.map(\.stableId))
@@ -167,7 +167,7 @@ final class IntentEntityStore {
         try playlists.compactMap { playlist in
             guard let playlistId = playlist.id else { return nil }
             let items = try database.getPlaylistItems(playlistId: playlistId)
-            let tracks = try database.getTracksByStableIds(items.map(\.trackStableId))
+            let tracks = try database.getTracksByStableIdsPreservingOrder(items.map(\.trackStableId))
             let totalDuration = TimeInterval(tracks.reduce(0) { $0 + ($1.durationMs ?? 0) }) / 1000.0
             return PlaylistEntity(playlist: playlist, trackCount: items.count, totalDuration: totalDuration)
         }

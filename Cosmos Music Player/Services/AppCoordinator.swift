@@ -69,6 +69,7 @@ class AppCoordinator: ObservableObject {
     let fileCleanupManager = FileCleanupManager.shared
     
     private var cancellables = Set<AnyCancellable>()
+    private var postIndexMaintenanceTask: Task<Void, Never>?
     
     private init() {
         setupBindings()
@@ -91,9 +92,12 @@ class AppCoordinator: ObservableObject {
         NotificationCenter.default.post(name: NSNotification.Name("iCloudAuthStatusChanged"), object: nil)
 
         // Check if we should auto-scan based on last scan date
-        var settings = DeleteSettings.load()
+        let settings = DeleteSettings.load()
         print("📅 Current lastLibraryScanDate: \(settings.lastLibraryScanDate?.description ?? "nil")")
-        let shouldAutoScan = shouldPerformAutoScan(lastScanDate: settings.lastLibraryScanDate)
+        let shouldAutoScan = shouldPerformAutoScan(
+            lastScanDate: settings.lastLibraryScanDate,
+            interval: settings.libraryScanInterval
+        )
 
         if shouldAutoScan {
             print("🔄 App launched after long time - starting automatic library scan")
@@ -110,8 +114,6 @@ class AppCoordinator: ObservableObject {
             // Only auto-scan if it's been a while or never scanned
             if shouldAutoScan {
                 await startLibraryIndexing()
-                settings.lastLibraryScanDate = Date()
-                settings.save()
             }
             print("App initialized with iCloud sync")
 
@@ -121,8 +123,6 @@ class AppCoordinator: ObservableObject {
             // Still initialize in local mode for functionality
             if shouldAutoScan {
                 await startOfflineLibraryIndexing()
-                settings.lastLibraryScanDate = Date()
-                settings.save()
             }
             print("App initialized in local mode - iCloud not signed in")
 
@@ -132,8 +132,6 @@ class AppCoordinator: ObservableObject {
             // Still initialize in local mode for functionality
             if shouldAutoScan {
                 await startOfflineLibraryIndexing()
-                settings.lastLibraryScanDate = Date()
-                settings.save()
             }
             print("App initialized in local mode - iCloud container unavailable")
 
@@ -142,8 +140,6 @@ class AppCoordinator: ObservableObject {
             showSyncAlert = true
             if shouldAutoScan {
                 await startOfflineLibraryIndexing()
-                settings.lastLibraryScanDate = Date()
-                settings.save()
             }
             print("App initialized in local mode - iCloud authentication required")
 
@@ -152,36 +148,42 @@ class AppCoordinator: ObservableObject {
             // No error - this is true offline mode
             if shouldAutoScan {
                 await startOfflineLibraryIndexing()
-                settings.lastLibraryScanDate = Date()
-                settings.save()
             }
             print("App initialized in offline mode")
         }
 
-        // Restore UI state only to show user what was playing without interrupting other apps
-        Task {
-            await playerEngine.restoreUIStateOnly()
-        }
+        // Finish state restoration before publishing initialization. The player
+        // also guards this work with its playback-intent generation so an
+        // already-arrived Siri or CarPlay selection still wins.
+        await playerEngine.restoreUIStateOnly()
 
         isInitialized = true
     }
 
-    private func shouldPerformAutoScan(lastScanDate: Date?) -> Bool {
-        // If never scanned before, definitely scan
+    private func shouldPerformAutoScan(lastScanDate: Date?, interval: LibraryScanInterval) -> Bool {
+        // A library that has never been scanned has to be indexed once, even
+        // under "manual only" - otherwise a fresh install shows nothing and
+        // there is no obvious way to find out why.
         guard let lastScanDate = lastScanDate else {
             print("🆕 Never scanned before - will perform scan")
             return true
         }
 
-        // Check if it's been more than 1 hour since last scan
-        // This prevents scanning when app was just backgrounded/resumed
+        guard let cooldownHours = interval.cooldownHours else {
+            print("⏭️ Automatic scanning is off - use the sync button")
+            return false
+        }
+
+        // iOS kills backgrounded apps freely, so most "launches" are cold
+        // starts. Without this window a large library was fully rescanned
+        // nearly every time the app was opened.
         let hoursSinceLastScan = Date().timeIntervalSince(lastScanDate) / 3600
-        let shouldScan = hoursSinceLastScan >= 1.0
+        let shouldScan = hoursSinceLastScan >= cooldownHours
 
         if shouldScan {
-            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - will scan")
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan))h ago (limit \(cooldownHours)h) - will scan")
         } else {
-            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan)) hours ago - skipping")
+            print("⏰ Last scan was \(String(format: "%.1f", hoursSinceLastScan))h ago (limit \(cooldownHours)h) - skipping")
         }
 
         return shouldScan
@@ -197,8 +199,12 @@ class AppCoordinator: ObservableObject {
             return .notSignedIn
         }
         
-        // Check if we can get the container URL
-        guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
+        // Resolve through StateManager so this successful availability check
+        // populates the exact cache used by LibraryIndexer. A separate direct
+        // lookup could report success while StateManager retained an earlier
+        // nil result, leaving fallback scans local-only for the whole process.
+        guard StateManager.shared.checkiCloudAvailability(),
+              let containerURL = StateManager.shared.resolveiCloudContainerURL() else {
             return .containerUnavailable
         }
         
@@ -299,12 +305,18 @@ class AppCoordinator: ObservableObject {
     }
     
     private func setupBindings() {
-        libraryIndexer.$isIndexing
-            .sink { [weak self] isIndexing in
-                if !isIndexing {
-                    Task { @MainActor in
-                        await self?.onIndexingCompleted()
+        libraryIndexer.$completedScanGeneration
+            .compactMap { $0 }
+            .sink { [weak self] generation in
+                Task { @MainActor in
+                    guard let self,
+                          self.libraryIndexer.completedScanGeneration == generation else {
+                        return
                     }
+                    await self.onIndexingCompleted(
+                        generation: generation,
+                        allowDestructiveMaintenance: self.libraryIndexer.lastCompletedScanWasAuthoritative
+                    )
                 }
             }
             .store(in: &cancellables)
@@ -340,7 +352,17 @@ class AppCoordinator: ObservableObject {
         print("🔐 iCloud authentication error detected - switched to offline mode")
     }
     
-    private func onIndexingCompleted() async {
+    private func onIndexingCompleted(
+        generation: Int,
+        allowDestructiveMaintenance: Bool
+    ) async {
+        guard libraryIndexer.completedScanGeneration == generation else { return }
+
+        // Cancel an older delayed cleanup immediately, even if restoration
+        // below later fails before a replacement can be scheduled.
+        postIndexMaintenanceTask?.cancel()
+        postIndexMaintenanceTask = nil
+
         do {
             let favorites = try databaseManager.getFavorites()
 
@@ -382,17 +404,50 @@ class AppCoordinator: ObservableObject {
             // Update widget with playlists
             syncPlaylistsToCloud()
 
-            // Run heavier maintenance after UI-critical startup work finishes
-            scheduleDeferredPostIndexMaintenance()
+            // Run heavier, potentially destructive maintenance only after a
+            // clean scan. A failed or partial generation still restores cloud
+            // state above, but cannot prove that an absent file was deleted.
+            guard libraryIndexer.completedScanGeneration == generation else { return }
+            scheduleDeferredPostIndexMaintenance(
+                generation: generation,
+                isAuthoritative: allowDestructiveMaintenance
+            )
         } catch {
             print("Failed to save favorites after indexing: \(error)")
         }
     }
 
-    private func scheduleDeferredPostIndexMaintenance() {
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 15_000_000_000)
-            await self?.runPostIndexMaintenance()
+    private func scheduleDeferredPostIndexMaintenance(
+        generation: Int,
+        isAuthoritative: Bool
+    ) {
+        // A newer completion, including a failure, invalidates maintenance
+        // queued by an older generation.
+        postIndexMaintenanceTask?.cancel()
+        postIndexMaintenanceTask = nil
+
+        guard isAuthoritative else {
+            print("🛡️ Skipping destructive maintenance after a failed or partial scan")
+            return
+        }
+
+        postIndexMaintenanceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 15_000_000_000)
+            } catch {
+                return
+            }
+
+            guard let self,
+                  !self.libraryIndexer.isIndexing,
+                  self.libraryIndexer.completedScanGeneration == generation,
+                  self.libraryIndexer.lastCompletedScanWasAuthoritative else {
+                return
+            }
+            await self.runPostIndexMaintenance()
+            if self.libraryIndexer.completedScanGeneration == generation {
+                self.postIndexMaintenanceTask = nil
+            }
         }
     }
 
@@ -1015,7 +1070,7 @@ class AppCoordinator: ObservableObject {
                 if let firstPlaylist = playlists.first {
                     let playlistItems = try databaseManager.getPlaylistItems(playlistId: firstPlaylist.id!)
                     let trackStableIds = playlistItems.map { $0.trackStableId }
-                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    let tracks = try databaseManager.getTracksByStableIdsPreservingOrder(trackStableIds)
                     if let firstTrack = tracks.first {
                         await playerEngine.playTrack(firstTrack, queue: tracks)
                     }
@@ -1050,9 +1105,27 @@ class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Playlist recency is bookkeeping, not a prerequisite for playback, so a
+    /// database that is unavailable must never turn a Siri request that
+    /// actually started playing into a failure.
+    ///
+    /// Deliberately no yield before the write. `DatabaseSuspensionCoordinator`
+    /// resumes GRDB synchronously from `PlayerEngine`'s `isLoadingTrack` and
+    /// `isPlaying` observers - by design, see the note on
+    /// `setPlaybackActivityActive` - so by the time the awaited `playTrack`
+    /// above returns, the resume has already happened twice. The `catch` is
+    /// what makes this safe, not any ordering trick.
+    private func recordSiriPlaylistPlaybackIfPossible(playlistId: Int64) async {
+        do {
+            try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+        } catch {
+            print("⚠️ Siri playback started, but playlist recency could not be updated: \(error)")
+        }
+    }
+
     private func handleDirectPlayback(identifiers: [String]) async {
         do {
-            let tracks = try databaseManager.getTracksByStableIds(identifiers)
+            let tracks = try databaseManager.getTracksByStableIdsPreservingOrder(identifiers)
             if let firstTrack = tracks.first {
                 // Set up background session BEFORE starting playback for Siri
                 await prepareSiriAudioSession()
@@ -1098,11 +1171,11 @@ class AppCoordinator: ObservableObject {
                 if let firstPlaylist = playlists.first, let playlistId = firstPlaylist.id {
                     let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
                     let trackStableIds = playlistItems.map { $0.trackStableId }
-                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    let tracks = try databaseManager.getTracksByStableIdsPreservingOrder(trackStableIds)
                     if let firstTrack = tracks.first {
-                        // Update playlist last played time
-                        try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+                        await prepareSiriAudioSession()
                         await playerEngine.playTrack(firstTrack, queue: tracks)
+                        await recordSiriPlaylistPlaybackIfPossible(playlistId: playlistId)
                         completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                     } else {
                         completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
@@ -1116,9 +1189,15 @@ class AppCoordinator: ObservableObject {
                 if let firstPlaylist = playlists.first, let playlistId = firstPlaylist.id {
                     let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
                     let trackStableIds = playlistItems.map { $0.trackStableId }
-                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    let tracks = try databaseManager.getTracksByStableIdsPreservingOrder(trackStableIds)
                     if let firstTrack = tracks.first {
+                        // Same preparation as every other playlist branch here:
+                        // Siri starts playback with the app in the background,
+                        // so the session has to be claimed before the engine
+                        // touches it.
+                        await prepareSiriAudioSession()
                         await playerEngine.playTrack(firstTrack, queue: tracks)
+                        await recordSiriPlaylistPlaybackIfPossible(playlistId: playlistId)
                         completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                     } else {
                         completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
@@ -1132,12 +1211,12 @@ class AppCoordinator: ObservableObject {
                 if let playlistId = Int64(playlistIdString) {
                     let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
                     let trackStableIds = playlistItems.map { $0.trackStableId }
-                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    let tracks = try databaseManager.getTracksByStableIdsPreservingOrder(trackStableIds)
                     print("🎤 Found \(tracks.count) tracks in playlist \(playlistId)")
                     if let firstTrack = tracks.first {
-                        // Update playlist last played time
-                        try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+                        await prepareSiriAudioSession()
                         await playerEngine.playTrack(firstTrack, queue: tracks)
+                        await recordSiriPlaylistPlaybackIfPossible(playlistId: playlistId)
                         completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                     } else {
                         print("❌ No tracks found in playlist \(playlistId)")
@@ -1153,11 +1232,11 @@ class AppCoordinator: ObservableObject {
                 if let firstPlaylist = playlists.first, let playlistId = firstPlaylist.id {
                     let playlistItems = try databaseManager.getPlaylistItems(playlistId: playlistId)
                     let trackStableIds = playlistItems.map { $0.trackStableId }
-                    let tracks = try databaseManager.getTracksByStableIds(trackStableIds)
+                    let tracks = try databaseManager.getTracksByStableIdsPreservingOrder(trackStableIds)
                     if let firstTrack = tracks.first {
-                        // Update playlist last played time
-                        try databaseManager.updatePlaylistLastPlayed(playlistId: playlistId)
+                        await prepareSiriAudioSession()
                         await playerEngine.playTrack(firstTrack, queue: tracks)
+                        await recordSiriPlaylistPlaybackIfPossible(playlistId: playlistId)
                         completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
                     } else {
                         completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
@@ -1226,7 +1305,9 @@ class AppCoordinator: ObservableObject {
                 }
                 if let playlist = try databaseManager.searchPlaylists(query: name).first, let playlistId = playlist.id {
                     let items = try databaseManager.getPlaylistItems(playlistId: playlistId)
-                    let playlistTracks = try databaseManager.getTracksByStableIds(items.map { $0.trackStableId })
+                    let playlistTracks = try databaseManager.getTracksByStableIdsPreservingOrder(
+                        items.map { $0.trackStableId }
+                    )
                     if let firstTrack = playlistTracks.first {
                         await prepareSiriAudioSession()
                         await playerEngine.playTrack(firstTrack, queue: playlistTracks)
@@ -1260,7 +1341,7 @@ class AppCoordinator: ObservableObject {
                     if favoriteIds.contains(identifier) {
                         // This is a favorite track - queue all favorites
                         print("🎵 Playing favorite track with favorites queue")
-                        let favoritesTracks = try databaseManager.getTracksByStableIds(favoriteIds)
+                        let favoritesTracks = try databaseManager.getTracksByStableIdsPreservingOrder(favoriteIds)
                         await playerEngine.playTrack(track, queue: favoritesTracks)
                     } else {
                         // Regular track - queue all tracks

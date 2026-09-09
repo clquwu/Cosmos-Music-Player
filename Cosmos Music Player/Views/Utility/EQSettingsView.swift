@@ -42,7 +42,7 @@ struct EQSettingsView: View {
                                 Text(preset.name)
                                     .font(.headline)
 
-                                Text("Manual Parametric EQ")
+                                Text(Localized.manualParametricEQ)
                                     .font(.caption)
                                     .foregroundColor(.green)
                             }
@@ -89,7 +89,7 @@ struct EQSettingsView: View {
                     }
                 }
 
-                Button("Create Manual EQ") {
+                Button(Localized.createManualEQ) {
                     showingCreateManual = true
                 }
                 .foregroundColor(.green)
@@ -256,7 +256,7 @@ struct CreateManualEQView: View {
                     TextField(Localized.enterPresetName, text: $presetName)
                 }
 
-                Section("Bands") {
+                Section(Localized.bands) {
                     Stepper(value: $bandCount, in: 0...16) {
                         Text("\(bandCount) / 16")
                     }
@@ -272,17 +272,17 @@ struct CreateManualEQView: View {
 
                 Section(Localized.presetInfo) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Create a parametric EQ preset with up to 16 fully editable bands.")
+                        Text(Localized.createParametricEQDescription)
                             .font(.caption)
                             .foregroundColor(.secondary)
 
-                        Text("You can edit frequency, gain, and Q for every band after creation.")
+                        Text(Localized.editParametricBandsDescription)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
             }
-            .navigationTitle("Create Manual EQ")
+            .navigationTitle(Localized.createManualEQ)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -357,13 +357,13 @@ struct ManualEQEditorView: View {
                             Text(preset.name)
                                 .font(.headline)
                             Spacer()
-                            Text("\(editableBandCount) / \(maxBands) bands")
+                            Text(Localized.bandCount(used: editableBandCount, maximum: maxBands))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
 
-                    Section("Parametric Editor") {
+                    Section(Localized.parametricEditor) {
                         ParametricEQGraphView(
                             frequencies: $bandFrequencies,
                             gains: $bandGains,
@@ -376,13 +376,13 @@ struct ManualEQEditorView: View {
                         .frame(height: 260)
 
                         HStack {
-                            Button("Add Band") {
+                            Button(Localized.addBand) {
                                 addBand()
                             }
                             .disabled(editableBandCount >= maxBands)
                             .buttonStyle(.bordered)
 
-                            Button("Remove Band") {
+                            Button(Localized.removeBand) {
                                 removeSelectedBand()
                             }
                             .disabled(editableBandCount == 0)
@@ -391,12 +391,12 @@ struct ManualEQEditorView: View {
                     }
 
                     if let selectedBandIndex, selectedBandIndex < editableBandCount {
-                        Section("Selected Band") {
-                            Text("Band \(selectedBandIndex + 1)")
+                        Section(Localized.selectedBand) {
+                            Text(Localized.bandNumber(selectedBandIndex + 1))
                                 .font(.headline)
 
                             HStack {
-                                Text("Frequency")
+                                Text(Localized.frequency)
                                 Spacer()
                                 Text(formatFrequency(bandFrequencies[selectedBandIndex]))
                                     .foregroundColor(.secondary)
@@ -411,7 +411,7 @@ struct ManualEQEditorView: View {
                             .tint(.orange)
 
                             HStack {
-                                Text("Gain")
+                                Text(Localized.gain)
                                 Spacer()
                                 Text("\(bandGains[selectedBandIndex], specifier: "%.1f") dB")
                                     .foregroundColor(.secondary)

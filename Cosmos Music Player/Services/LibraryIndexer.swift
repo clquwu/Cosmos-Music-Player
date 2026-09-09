@@ -8,11 +8,102 @@
 import Foundation
 import CryptoKit
 import AVFoundation
+import GRDB
 import SFBAudioEngine
+
+/// Resume gate for a race: whichever racer finishes first wins and the others
+/// are dropped, so the winner never waits on the loser.
+private final class OneShotResume<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+    private var value: T?
+
+    func attach(_ continuation: CheckedContinuation<T, Never>) {
+        lock.lock()
+        if let value {
+            lock.unlock()
+            continuation.resume(returning: value)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func finish(_ value: T) {
+        lock.lock()
+        guard self.value == nil else {
+            lock.unlock()
+            return
+        }
+        self.value = value
+        let waiting = continuation
+        self.continuation = nil
+        lock.unlock()
+        waiting?.resume(returning: value)
+    }
+}
+
+/// What a `withHardTimeout` race produced. The error travels through the gate
+/// inside this box because `any Error` is not Sendable: it is handed from the
+/// one racer that produced it to the single waiter and never shared.
+private enum HardTimeoutOutcome<T: Sendable>: @unchecked Sendable {
+    case success(T)
+    case failure(any Error)
+}
+
+/// Runs `operation` under a deadline and RETURNS at that deadline even when the
+/// operation is wedged. A throwing task group cannot do this: it awaits its
+/// children before unwinding, and cancellation is cooperative, while several
+/// parsers block inside a non-cancellable NSFileCoordinator read. So one
+/// genuinely stuck file used to freeze the whole scan no matter what the
+/// timeout said. The loser is cancelled and then abandoned to finish on its own.
+private func withHardTimeout<T: Sendable, E: Error & Sendable>(
+    nanoseconds: UInt64,
+    timeoutError: E,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let gate = OneShotResume<HardTimeoutOutcome<T>>()
+
+    let work = Task.detached(priority: .utility) {
+        do {
+            let value = try await operation()
+            gate.finish(.success(value))
+        } catch {
+            gate.finish(.failure(error))
+        }
+    }
+
+    let timer = Task.detached(priority: .utility) {
+        try? await Task.sleep(nanoseconds: nanoseconds)
+        guard !Task.isCancelled else { return }
+        gate.finish(.failure(timeoutError))
+        work.cancel()
+    }
+    defer { timer.cancel() }
+
+    let outcome = await withTaskCancellationHandler {
+        await withCheckedContinuation { gate.attach($0) }
+    } onCancel: {
+        work.cancel()
+        timer.cancel()
+        gate.finish(.failure(CancellationError()))
+    }
+
+    switch outcome {
+    case .success(let value):
+        return value
+    case .failure(let error):
+        throw error
+    }
+}
 
 enum LibraryIndexerError: Error {
     case parseTimeout
     case metadataParsingFailed
+    /// FileManager could not enumerate a directory. Distinct from "the
+    /// directory is empty": callers must not reconcile deletions against a
+    /// root they were never able to read.
+    case directoryNotEnumerable(URL)
 }
 
 private struct ParsedAudioFile {
@@ -26,19 +117,432 @@ private struct FileFingerprint {
     let fileSize: Int64?
 }
 
+/// The readable portion of a filesystem walk and whether it is safe to infer
+/// deletions from that walk. A partial result is still useful for importing new
+/// files, but must never be used for reconciliation or folder-playlist sync.
+private struct MusicFileEnumeration {
+    let files: [URL]
+    let isComplete: Bool
+}
+
+/// Files that failed to index, and what they looked like when they failed.
+///
+/// A per-file failure withholds `lastLibraryScanDate` and marks the scan
+/// non-authoritative. That is right for a *transient* failure - an I/O error, a
+/// file being written while it was read - but wrong for a file that is simply
+/// broken: one permanently unparseable track otherwise meant a full rescan on
+/// every launch and every foreground for ever, and deferred post-index
+/// maintenance (bookmark orphan checks, relationship verification, cache
+/// pruning) that never ran again.
+///
+/// So a failure only counts against the scan the first time, and again whenever
+/// the file changes. A matching path + fingerprint means "the same failure you
+/// already knew about", which is not new information about the library.
+@MainActor
+private enum ScanFailureLog {
+    private static let defaultsKey = "LibraryScanFileFailures"
+
+    struct Record: Codable, Equatable {
+        var modificationDate: Int64?
+        var fileSize: Int64?
+    }
+
+    private static func load() -> [String: Record] {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              let decoded = try? JSONDecoder().decode([String: Record].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    private static func save(_ records: [String: Record]) {
+        guard let data = try? JSONEncoder().encode(records) else { return }
+        UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    /// Records a failure.
+    /// - Returns: whether this failure is new information about the library,
+    ///   i.e. whether the caller should treat the scan as unsuccessful.
+    static func noteFailure(at path: String, fingerprint: FileFingerprint) -> Bool {
+        let key = DatabaseManager.standardizedPath(path)
+        let record = Record(
+            modificationDate: fingerprint.modificationDate,
+            fileSize: fingerprint.fileSize
+        )
+
+        var records = load()
+        // An unreadable file gives no fingerprint at all. Two nil-fingerprint
+        // failures are not provably the same failure, so those always count.
+        if record.modificationDate != nil || record.fileSize != nil,
+           records[key] == record {
+            return false
+        }
+
+        records[key] = record
+        save(records)
+        return true
+    }
+
+    /// Forgets a file that indexed successfully, so a genuinely new failure
+    /// later still counts.
+    static func clearFailure(at path: String) {
+        let key = DatabaseManager.standardizedPath(path)
+        var records = load()
+        guard records.removeValue(forKey: key) != nil else { return }
+        save(records)
+    }
+
+    /// Drops records for files that are no longer on disk. Called at the start
+    /// of every scan, alongside the exclusion prune.
+    static func pruneMissingFiles() {
+        let records = load()
+        guard !records.isEmpty else { return }
+
+        let surviving = records.filter { path, _ in
+            FileManager.default.fileExists(atPath: path)
+        }
+        guard surviving.count != records.count else { return }
+        save(surviving)
+        print("🧹 Cleared \(records.count - surviving.count) stale scan-failure record(s)")
+    }
+}
+
+/// `ScanFailureLog`, for whole roots rather than individual files.
+///
+/// A root that cannot be enumerated has to withhold `lastLibraryScanDate`
+/// once, so the scan is retried instead of the cooldown suppressing it with
+/// part of the library missing. But it must not withhold it *for ever*: a
+/// permanently unreadable root then means the date is never written at all,
+/// and `shouldPerformAutoScan` treats a nil date as "never scanned" and runs
+/// a full scan on every launch and every foreground - overriding even the
+/// user's "manual only" setting, which is the one case where that is most
+/// obviously wrong.
+///
+/// So the first failure counts and a repeat of the same failure does not,
+/// exactly as `ScanFailureLog` does for a file that is simply broken. There
+/// is no fingerprint to compare here - a directory's modification date
+/// changes whenever its contents do, which says nothing about whether it can
+/// be read - so "did this same root fail last time" is the whole test.
+private enum ScanRootFailureLog {
+    private static let defaultsKey = "LibraryScanRootFailures"
+
+    private static func load() -> Set<String> {
+        guard let stored = UserDefaults.standard.array(forKey: defaultsKey) as? [String] else {
+            return []
+        }
+        return Set(stored)
+    }
+
+    private static func save(_ roots: Set<String>) {
+        if roots.isEmpty {
+            UserDefaults.standard.removeObject(forKey: defaultsKey)
+        } else {
+            UserDefaults.standard.set(Array(roots), forKey: defaultsKey)
+        }
+    }
+
+    /// Records that a root could not be enumerated.
+    /// - Returns: whether this is new information about the library, i.e.
+    ///   whether the caller should treat the scan as unsuccessful.
+    static func noteFailure(at path: String) -> Bool {
+        let key = DatabaseManager.standardizedPath(path)
+        var roots = load()
+        guard roots.insert(key).inserted else { return false }
+        save(roots)
+        return true
+    }
+
+    /// Forgets a root that enumerated cleanly, so a genuinely new failure
+    /// later still counts.
+    static func clearFailure(at path: String) {
+        let key = DatabaseManager.standardizedPath(path)
+        var roots = load()
+        guard roots.remove(key) != nil else { return }
+        save(roots)
+    }
+}
+
+private enum ExternalFileProcessingResult {
+    case inserted
+    case alreadyPresent
+    case failed
+
+    var succeeded: Bool {
+        switch self {
+        case .inserted, .alreadyPresent:
+            return true
+        case .failed:
+            return false
+        }
+    }
+}
+
+/// The external-bookmark plist is shared by scans, playback, and cleanup.
+/// Keeping its cached state behind one actor prevents main-thread whole-file
+/// reads and turns every mutation into a serialized atomic read-modify-write.
+actor ExternalBookmarkStore {
+    static let shared = ExternalBookmarkStore()
+
+    struct Resolution: Sendable {
+        let url: URL
+        /// The newest bookmark data that was successfully persisted. Callers
+        /// use this when a moved file also requires its stable-ID key to move.
+        let bookmarkData: Data
+        let wasStale: Bool
+        let wasRefreshed: Bool
+    }
+
+    private let fileURL: URL
+    private var cachedBookmarks: [String: Data]?
+
+    private init() {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        fileURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
+    }
+
+    func allBookmarks() throws -> [String: Data] {
+        try loadBookmarksIfNeeded()
+    }
+
+    func bookmarkData(for stableID: String) throws -> Data? {
+        try loadBookmarksIfNeeded()[stableID]
+    }
+
+    /// Resolves a stored bookmark and repairs stale data without throwing away
+    /// the usable URL returned by Foundation.
+    ///
+    /// URL bookmark resolution can succeed while setting `isStale`. The URL is
+    /// still the authority needed for this access; stale means only that fresh
+    /// bookmark bytes should be persisted for the next launch. Refresh failure
+    /// therefore leaves the old bookmark intact and returns the resolved URL so
+    /// the current scan/playback attempt can still call
+    /// `startAccessingSecurityScopedResource()`.
+    func resolveAndRefreshBookmark(for stableID: String) throws -> Resolution? {
+        var bookmarks = try loadBookmarksIfNeeded()
+        guard let bookmarkData = bookmarks[stableID] else { return nil }
+
+        var isStale = false
+        let resolvedURL = try URL(
+            resolvingBookmarkData: bookmarkData,
+            options: .withoutUI,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        )
+
+        guard isStale else {
+            return Resolution(
+                url: resolvedURL,
+                bookmarkData: bookmarkData,
+                wasStale: false,
+                wasRefreshed: false
+            )
+        }
+
+        do {
+            let refreshedBookmarkData = try resolvedURL.bookmarkData(
+                options: .minimalBookmark,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            bookmarks[stableID] = refreshedBookmarkData
+            try persist(bookmarks)
+            return Resolution(
+                url: resolvedURL,
+                bookmarkData: refreshedBookmarkData,
+                wasStale: true,
+                wasRefreshed: true
+            )
+        } catch {
+            // Resolution itself succeeded. Do not turn a refresh/persistence
+            // problem into a sandbox-denied raw-path fallback for this access.
+            print("⚠️ Could not persist refreshed external bookmark for \(resolvedURL.lastPathComponent): \(error)")
+            return Resolution(
+                url: resolvedURL,
+                bookmarkData: bookmarkData,
+                wasStale: true,
+                wasRefreshed: false
+            )
+        }
+    }
+
+    func store(_ bookmarkData: Data, for stableID: String) throws {
+        var bookmarks = try loadBookmarksIfNeeded()
+        bookmarks[stableID] = bookmarkData
+        try persist(bookmarks)
+    }
+
+    func migrate(
+        from oldStableID: String,
+        to newStableID: String,
+        fallbackData: Data
+    ) throws {
+        guard oldStableID != newStableID else { return }
+
+        var bookmarks = try loadBookmarksIfNeeded()
+        let bookmarkData = bookmarks.removeValue(forKey: oldStableID) ?? fallbackData
+        bookmarks[newStableID] = bookmarkData
+        try persist(bookmarks)
+    }
+
+    @discardableResult
+    func migrate(_ stableIDRemapping: [String: String]) throws -> Int {
+        var bookmarks = try loadBookmarksIfNeeded()
+        var updatedCount = 0
+
+        for (oldStableID, newStableID) in stableIDRemapping {
+            guard oldStableID != newStableID,
+                  let bookmarkData = bookmarks.removeValue(forKey: oldStableID) else {
+                continue
+            }
+            bookmarks[newStableID] = bookmarkData
+            updatedCount += 1
+        }
+
+        if updatedCount > 0 {
+            try persist(bookmarks)
+        }
+        return updatedCount
+    }
+
+    @discardableResult
+    func removeBookmark(for stableID: String) throws -> Bool {
+        var bookmarks = try loadBookmarksIfNeeded()
+        guard bookmarks.removeValue(forKey: stableID) != nil else { return false }
+        try persist(bookmarks)
+        return true
+    }
+
+    private func loadBookmarksIfNeeded() throws -> [String: Data] {
+        if let cachedBookmarks {
+            return cachedBookmarks
+        }
+
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            cachedBookmarks = [:]
+            return [:]
+        }
+
+        let data = try Data(contentsOf: fileURL)
+        guard let bookmarks = try PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Data] else {
+            throw NSError(
+                domain: "ExternalBookmarkStore",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid external bookmarks format"]
+            )
+        }
+
+        cachedBookmarks = bookmarks
+        return bookmarks
+    }
+
+    private func persist(_ bookmarks: [String: Data]) throws {
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: bookmarks,
+            format: .xml,
+            options: 0
+        )
+        try data.write(to: fileURL, options: .atomic)
+        cachedBookmarks = bookmarks
+    }
+}
+
 @MainActor
 class LibraryIndexer: NSObject, ObservableObject {
+    private enum ScanMode {
+        case metadataQuery
+        case offline
+    }
+
     static let shared = LibraryIndexer()
-    
+
     @Published var isIndexing = false
     @Published var indexingProgress: Double = 0.0
     @Published var tracksFound = 0
     @Published var currentlyProcessing: String = ""
     @Published var queuedFiles: [String] = []
+    /// Emits only after a real scan has finished all database and folder-
+    /// playlist work. `nil` avoids replaying a fake completion on subscription.
+    @Published private(set) var completedScanGeneration: Int?
+    /// Whether the generation most recently published above reached a clean,
+    /// authoritative completion. AppCoordinator still runs state restoration
+    /// after a partial/failed scan, but must not infer deletions from it.
+    private(set) var lastCompletedScanWasAuthoritative = false
     private var hasPendingLibraryRefresh = false
-    /// Bumped by stop(), so work deferred by an in-flight start() can tell that
-    /// it belongs to a run that has since been cancelled.
+    /// Serializes processQueryResults; see the comment there.
+    private var isProcessingQueryResults = false
+    private var hasPendingQueryResults = false
+    /// The explicit scan generation whose DidFinishGathering event arrived
+    /// while another query snapshot was being processed. Keeping the owner,
+    /// rather than a Bool, prevents a live update that predates a manual scan
+    /// from swallowing that scan's only completion event.
+    private var pendingQueryCompletionGeneration: Int?
+    /// What this scan's on-device sweep actually achieved, or nil while it has
+    /// not run yet. The sweep runs once per scan, not once per query update -
+    /// NSMetadataQuery fires those constantly while files are landing.
+    ///
+    /// The *outcome* is cached, not merely the fact that an attempt was made.
+    /// A plain "has swept" flag was raised before the enumeration and left
+    /// raised when it failed, so a repeat call answered "this root was scanned
+    /// successfully" for a root that had never been read - which is the answer
+    /// that authorises `reconcileMissingFiles` to delete every row under it.
+    private var localDocumentsSweepSucceeded: Bool?
+    /// Set when any file failed to download or parse during the active scan.
+    private var scanHadFileFailures = false
+    /// Set when a file was skipped only because its iCloud bytes had not landed
+    /// yet. Deliberately NOT a scan failure: on a library that is larger than
+    /// the device, or under iCloud's optimised storage, some files are
+    /// permanently evicted, so treating this as a failure meant
+    /// `lastLibraryScanDate` was never stamped and the app performed a full
+    /// rescan on every launch and every foreground - defeating
+    /// `libraryScanInterval` entirely. The live metadata query keeps indexing
+    /// these as their bytes arrive, so a rescan is not what recovers them.
+    private var scanHadPendingDownloads = false
+    /// At least one filesystem root could only be enumerated partially. This is
+    /// deliberately separate from the deduplicated failure log: a root that is
+    /// repeatedly unavailable may eventually stop suppressing the scan date,
+    /// but it is never authoritative enough for destructive maintenance.
+    private var scanHadIncompleteRoots = false
+    /// Set when a database write was cut short because GRDB was suspended
+    /// (see `DatabaseSuspensionCoordinator`). Like a file failure it withholds
+    /// `lastLibraryScanDate` so the scan is retried, but it is tracked
+    /// separately because it says nothing about the file that happened to be
+    /// in flight - blaming the file made the logs actively misleading.
+    private var scanWasInterrupted = false
+    /// Every supported file the active scan saw, so the metadata-query path can
+    /// build folder playlists too - previously only the direct and offline
+    /// scans did, so users whose query worked never got the feature at all.
+    private var scanCollectedFiles: [URL] = []
+    /// Identifies the generation currently using the direct scanner. Keeping
+    /// the owner, rather than a Bool, prevents an old defer from clearing a new
+    /// run's guard.
+    private var directScanGeneration: Int?
+    /// Prevents the timeout fallback and a non-empty metadata-query pass from
+    /// indexing the same iCloud snapshot concurrently.
+    private var queryResultScanGeneration: Int?
+    /// `NSMetadataQueryDidFinishGathering` is not guaranteed to arrive. The
+    /// short zero-result check below detects a query that never got started,
+    /// but a healthy large query normally has partial results by then. Give
+    /// gathering its own deadline so a positive, perpetually-gathering query
+    /// cannot leave the scan generation (and all post-scan work) wedged.
+    private var metadataGatheringDeadlineTask: Task<Void, Never>?
+    private var metadataGatheringDeadlineGeneration: Int?
+    /// Asks a partial `DidUpdate` snapshot to yield before the deadline starts
+    /// the direct scan. This keeps both paths from parsing and writing the same
+    /// generation concurrently.
+    private var metadataGatheringTimedOutGeneration: Int?
+    private static let metadataGatheringDeadlineNanoseconds: UInt64 = 30_000_000_000
     private var indexingGeneration = 0
+    private var activeScanMode: ScanMode?
+    /// The mode of a scan `stop()` abandoned while it was still running.
+    /// See `resumeInterruptedScan()`.
+    private var interruptedScanMode: ScanMode?
+    private var activeScanTask: Task<Void, Never>?
+    private var sharedContainerProcessingTask: Task<Void, Never>?
+    private var sharedContainerProcessingGeneration: UInt64 = 0
 
     private let metadataQuery = NSMetadataQuery()
     private let databaseManager = DatabaseManager.shared
@@ -60,9 +564,13 @@ class LibraryIndexer: NSObject, ObservableObject {
         metadataQuery.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
 
         // Support all audio formats according to plan
-        let formats = ["*.flac", "*.mp3", "*.wav", "*.m4a", "*.aac", "*.opus", "*.ogg", "*.dsf", "*.dff"]
+        let formats = ["*.flac", "*.mp3", "*.wav", "*.m4a", "*.aac", "*.opus", "*.ogg", "*.oga", "*.dsf", "*.dff"]
         let formatPredicates = formats.map { format in
-            NSPredicate(format: "%K LIKE %@", NSMetadataItemFSNameKey, format)
+            // LIKE[c]: without the [c] modifier the match is case-sensitive,
+            // so TRACK.FLAC or Song.MP3 were invisible to the query. And
+            // because the direct-scan fallback only triggers on a zero-result
+            // query, a single lowercase file was enough to hide them for good.
+            NSPredicate(format: "%K LIKE[c] %@", NSMetadataItemFSNameKey, format)
         }
         metadataQuery.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: formatPredicates)
         
@@ -87,18 +595,33 @@ class LibraryIndexer: NSObject, ObservableObject {
         // Attempt recovery from offline mode when manually syncing
         CloudDownloadManager.shared.attemptRecovery()
 
+        activeScanTask?.cancel()
+        resetMetadataGatheringDeadline()
+        indexingGeneration &+= 1
+        let generation = indexingGeneration
+        activeScanMode = .metadataQuery
+        interruptedScanMode = nil
         isIndexing = true
         indexingProgress = 0.0
         tracksFound = 0
+
+        ScanFailureLog.pruneMissingFiles()
+        localDocumentsSweepSucceeded = nil
+        scanHadFileFailures = false
+        scanHadPendingDownloads = false
+        scanHadIncompleteRoots = false
+        scanWasInterrupted = false
+        scanCollectedFiles.removeAll()
 
         // Copy any new files from share extension first
         Task {
             await copyFilesFromSharedContainer()
         }
         
-        let generation = indexingGeneration
-
-        Task {
+        activeScanTask = Task { [weak self] in
+            guard let self else { return }
+            await self.purgeUnplayableOpusInM4AIfNeeded()
+            guard self.isActiveScan(generation) else { return }
             // Resolve the container off the main actor, then start the query
             // back on it - NSMetadataQuery needs a run loop. Both the resolve
             // and the diagnostic directory listing used to run inline here, on
@@ -109,26 +632,49 @@ class LibraryIndexer: NSObject, ObservableObject {
             // was resolving. Without this the query would be started again just
             // after being stopped, leaving an iCloud query alive in offline
             // mode and racing the local scan.
-            guard generation == indexingGeneration, isIndexing else {
+            guard isActiveScan(generation, mode: .metadataQuery) else {
                 print("🛑 Metadata query start cancelled - indexing was stopped")
                 return
             }
 
+            // A finished scan deliberately leaves the query running - that is
+            // how files added to iCloud between scans still get indexed. But
+            // start() is a no-op on an already-running query, so a second
+            // manual scan never got its own DidFinishGathering: completeScan
+            // was never reached, isIndexing stayed true, and every caller
+            // waiting on it (ContentView's manual sync and pull-to-refresh)
+            // spun for ever. Restart so this generation is guaranteed a
+            // gather, and its completion event, of its own.
+            metadataQuery.stop()
             if let musicFolderURL {
                 metadataQuery.searchScopes = [musicFolderURL]
             }
-            metadataQuery.start()
+            guard metadataQuery.start() else {
+                print("❌ NSMetadataQuery refused to start - falling back to direct scan")
+                await fallbackToDirectScan(generation: generation)
+                return
+            }
 
-            // Add a timeout to trigger fallback if NSMetadataQuery doesn't work
-            try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
+            armMetadataGatheringDeadline(for: generation)
+
+            // A separate short check handles the clearly broken zero-result
+            // case. Do not generalise this to a positive result count: seeing
+            // partial results after three seconds is normal for a large
+            // container, and only the gathering deadline above should decide
+            // that DidFinishGathering has taken too long.
+            do {
+                try await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
+            } catch {
+                return
+            }
             print("Timeout check: resultCount=\(metadataQuery.resultCount), isIndexing=\(isIndexing)")
             // The generation check matters as much as isIndexing here: a switch
             // to offline mode sets isIndexing back to true for its own scan, and
             // without this the fallback would run alongside it.
-            guard generation == indexingGeneration else { return }
-            if metadataQuery.resultCount == 0 && isIndexing {
+            guard isActiveScan(generation, mode: .metadataQuery) else { return }
+            if metadataQuery.resultCount == 0 {
                 print("NSMetadataQuery timeout - triggering fallback scan")
-                await fallbackToDirectScan()
+                await fallbackToDirectScan(generation: generation)
             }
         }
     }
@@ -142,25 +688,438 @@ class LibraryIndexer: NSObject, ObservableObject {
     func startOfflineMode() {
         guard !isIndexing else { return }
 
+        activeScanTask?.cancel()
+        resetMetadataGatheringDeadline()
+        indexingGeneration &+= 1
+        let generation = indexingGeneration
+        activeScanMode = .offline
+        interruptedScanMode = nil
         isIndexing = true
         indexingProgress = 0.0
         tracksFound = 0
 
-        Task {
-            await scanLocalDocuments()
+        ScanFailureLog.pruneMissingFiles()
+        localDocumentsSweepSucceeded = nil
+        scanHadFileFailures = false
+        scanHadPendingDownloads = false
+        scanHadIncompleteRoots = false
+        scanWasInterrupted = false
+        scanCollectedFiles.removeAll()
+
+        activeScanTask = Task { [weak self] in
+            await self?.purgeUnplayableOpusInM4AIfNeeded()
+            await self?.scanLocalDocuments(generation: generation)
         }
     }
-    
+
+    /// Abandons the running scan.
+    ///
+    /// The abandoned mode is remembered so `resumeInterruptedScan()` can pick
+    /// it up again. That matters because a stopped scan reports nothing:
+    /// `AppCoordinator` hangs favourites sync and iCloud playlist restoration
+    /// off `completedScanGeneration`, which only `completeScan`/`failScan`
+    /// publish. Publishing from here instead would be worse - the one caller
+    /// is `DatabaseSuspensionCoordinator`, which stops the scan precisely
+    /// because it is about to suspend GRDB, so the post-index database work
+    /// would run straight into the suspension it is avoiding.
     func stop() {
+        if isIndexing {
+            interruptedScanMode = activeScanMode
+        }
+
+        activeScanTask?.cancel()
+        activeScanTask = nil
+        resetMetadataGatheringDeadline()
         indexingGeneration &+= 1
+        activeScanMode = nil
+        directScanGeneration = nil
+        queryResultScanGeneration = nil
         metadataQuery.stop()
         isIndexing = false
+    }
+
+    /// Starts the scan `stop()` abandoned, once whatever forced the stop has
+    /// passed.
+    ///
+    /// The scan-interval setting is deliberately not consulted: this is not a
+    /// scheduled scan, it is the remainder of one that was already running, and
+    /// gating it on the cooldown left a manual sync (or any scan at all under
+    /// "manual only") permanently unfinished after the user switched apps.
+    func resumeInterruptedScan() {
+        guard !isIndexing, let mode = interruptedScanMode else { return }
+        interruptedScanMode = nil
+
+        print("🔄 Resuming the library scan that was interrupted")
+        switch mode {
+        case .metadataQuery:
+            start()
+        case .offline:
+            startOfflineMode()
+        }
     }
     
     func switchToOfflineMode() {
         print("🔄 Switching LibraryIndexer to offline mode")
         stop()
         startOfflineMode()
+    }
+
+    private func isActiveScan(_ generation: Int, mode: ScanMode? = nil) -> Bool {
+        guard isIndexing, indexingGeneration == generation else { return false }
+        return mode == nil || activeScanMode == mode
+    }
+
+    private func armMetadataGatheringDeadline(for generation: Int) {
+        resetMetadataGatheringDeadline()
+        metadataGatheringDeadlineGeneration = generation
+        metadataGatheringDeadlineTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.metadataGatheringDeadlineNanoseconds)
+            } catch {
+                return
+            }
+
+            guard let self,
+                  self.metadataGatheringDeadlineGeneration == generation,
+                  self.isActiveScan(generation, mode: .metadataQuery) else { return }
+
+            // Clear the handle before entering fallback; fallback also resets
+            // watchdog state and must not cancel the task that is running it.
+            self.metadataGatheringDeadlineTask = nil
+            self.metadataGatheringDeadlineGeneration = nil
+            self.metadataGatheringTimedOutGeneration = generation
+            print("⏰ NSMetadataQuery gathering deadline expired - falling back to direct scan")
+
+            // A DidUpdate pass can already be walking a stable query snapshot.
+            // Marking the generation above makes it yield at its next boundary;
+            // wait for the serialized pass to unwind before direct enumeration
+            // starts so the two writers never overlap.
+            while self.isProcessingQueryResults {
+                do {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                } catch {
+                    return
+                }
+                guard self.isActiveScan(generation, mode: .metadataQuery) else { return }
+            }
+
+            guard self.metadataGatheringTimedOutGeneration == generation,
+                  self.isActiveScan(generation, mode: .metadataQuery) else { return }
+            await self.fallbackToDirectScan(generation: generation)
+        }
+    }
+
+    private func cancelMetadataGatheringDeadline(for generation: Int) {
+        guard metadataGatheringDeadlineGeneration == generation else { return }
+        metadataGatheringDeadlineTask?.cancel()
+        metadataGatheringDeadlineTask = nil
+        metadataGatheringDeadlineGeneration = nil
+    }
+
+    private func resetMetadataGatheringDeadline(for generation: Int? = nil) {
+        if let generation {
+            cancelMetadataGatheringDeadline(for: generation)
+            if metadataGatheringTimedOutGeneration == generation {
+                metadataGatheringTimedOutGeneration = nil
+            }
+            return
+        }
+
+        metadataGatheringDeadlineTask?.cancel()
+        metadataGatheringDeadlineTask = nil
+        metadataGatheringDeadlineGeneration = nil
+        metadataGatheringTimedOutGeneration = nil
+    }
+
+    /// Records that part of the library could not be read during the active
+    /// scan, so the scan is not stamped successful and the automatic retry is
+    /// not suppressed for the whole cooldown.
+    ///
+    /// Prefer `recordScanRootFailure(forRootAt:)` or
+    /// `recordScanFileFailure(forFileAt:)`: both deduplicate, so neither a
+    /// permanently broken track nor a permanently unreadable root can withhold
+    /// the timestamp for ever. This unconditional form is the primitive they
+    /// are built on.
+    func recordScanFileFailure() {
+        scanHadFileFailures = true
+    }
+
+    /// Records that a whole root could not be enumerated during this scan.
+    ///
+    /// Only counts against the scan when it is new information - the first
+    /// failure for this root, or the first since it last enumerated cleanly.
+    /// See `ScanRootFailureLog` for why a repeat must not count.
+    func recordScanRootFailure(forRootAt url: URL) {
+        scanHadIncompleteRoots = true
+        guard ScanRootFailureLog.noteFailure(at: url.path) else {
+            print("↩️ Same root failure as last scan for \(url.lastPathComponent) - not withholding the scan date")
+            return
+        }
+        recordScanFileFailure()
+    }
+
+    /// Forgets a previous failure for a root that has now enumerated cleanly.
+    func clearScanRootFailure(forRootAt url: URL) {
+        ScanRootFailureLog.clearFailure(at: url.path)
+    }
+
+    /// Records that one file could not be indexed.
+    ///
+    /// Only counts against the scan when it is new information - the first
+    /// failure for this file, or the first since the file changed. See
+    /// `ScanFailureLog`: a file that is simply broken must not keep the library
+    /// in permanent doubt.
+    func recordScanFileFailure(forFileAt url: URL) async {
+        let fingerprint = (try? fileFingerprint(for: url))
+            ?? FileFingerprint(modificationDate: nil, fileSize: nil)
+
+        guard ScanFailureLog.noteFailure(at: url.path, fingerprint: fingerprint) else {
+            print("↩️ Same failure as last scan for \(url.lastPathComponent) - not withholding the scan date")
+            return
+        }
+        recordScanFileFailure()
+    }
+
+    /// Forgets a previous failure for a file that has now indexed cleanly.
+    func clearScanFileFailure(forFileAt url: URL) {
+        ScanFailureLog.clearFailure(at: url.path)
+    }
+
+    /// Drops the database row for a file the parser now refuses.
+    ///
+    /// Skipping the file is not enough on its own: reconciliation only removes
+    /// rows whose file is *gone*, so a track indexed by an older build - an
+    /// Opus stream in an MP4 container, which has no decoder on this platform -
+    /// stayed in the library for ever, listed as a normal song that silently
+    /// did nothing when tapped.
+    private func removeUnplayableTrackRow(at fileURL: URL) async {
+        guard let stableId = try? generateStableId(for: fileURL),
+              let existing = try? databaseManager.getTrack(byStableId: stableId) else {
+            return
+        }
+
+        do {
+            reportDiscardedUserData(for: existing)
+            try await databaseManager.deleteTrack(byStableId: existing.stableId)
+            print("🧹 Removed unplayable track from the library: \(existing.title)")
+        } catch {
+            print("⚠️ Could not remove unplayable track \(existing.title): \(error)")
+        }
+    }
+
+    /// Says out loud what a removal is about to throw away.
+    ///
+    /// `deleteTrack` also deletes the row's favourite flag and every playlist
+    /// entry pointing at it, and there is no undo. That is the right outcome
+    /// for a track nothing on this platform can decode, but it must not happen
+    /// silently: if the format check ever answers wrongly, this line is the
+    /// only trace of what the user lost.
+    private func reportDiscardedUserData(for track: Track) {
+        let isFavorite = (try? databaseManager.isFavorite(trackStableId: track.stableId)) ?? false
+        let playlistCount = (try? databaseManager.read { db in
+            try PlaylistItem
+                .filter(Column("track_stable_id") == track.stableId)
+                .fetchCount(db)
+        }) ?? 0
+
+        guard isFavorite || playlistCount > 0 else { return }
+        print("""
+            ⚠️ Removing "\(track.title)" also discards \
+            \(isFavorite ? "its favourite" : "")\
+            \(isFavorite && playlistCount > 0 ? " and " : "")\
+            \(playlistCount > 0 ? "\(playlistCount) playlist entr\(playlistCount == 1 ? "y" : "ies")" : "") \
+            - path: \(track.path)
+            """)
+    }
+
+    /// One-time sweep for rows that predate the format check above.
+    ///
+    /// Those files are unchanged on disk, so `needsMetadataRefresh` short
+    /// circuits before anything reparses them and the skip path never runs.
+    /// Only `.m4a` is examined - it is the one container whose extension does
+    /// not determine the codec - and only once, because the check has to read
+    /// the file's header to answer.
+    private func purgeUnplayableOpusInM4AIfNeeded() async {
+        let defaultsKey = "LibraryDidPurgeOpusInM4A"
+        guard !UserDefaults.standard.bool(forKey: defaultsKey) else { return }
+
+        guard let tracks = try? databaseManager.getAllTracks() else { return }
+        let candidates = tracks.filter {
+            URL(fileURLWithPath: $0.path).pathExtension.lowercased() == "m4a"
+        }
+
+        guard !candidates.isEmpty else {
+            UserDefaults.standard.set(true, forKey: defaultsKey)
+            return
+        }
+
+        // This runs before any indexing on the first launch after the upgrade,
+        // and it opens and parses the header of every downloaded .m4a in the
+        // library. Say so: `isIndexing` is already true, but nothing else sets
+        // `currentlyProcessing`, so the scan UI sat blank for the whole sweep
+        // and read as a hang.
+        let previouslyProcessing = currentlyProcessing
+        currentlyProcessing = Localized.checkingLibraryFormats
+        defer { currentlyProcessing = previouslyProcessing }
+
+        // The header checks are independent and I/O bound, so run a few at a
+        // time rather than one detached task after another. Same cap as
+        // indexFilesWithBoundedConcurrency, for the same reason.
+        let maxConcurrentChecks = 4
+        var opusTracks: [Track] = []
+        var deferred = 0
+        var examined = 0
+        var nextIndex = 0
+
+        // A file that is not there is reconciliation's business, not this
+        // sweep's - and an iCloud placeholder must not be judged at all.
+        // `isLocallyResident` rather than CloudDownloadManager.isDownloaded:
+        // that one is @MainActor and logs per call, and this is off-actor work.
+        // Returns nil for "could not examine".
+        let inspect: @Sendable (Track) -> (Track, Bool?) = { track in
+            let url = URL(fileURLWithPath: track.path)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  CloudDownloadManager.isLocallyResident(url) else {
+                return (track, nil)
+            }
+            return (track, AudioMetadataParser.isOpusInM4A(url))
+        }
+
+        await withTaskGroup(of: (Track, Bool?).self) { group in
+            while nextIndex < min(maxConcurrentChecks, candidates.count) {
+                let track = candidates[nextIndex]
+                group.addTask { inspect(track) }
+                nextIndex += 1
+            }
+
+            while let result = await group.next() {
+                let (track, isOpus) = result
+                examined += 1
+                switch isOpus {
+                case nil:
+                    // Deliberately counted. These rows have not been examined,
+                    // and once they materialise nothing will look at them
+                    // again: the file is unchanged, so needsMetadataRefresh
+                    // short circuits before any reparse and the ordinary skip
+                    // path never runs. Latching the one-shot flag over them
+                    // left permanently dead rows no later scan could clear.
+                    deferred += 1
+                case true?:
+                    opusTracks.append(track)
+                case false?:
+                    break
+                }
+
+                if examined % 25 == 0 {
+                    indexingProgress = Double(examined) / Double(candidates.count)
+                }
+
+                if nextIndex < candidates.count {
+                    let next = candidates[nextIndex]
+                    group.addTask { inspect(next) }
+                    nextIndex += 1
+                }
+            }
+        }
+
+        // Deleting is serialized on purpose - it is a single GRDB writer, and
+        // each removal also runs orphan cleanup.
+        var removed = 0
+        for track in opusTracks {
+            do {
+                reportDiscardedUserData(for: track)
+                try await databaseManager.deleteTrack(byStableId: track.stableId)
+                removed += 1
+            } catch {
+                print("⚠️ Could not remove Opus-in-M4A track \(track.title): \(error)")
+                // Same reasoning: an unexamined row must not be written off.
+                deferred += 1
+            }
+        }
+
+        indexingProgress = 0.0
+
+        if deferred == 0 {
+            UserDefaults.standard.set(true, forKey: defaultsKey)
+        } else {
+            print("⏭️ Deferring the Opus-in-M4A sweep - \(deferred) candidate(s) could not be examined yet")
+        }
+        if removed > 0 {
+            print("🧹 Removed \(removed) Opus-in-M4A track(s) that have no decoder on this platform")
+        }
+    }
+
+    /// Records that a file was skipped only because its iCloud download has not
+    /// landed yet. See `scanHadPendingDownloads`: this must not suppress the
+    /// scan-success timestamp.
+    func recordScanPendingDownload() {
+        scanHadPendingDownloads = true
+    }
+
+    /// Records that the database was suspended part-way through this scan, so
+    /// it is retried rather than stamped successful.
+    func recordScanInterrupted() {
+        scanWasInterrupted = true
+    }
+
+    private func completeScan(generation: Int, message: String) {
+        guard isActiveScan(generation) else { return }
+
+        resetMetadataGatheringDeadline(for: generation)
+
+        if scanHadFileFailures {
+            // Per-file parse errors are swallowed so one bad file cannot abort
+            // a scan. Writing lastLibraryScanDate anyway meant a transient
+            // failure left tracks missing AND suppressed the next automatic
+            // retry for the full cooldown.
+            print("⚠️ Scan finished with file-level failures - not recording a successful scan date")
+        } else if scanWasInterrupted {
+            // The database went away part-way through, so the library is
+            // incomplete for reasons that have nothing to do with any file.
+            // Same outcome as a failure - retry - but reported honestly.
+            print("⏸️ Scan was interrupted by database suspension - not recording a successful scan date")
+        } else {
+            // Files still waiting on iCloud are explicitly NOT a reason to
+            // withhold the timestamp - the live metadata query indexes them as
+            // their bytes land, and withholding it rescanned the whole library
+            // on every launch for anyone using optimised storage.
+            if scanHadPendingDownloads {
+                print("ℹ️ Scan finished with downloads still in flight - they will be indexed as they land")
+            }
+            var settings = DeleteSettings.load()
+            settings.lastLibraryScanDate = Date()
+            settings.save()
+        }
+
+        activeScanTask?.cancel()
+        activeScanTask = nil
+        activeScanMode = nil
+        isIndexing = false
+        // An interrupted scan saw only part of the library, so destructive
+        // maintenance must not act on it either.
+        lastCompletedScanWasAuthoritative = !scanHadFileFailures
+            && !scanHadIncompleteRoots
+            && !scanWasInterrupted
+        completedScanGeneration = generation
+        print(message)
+    }
+
+    private func failScan(generation: Int, message: String) {
+        guard isActiveScan(generation) else { return }
+        resetMetadataGatheringDeadline(for: generation)
+        activeScanTask?.cancel()
+        activeScanTask = nil
+        activeScanMode = nil
+        isIndexing = false
+        // Still publish the generation. AppCoordinator hangs favourites sync
+        // and iCloud playlist restoration off this, and those are about
+        // reconciling state that already exists - a scan that failed part-way
+        // is exactly when the library most needs them to run. Destructive
+        // maintenance is separately gated by this outcome, and the scan-success
+        // timestamp is deliberately not written so the scan itself retries.
+        lastCompletedScanWasAuthoritative = false
+        completedScanGeneration = generation
+        print(message)
     }
 
     nonisolated private static func modificationTimestamp(_ date: Date?) -> Int64? {
@@ -187,7 +1146,91 @@ class LibraryIndexer: NSObject, ObservableObject {
         )
     }
 
+    /// Whether a file the user removed from the library should still be
+    /// skipped by a folder scan.
+    ///
+    /// A stable id is a hash of the path, so replacement detection needs a
+    /// separate file identity. Absence and modification dates are deliberately
+    /// insufficient: cloud paths disappear while providers are offline, and a
+    /// tag edit changes the date without changing the user's exclusion intent.
+    nonisolated private func isStillExcluded(stableId: String, url: URL) -> Bool {
+        guard let details = DeleteSettings.excludedTrackDetails(stableId) else { return false }
+
+        let currentModification = Self.modificationTimestamp(
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        )
+        let currentIdentity = DeleteSettings.exclusionFileIdentity(atPath: url.path)
+
+        guard let excludedPath = details.path, !excludedPath.isEmpty else {
+            // Written before details were recorded: conservatively keep the
+            // exclusion and adopt the identity now visible at the path.
+            DeleteSettings.adoptExclusionDetails(stableId, path: url.path, modificationDate: currentModification)
+            return true
+        }
+
+        if let excludedIdentity = details.fileIdentity,
+           let currentIdentity,
+           excludedIdentity != currentIdentity {
+            // A mismatch on its own is NOT proof of a replacement. Two extra
+            // conditions have to hold before the user's removal is undone,
+            // because getting this wrong resurrects a track they deleted:
+            //
+            //  - Both identities must be durable. A `resource:` identity comes
+            //    from fileResourceIdentifierKey, which Apple documents as not
+            //    persistent across system restarts, so on the launch after a
+            //    reboot an untouched file can present a brand-new one.
+            //  - The modification date must have moved too. Writing a genuinely
+            //    different file to the path changes both; a reissued identifier
+            //    changes only the identity.
+            let bothDurable = DeleteSettings.exclusionIdentityIsDurable(excludedIdentity)
+                && DeleteSettings.exclusionIdentityIsDurable(currentIdentity)
+            let modificationMoved = details.modificationDate != currentModification
+
+            if bothDurable && modificationMoved {
+                print("🔁 Excluded file was replaced, indexing again: \(url.lastPathComponent)")
+                DeleteSettings.removeExcludedTrack(stableId)
+                return false
+            }
+
+            // Not enough evidence. Adopt what is on disk now so the next scan
+            // compares against the current reality rather than re-deciding this
+            // every time, and keep the exclusion.
+            print("↩️ Excluded file's identity changed without a content change - keeping the exclusion: \(url.lastPathComponent)")
+            DeleteSettings.adoptExclusionDetails(
+                stableId,
+                path: excludedPath,
+                modificationDate: currentModification ?? details.modificationDate
+            )
+            return true
+        }
+
+        // Entries created by the first details-based implementation have a
+        // path/date but no resource identity. Adopt one without treating the
+        // current file as a replacement; guessing here could resurrect a track
+        // the user explicitly removed.
+        if details.fileIdentity == nil, currentIdentity != nil {
+            DeleteSettings.adoptExclusionDetails(
+                stableId,
+                path: excludedPath,
+                modificationDate: currentModification ?? details.modificationDate
+            )
+        }
+
+        return true
+    }
+
     nonisolated private func needsMetadataRefresh(_ track: Track, fingerprint: FileFingerprint) -> Bool {
+        // Rows written by the filename-only parser carry its signature: no
+        // duration, no sample rate and no channel count. Every Opus/Vorbis
+        // track looked like this until they were routed to a real tag reader,
+        // so re-parse them once instead of leaving existing libraries stuck in
+        // "Unknown Album" at 0:00. A file the tag reader genuinely cannot read
+        // keeps these zeros and is retried on later scans, which costs one
+        // parse per scan for that file alone.
+        if trackLooksUnparsed(track), Self.filenameParsedExtensions.contains(URL(fileURLWithPath: track.path).pathExtension.lowercased()) {
+            return true
+        }
+
         // Existing users have NULL here after the additive migration. Refresh
         // once so their metadata and fingerprint are brought up to date.
         guard let storedModificationDate = track.modificationDate else {
@@ -205,6 +1248,23 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
 
         return false
+    }
+
+    /// Extensions that were served by the filename-only parser and are now read
+    /// with real tags. Restricted so a legitimately zero-valued row of another
+    /// format is not re-parsed on every scan.
+    ///
+    /// dsf/dff are here for the same reason opus/ogg are: their rows were
+    /// written with a zero duration, sample rate and channel count, and are
+    /// now read with TagLib. Without this an existing library keeps its DSD
+    /// tracks in "Unknown Album" at 0:00 for ever, because their files have
+    /// not changed and nothing else would re-parse them.
+    nonisolated static let filenameParsedExtensions: Set<String> = ["opus", "ogg", "oga", "m4a", "dsf", "dff"]
+
+    nonisolated private func trackLooksUnparsed(_ track: Track) -> Bool {
+        (track.durationMs ?? 0) == 0
+            && (track.sampleRate ?? 0) == 0
+            && (track.channels ?? 0) == 0
     }
 
     nonisolated private func existingTrack(stableId: String, path: String) throws -> Track? {
@@ -236,17 +1296,11 @@ class LibraryIndexer: NSObject, ObservableObject {
         var track = parsedFile.track
         track.id = existingTrack?.id
 
-        try databaseManager.upsertTrack(track)
-        try databaseManager.setTrackArtists(
-            trackStableId: track.stableId,
-            artistIds: parsedFile.trackArtistIds
+        try databaseManager.upsertTrackWithArtistRelationships(
+            track,
+            trackArtistIds: parsedFile.trackArtistIds,
+            albumArtistIds: parsedFile.albumArtistIds
         )
-        if let albumId = track.albumId {
-            try databaseManager.setAlbumArtists(
-                albumId: albumId,
-                artistIds: parsedFile.albumArtistIds
-            )
-        }
 
         if let existingTrack {
             // Once a row has a fingerprint, a changed timestamp means cached
@@ -305,10 +1359,22 @@ class LibraryIndexer: NSObject, ObservableObject {
 
     @discardableResult
     func processExternalFile(_ fileURL: URL, allowExcludedReimport: Bool = false) async -> Bool {
+        let result = await processExternalFileResult(
+            fileURL,
+            allowExcludedReimport: allowExcludedReimport
+        )
+        if case .inserted = result { return true }
+        return false
+    }
+
+    private func processExternalFileResult(
+        _ fileURL: URL,
+        allowExcludedReimport: Bool = false
+    ) async -> ExternalFileProcessingResult {
         // Reject network URLs
         if let scheme = fileURL.scheme?.lowercased(), ["http", "https", "ftp", "sftp"].contains(scheme) {
             print("❌ Rejected network URL: \(fileURL.absoluteString)")
-            return false
+            return .failed
         }
 
         do {
@@ -332,7 +1398,7 @@ class LibraryIndexer: NSObject, ObservableObject {
                 if allowExcludedReimport {
                     NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
                 }
-                return false
+                return .alreadyPresent
             }
             if existingTrack != nil {
                 print("🔄 File changed; reparsing external metadata: \(fileURL.lastPathComponent)")
@@ -342,7 +1408,7 @@ class LibraryIndexer: NSObject, ObservableObject {
             let isExcluded = DeleteSettings.isTrackExcluded(stableId)
             if isExcluded && !allowExcludedReimport {
                 print("⏭️ Track excluded from library: \(fileURL.lastPathComponent)")
-                return false
+                return .alreadyPresent
             }
             if isExcluded && allowExcludedReimport {
                 print("🔁 Re-importing excluded track by user request: \(fileURL.lastPathComponent)")
@@ -364,17 +1430,17 @@ class LibraryIndexer: NSObject, ObservableObject {
                 print("✅ Cleared exclusion for re-imported track: \(fileURL.lastPathComponent)")
             }
 
-            return existingTrack == nil
+            return existingTrack == nil ? .inserted : .alreadyPresent
 
         } catch LibraryIndexerError.parseTimeout {
             print("⏰ Timeout parsing external audio file: \(fileURL.lastPathComponent)")
             print("❌ Skipping external file due to parsing timeout")
-            return false
+            return .failed
         } catch {
             print("❌ Failed to process external track at \(fileURL.lastPathComponent): \(error)")
             print("❌ Error type: \(type(of: error))")
             print("❌ Error details: \(String(describing: error))")
-            return false
+            return .failed
         }
     }
     
@@ -386,35 +1452,217 @@ class LibraryIndexer: NSObject, ObservableObject {
                 print("  Found: \(url.lastPathComponent)")
             }
         }
+        // Capture ownership synchronously with the notification. The Task may
+        // not run until after another scan starts or the current one is
+        // cancelled, and a bare Bool cannot distinguish those generations.
+        let completionGeneration = activeMetadataQueryGeneration
+        if let completionGeneration {
+            // If the deadline already won the race, its direct scan owns this
+            // generation. A late DidFinishGathering from the stopped/stalled
+            // query must not start reconciliation alongside it.
+            guard metadataGatheringTimedOutGeneration != completionGeneration else {
+                print("⏭️ Ignoring metadata-query completion after direct-scan handoff")
+                return
+            }
+            cancelMetadataGatheringDeadline(for: completionGeneration)
+        }
         Task {
-            await processQueryResults()
+            await processQueryResults(completionGeneration: completionGeneration)
         }
     }
-    
+
     @objc private func queryDidUpdate() {
         Task {
-            await processQueryResults()
+            await processQueryResults(completionGeneration: nil)
         }
     }
-    
-    private func processQueryResults() async {
-        metadataQuery.disableUpdates()
-        defer { metadataQuery.enableUpdates() }
-        
-        let itemCount = metadataQuery.resultCount
-        
-        if itemCount == 0 {
-            print("NSMetadataQuery found 0 results, falling back to direct file system scan")
-            await fallbackToDirectScan()
+
+    private var activeMetadataQueryGeneration: Int? {
+        let generation = indexingGeneration
+        return isActiveScan(generation, mode: .metadataQuery) ? generation : nil
+    }
+
+    private func processQueryResults(completionGeneration: Int?) async {
+        // NSMetadataQuery fires DidUpdate repeatedly while a batch of files
+        // lands, and every one of those used to spawn its own run of this.
+        // Overlapping runs unbalanced disableUpdates()/enableUpdates() - the
+        // first one's defer re-enabled updates while another was still walking
+        // result(at:) over a live, mutating result set, so entries shifted and
+        // were skipped outright - and whichever finished first declared
+        // indexing over. Serialize instead, and remember that a pass is owed.
+        guard !isProcessingQueryResults else {
+            hasPendingQueryResults = true
+            if let completionGeneration {
+                pendingQueryCompletionGeneration = max(
+                    pendingQueryCompletionGeneration ?? completionGeneration,
+                    completionGeneration
+                )
+            }
             return
         }
-        
+        isProcessingQueryResults = true
+        defer {
+            isProcessingQueryResults = false
+
+            // Updates can also arrive while reconciliation, the local sweep,
+            // or folder-playlist work is awaiting below - after the snapshot
+            // loop has already decided it is finished. Drain that queued event
+            // in a fresh pass so its generation-owned completion is not left
+            // parked with nobody to consume it.
+            if hasPendingQueryResults {
+                Task { @MainActor [weak self] in
+                    await self?.processQueryResults(completionGeneration: nil)
+                }
+            }
+        }
+
+        var handedOffToDirectScan = false
+        var requestedCompletionGeneration = completionGeneration
+        repeat {
+            hasPendingQueryResults = false
+            if let pendingGeneration = pendingQueryCompletionGeneration {
+                requestedCompletionGeneration = max(
+                    requestedCompletionGeneration ?? pendingGeneration,
+                    pendingGeneration
+                )
+                pendingQueryCompletionGeneration = nil
+            }
+
+            // Re-evaluate ownership for every coalesced snapshot. A manual scan
+            // can begin while a long-running live update is awaiting file work;
+            // its DidFinishGathering then belongs to the new generation, not to
+            // the generation (or lack of one) captured by the older pass.
+            handedOffToDirectScan = await scanCurrentQueryResults(
+                generation: activeMetadataQueryGeneration
+            )
+        } while hasPendingQueryResults && !handedOffToDirectScan
+
+        // The direct scan finishes and reports on its own.
+        guard !handedOffToDirectScan else { return }
+
+        // DidUpdate may arrive while the query is still gathering. It may
+        // index the snapshot it saw, but only DidFinishGathering owns scan
+        // reconciliation/completion; otherwise the first partial update can
+        // stamp the scan successful and stop accepting generation-owned work.
+        guard let generation = requestedCompletionGeneration else {
+            postPendingLibraryRefresh()
+            return
+        }
+
+        guard isActiveScan(generation, mode: .metadataQuery) else {
+            print("🛑 Query results pass belongs to a cancelled run - not reporting completion")
+            return
+        }
+        guard metadataGatheringTimedOutGeneration != generation else {
+            print("⏭️ Metadata-query completion yielded to the gathering-deadline fallback")
+            return
+        }
+
+        var scannedRoots: [URL] = []
+
+        // Reconcile only the iCloud root, and only when this scan is
+        // authoritative about it. Never infer deletion from a failed or
+        // unavailable root.
+        //
+        // DidFinishGathering says the query collected every currently matching
+        // result before switching to live updates - it does not say iCloud's
+        // view of the container has converged, which after a restore it has
+        // not. So the same evidence the direct scanner demands is required
+        // here too: nothing failed to enumerate and nothing failed to index.
+        // (`scanHadPendingDownloads` is deliberately excluded - an evicted
+        // placeholder still exists on disk, so it is never seen as missing.)
+        if AppCoordinator.shared.iCloudStatus == .available,
+           !scanHadIncompleteRoots,
+           !scanHadFileFailures,
+           !scanWasInterrupted,
+           let musicFolderURL = stateManager.getMusicFolderURL() {
+            scannedRoots.append(musicFolderURL)
+        } else if AppCoordinator.shared.iCloudStatus == .available {
+            print("🛡️ Not reconciling the iCloud root - this scan could not read all of it")
+        }
+
+        // The query's scope is the iCloud folder alone, so on its own this
+        // path never looked at on-device storage: with iCloud enabled and one
+        // track in it, anything dropped into On My iPhone -> Cosmos was never
+        // indexed, no matter how many times the user refreshed.
+        if await sweepLocalDocuments(generation: generation) {
+            scannedRoots.append(Self.localDocumentsURL)
+        }
+
+        guard isActiveScan(generation, mode: .metadataQuery),
+              metadataGatheringTimedOutGeneration != generation else { return }
+
+        await FileCleanupManager.shared.reconcileMissingFiles(in: scannedRoots)
+        guard isActiveScan(generation, mode: .metadataQuery),
+              metadataGatheringTimedOutGeneration != generation else { return }
+        postPendingLibraryRefresh()
+
+        // Folder playlists used to be built only by the direct and offline
+        // scans, so anyone whose metadata query worked normally never got the
+        // feature at all.
+        var seen = Set<URL>()
+        let uniqueFiles = scanCollectedFiles.filter { seen.insert($0).inserted }
+        await processFolderPlaylists(allMusicFiles: uniqueFiles, generation: generation)
+        guard isActiveScan(generation, mode: .metadataQuery),
+              metadataGatheringTimedOutGeneration != generation else { return }
+
+        completeScan(
+            generation: generation,
+            message: "Library indexing completed. Found \(tracksFound) tracks."
+        )
+    }
+
+    /// One pass over the query's current results. Returns true if it handed
+    /// off to the direct scan rather than indexing anything itself.
+    private func scanCurrentQueryResults(generation: Int?) async -> Bool {
+        if let generation, metadataGatheringTimedOutGeneration == generation {
+            return true
+        }
+
+        metadataQuery.disableUpdates()
+        defer { metadataQuery.enableUpdates() }
+
+        let itemCount = metadataQuery.resultCount
+
+        if itemCount == 0 {
+            guard let generation else {
+                print("⏭️ Ignoring empty metadata-query update outside an explicit scan")
+                return false
+            }
+            print("NSMetadataQuery found 0 results, falling back to direct file system scan")
+            await fallbackToDirectScan(generation: generation)
+            return true
+        }
+
+        if let generation {
+            // The timeout may already have handed this generation to the
+            // direct scanner. Do not parse the same files again from the query
+            // while that owner is running.
+            guard directScanGeneration != generation else {
+                print("⏭️ Direct scan owns this generation - skipping metadata-query duplicate")
+                return true
+            }
+            queryResultScanGeneration = generation
+        }
+        defer {
+            if let generation, queryResultScanGeneration == generation {
+                queryResultScanGeneration = nil
+            }
+        }
+
         var processedCount = 0
-        
+
         for i in 0..<itemCount {
+            if let generation {
+                guard isActiveScan(generation, mode: .metadataQuery) else { return false }
+                if metadataGatheringTimedOutGeneration == generation {
+                    print("⏭️ Yielding partial metadata-query snapshot to direct scan")
+                    return true
+                }
+            }
             guard let item = metadataQuery.result(at: i) as? NSMetadataItem else { continue }
 
-            await processMetadataItem(item)
+            await processMetadataItem(item, generation: generation)
 
             processedCount += 1
             // Throttle progress updates and yield so the UI stays responsive
@@ -425,20 +1673,80 @@ class LibraryIndexer: NSObject, ObservableObject {
             await Task.yield()
         }
 
-        // The query completed successfully, so it is safe to reconcile only
-        // the iCloud root it actually scanned. Never infer deletion from a
-        // failed or unavailable root.
-        if AppCoordinator.shared.iCloudStatus == .available,
-           let musicFolderURL = stateManager.getMusicFolderURL() {
-            await FileCleanupManager.shared.reconcileMissingFiles(in: [musicFolderURL])
+        if let generation, metadataGatheringTimedOutGeneration == generation {
+            return true
         }
-        postPendingLibraryRefresh()
-        
-        isIndexing = false
-        print("Library indexing completed. Found \(tracksFound) tracks.")
+        return false
+    }
+
+    static let localDocumentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+
+    /// Indexes the on-device Documents folder alongside an iCloud scan.
+    /// Returns whether the folder was enumerated successfully, so the caller
+    /// knows if it may reconcile deletions against that root.
+    private func sweepLocalDocuments(generation: Int) async -> Bool {
+        guard isActiveScan(generation, mode: .metadataQuery) else { return false }
+        if let cached = localDocumentsSweepSucceeded { return cached }
+
+        let succeeded = await performLocalDocumentsSweep(generation: generation)
+        localDocumentsSweepSucceeded = succeeded
+        return succeeded
+    }
+
+    private func performLocalDocumentsSweep(generation: Int) async -> Bool {
+        let documentsPath = Self.localDocumentsURL
+        let localEnumeration: MusicFileEnumeration
+        do {
+            localEnumeration = try await findMusicFiles(in: documentsPath)
+            if localEnumeration.isComplete {
+                clearScanRootFailure(forRootAt: documentsPath)
+            } else {
+                recordScanRootFailure(forRootAt: documentsPath)
+            }
+        } catch {
+            print("⚠️ Failed to scan local Documents folder: \(error)")
+            // The on-device half of a metadata-query scan did not happen, so
+            // this scan must not be stamped successful either.
+            recordScanRootFailure(forRootAt: documentsPath)
+            return false
+        }
+
+        guard isActiveScan(generation, mode: .metadataQuery) else { return false }
+
+        let localFiles = localEnumeration.files
+
+        guard !localFiles.isEmpty else { return localEnumeration.isComplete }
+
+        print("📱 Sweeping \(localFiles.count) on-device file(s) alongside iCloud")
+        scanCollectedFiles.append(contentsOf: localFiles)
+        await indexFilesWithBoundedConcurrency(localFiles, generation: generation)
+        return isActiveScan(generation, mode: .metadataQuery)
+            && localEnumeration.isComplete
     }
     
-    private func fallbackToDirectScan() async {
+    private func fallbackToDirectScan(generation: Int) async {
+        guard isActiveScan(generation, mode: .metadataQuery) else { return }
+        guard queryResultScanGeneration != generation else {
+            print("⏭️ Metadata query is already indexing this generation - skipping timeout fallback")
+            return
+        }
+        // Two entry points reach this: a zero-result gathering notification via
+        // processQueryResults, and the 3s timeout in start(), which calls it
+        // directly and so bypasses that method's serialization. Both could fire
+        // for the same run and enumerate and parse the same files at once,
+        // contending on the single database writer.
+        guard directScanGeneration == nil else {
+            print("⏭️ Direct scan already in progress - skipping duplicate")
+            return
+        }
+        resetMetadataGatheringDeadline(for: generation)
+        directScanGeneration = generation
+        defer {
+            if directScanGeneration == generation {
+                directScanGeneration = nil
+            }
+        }
+
         print("🔄 Starting fallback direct scan of both iCloud and local folders")
         
         var allMusicFiles: [URL] = []
@@ -446,19 +1754,34 @@ class LibraryIndexer: NSObject, ObservableObject {
         
         // First, copy any new files from shared container to Documents
         await copyFilesFromSharedContainer()
+        guard isActiveScan(generation, mode: .metadataQuery) else { return }
         
         // Scan iCloud folder if available
         if let iCloudMusicFolderURL = stateManager.getMusicFolderURL() {
             print("📁 Scanning iCloud folder: \(iCloudMusicFolderURL.path)")
             do {
-                let iCloudFiles = try await findMusicFiles(in: iCloudMusicFolderURL)
+                let enumeration = try await findMusicFiles(in: iCloudMusicFolderURL)
+                guard isActiveScan(generation, mode: .metadataQuery) else { return }
+                let iCloudFiles = enumeration.files
                 print("📁 Found \(iCloudFiles.count) files in iCloud folder")
                 allMusicFiles.append(contentsOf: iCloudFiles)
-                if AppCoordinator.shared.iCloudStatus == .available {
-                    successfullyScannedRoots.append(iCloudMusicFolderURL)
+                if enumeration.isComplete {
+                    if AppCoordinator.shared.iCloudStatus == .available {
+                        successfullyScannedRoots.append(iCloudMusicFolderURL)
+                    }
+                    clearScanRootFailure(forRootAt: iCloudMusicFolderURL)
+                } else {
+                    recordScanRootFailure(forRootAt: iCloudMusicFolderURL)
                 }
             } catch {
                 print("⚠️ Failed to scan iCloud folder: \(error)")
+                // findMusicFiles throws rather than returning [] precisely so a
+                // root that could not be read is never mistaken for an empty
+                // one. Logging alone was not enough: completeScan still stamped
+                // lastLibraryScanDate, and shouldPerformAutoScan then suppressed
+                // every retry for the whole cooldown with the entire iCloud
+                // library missing from the app.
+                recordScanRootFailure(forRootAt: iCloudMusicFolderURL)
             }
         }
         
@@ -466,15 +1789,24 @@ class LibraryIndexer: NSObject, ObservableObject {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         print("📱 Scanning local Documents folder: \(documentsPath.path)")
         do {
-            let localFiles = try await findMusicFiles(in: documentsPath)
+            let enumeration = try await findMusicFiles(in: documentsPath)
+            guard isActiveScan(generation, mode: .metadataQuery) else { return }
+            let localFiles = enumeration.files
             print("📱 Found \(localFiles.count) files in local Documents folder")
             for file in localFiles {
                 print("  📄 Local file: \(file.lastPathComponent)")
             }
             allMusicFiles.append(contentsOf: localFiles)
-            successfullyScannedRoots.append(documentsPath)
+            if enumeration.isComplete {
+                successfullyScannedRoots.append(documentsPath)
+                clearScanRootFailure(forRootAt: documentsPath)
+            } else {
+                recordScanRootFailure(forRootAt: documentsPath)
+            }
         } catch {
             print("⚠️ Failed to scan local Documents folder: \(error)")
+            // Same reasoning as the iCloud root above.
+            recordScanRootFailure(forRootAt: documentsPath)
         }
         
         let totalFiles = allMusicFiles.count
@@ -484,9 +1816,9 @@ class LibraryIndexer: NSObject, ObservableObject {
             // An empty, successfully enumerated root is meaningful: all of
             // its former tracks may have been deleted.
             await FileCleanupManager.shared.reconcileMissingFiles(in: successfullyScannedRoots)
+            guard isActiveScan(generation, mode: .metadataQuery) else { return }
             postPendingLibraryRefresh()
-            isIndexing = false
-            print("❌ No music files found in any location")
+            completeScan(generation: generation, message: "No music files found in any location")
             return
         }
         
@@ -510,11 +1842,15 @@ class LibraryIndexer: NSObject, ObservableObject {
         await withTaskGroup(of: Void.self) { group in
             while nextIndex < min(maxConcurrentFiles, totalFiles) {
                 let url = allMusicFiles[nextIndex]
-                group.addTask { [weak self] in await self?.indexFile(url) }
+                group.addTask { [weak self] in await self?.indexFile(url, generation: generation) }
                 nextIndex += 1
             }
 
             while await group.next() != nil {
+                guard isActiveScan(generation, mode: .metadataQuery) else {
+                    group.cancelAll()
+                    continue
+                }
                 completedCount += 1
 
                 // Throttle @Published updates: rebuilding the 2000-element
@@ -526,13 +1862,15 @@ class LibraryIndexer: NSObject, ObservableObject {
                     indexingProgress = Double(completedCount) / Double(totalFiles)
                 }
 
-                if nextIndex < totalFiles {
+                if isActiveScan(generation, mode: .metadataQuery), nextIndex < totalFiles {
                     let url = allMusicFiles[nextIndex]
-                    group.addTask { [weak self] in await self?.indexFile(url) }
+                    group.addTask { [weak self] in await self?.indexFile(url, generation: generation) }
                     nextIndex += 1
                 }
             }
         }
+
+        guard isActiveScan(generation, mode: .metadataQuery) else { return }
         
         // Clear processing state when done
         await MainActor.run {
@@ -541,16 +1879,25 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
 
         await FileCleanupManager.shared.reconcileMissingFiles(in: successfullyScannedRoots)
+        guard isActiveScan(generation, mode: .metadataQuery) else { return }
         postPendingLibraryRefresh()
-        
-        isIndexing = false
-        print("✅ Direct scan completed. Found \(tracksFound) tracks from both iCloud and local folders.")
 
-        // Process folder playlists after scan completion
-        await processFolderPlaylists(allMusicFiles: allMusicFiles)
+        // Folder playlists are part of the scan transaction. Do not publish
+        // completion while they are still mutating the database.
+        await processFolderPlaylists(allMusicFiles: allMusicFiles, generation: generation)
+        guard isActiveScan(generation, mode: .metadataQuery) else { return }
+        completeScan(
+            generation: generation,
+            message: "✅ Direct scan completed. Found \(tracksFound) tracks from both iCloud and local folders."
+        )
     }
 
-    private func processFolderPlaylists(allMusicFiles: [URL]) async {
+    private func processFolderPlaylists(allMusicFiles: [URL], generation: Int) async {
+        guard isActiveScan(generation) else { return }
+        guard !scanHadIncompleteRoots else {
+            print("🛡️ Skipping folder-playlist sync after an incomplete root enumeration")
+            return
+        }
         guard DeleteSettings.load().autoCreateFolderPlaylists else {
             print("📁 Folder playlist auto-creation disabled in settings - skipping")
             return
@@ -581,6 +1928,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         print("📁 Found \(folderGroups.count) folders with music files")
 
         for (folderPath, musicFiles) in folderGroups {
+            guard isActiveScan(generation) else { return }
             await processFolderPlaylist(folderPath: folderPath, musicFiles: musicFiles)
         }
 
@@ -600,6 +1948,19 @@ class LibraryIndexer: NSObject, ObservableObject {
             for musicFile in musicFiles {
                 let stableId = try generateStableId(for: musicFile)
                 trackStableIds.append(stableId)
+            }
+
+            // A metadata scan can see an iCloud placeholder before its track
+            // row exists. Never create a playlist_item for such a placeholder:
+            // orphan cleanup would immediately remove it.
+            let indexedTrackIds = Set(
+                try databaseManager.getTracksByStableIdsPreservingOrder(trackStableIds).map(\.stableId)
+            )
+            trackStableIds = trackStableIds.filter { indexedTrackIds.contains($0) }
+
+            guard !trackStableIds.isEmpty else {
+                print("⏳ No indexed tracks ready yet for folder: \(folderName)")
+                return
             }
 
             print("🎵 Found \(trackStableIds.count) tracks in folder: \(folderName)")
@@ -624,104 +1985,180 @@ class LibraryIndexer: NSObject, ObservableObject {
             print("❌ Failed to process folder playlist for \(folderName): \(error)")
         }
     }
+
+    private func processLiveFolderPlaylist(for fileURL: URL) async {
+        guard DeleteSettings.load().autoCreateFolderPlaylists else { return }
+
+        let parentFolder = fileURL.deletingLastPathComponent()
+        let folderPath = parentFolder.path
+        let documentsPath = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first?.path
+        let iCloudMusicPath = stateManager.getMusicFolderURL()?.path
+
+        guard folderPath != documentsPath, folderPath != iCloudMusicPath else { return }
+        await processFolderPlaylist(folderPath: folderPath, musicFiles: [fileURL])
+    }
     
-    private func scanLocalDocuments() async {
+    private func scanLocalDocuments(generation: Int) async {
+        guard isActiveScan(generation, mode: .offline) else { return }
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         
         do {
-            let musicFiles = try await findMusicFiles(in: documentsPath)
-            
-            let totalFiles = musicFiles.count
+            let enumeration = try await findMusicFiles(in: documentsPath)
+            guard isActiveScan(generation, mode: .offline) else { return }
+            let musicFiles = enumeration.files
 
-            // Same bounded-concurrency treatment as the iCloud fallback scan so
-            // offline first runs don't serialize every file behind the main actor.
-            let maxConcurrentFiles = 4
-            var processedFiles = 0
-            var nextIndex = 0
-
-            await withTaskGroup(of: Void.self) { group in
-                while nextIndex < min(maxConcurrentFiles, totalFiles) {
-                    let url = musicFiles[nextIndex]
-                    group.addTask { [weak self] in await self?.indexFile(url) }
-                    nextIndex += 1
-                }
-
-                while await group.next() != nil {
-                    processedFiles += 1
-                    if processedFiles % 10 == 0 || processedFiles == totalFiles {
-                        indexingProgress = Double(processedFiles) / Double(totalFiles)
-                    }
-
-                    if nextIndex < totalFiles {
-                        let url = musicFiles[nextIndex]
-                        group.addTask { [weak self] in await self?.indexFile(url) }
-                        nextIndex += 1
-                    }
-                }
+            if enumeration.isComplete {
+                clearScanRootFailure(forRootAt: documentsPath)
+            } else {
+                recordScanRootFailure(forRootAt: documentsPath)
             }
 
-            await FileCleanupManager.shared.reconcileMissingFiles(in: [documentsPath])
+            await indexFilesWithBoundedConcurrency(musicFiles, generation: generation) { progress in
+                self.indexingProgress = progress
+            }
+            guard isActiveScan(generation, mode: .offline) else { return }
+
+            if enumeration.isComplete {
+                await FileCleanupManager.shared.reconcileMissingFiles(in: [documentsPath])
+            } else {
+                print("🛡️ Skipping deletion reconciliation for partially enumerated Documents")
+            }
+            guard isActiveScan(generation, mode: .offline) else { return }
             postPendingLibraryRefresh()
-            
-            await MainActor.run {
-                isIndexing = false
-                print("Offline library scan completed. Found \(tracksFound) tracks.")
-            }
 
-            // Process folder playlists after offline scan
-            await processFolderPlaylists(allMusicFiles: musicFiles)
+            await processFolderPlaylists(allMusicFiles: musicFiles, generation: generation)
+            guard isActiveScan(generation, mode: .offline) else { return }
+            completeScan(
+                generation: generation,
+                message: "Offline library scan completed. Found \(tracksFound) tracks."
+            )
         } catch {
-            await MainActor.run {
-                isIndexing = false
-                print("Offline library scan failed: \(error)")
-            }
+            failScan(generation: generation, message: "Offline library scan failed: \(error)")
         }
     }
     
-    private func findMusicFiles(in directory: URL) async throws -> [URL] {
+    private func findMusicFiles(in directory: URL) async throws -> MusicFileEnumeration {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                do {
-                    var musicFiles: [URL] = []
-                    
-                    let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .nameKey]
-                    let directoryEnumerator = FileManager.default.enumerator(
-                        at: directory,
-                        includingPropertiesForKeys: resourceKeys,
-                        options: [.skipsHiddenFiles]
-                    )
-                    
-                    guard let enumerator = directoryEnumerator else {
-                        continuation.resume(returning: musicFiles)
-                        return
+                var musicFiles: [URL] = []
+                var unreadableCount = 0
+                var traversalErrorCount = 0
+
+                let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .nameKey]
+                let directoryEnumerator = FileManager.default.enumerator(
+                    at: directory,
+                    includingPropertiesForKeys: resourceKeys,
+                    options: [.skipsHiddenFiles],
+                    errorHandler: { failedURL, error in
+                        traversalErrorCount += 1
+                        print("⚠️ Could not enumerate \(failedURL.path): \(error)")
+                        // Keep collecting readable files, but the result below
+                        // is marked partial and can never authorize deletion.
+                        return true
                     }
-                    
-                    for case let fileURL as URL in enumerator {
-                        let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
-                        
-                        guard let isRegularFile = resourceValues.isRegularFile, isRegularFile else {
-                            continue
-                        }
-                        
-                        let pathExtension = fileURL.pathExtension.lowercased()
-                        let supportedExtensions = ["flac", "mp3", "wav", "m4a", "aac", "opus", "ogg", "dsf", "dff"]
-                        if supportedExtensions.contains(pathExtension) {
-                            musicFiles.append(fileURL)
-                        }
-                    }
-                    
-                    continuation.resume(returning: musicFiles)
-                } catch {
-                    continuation.resume(throwing: error)
+                )
+
+                guard let enumerator = directoryEnumerator else {
+                    // This function is declared `throws` but used to resume
+                    // with an empty array here, which the direct scanner could
+                    // not tell apart from a genuinely empty folder - so it
+                    // added the root to successfullyScannedRoots and let
+                    // reconciliation delete every track under it.
+                    continuation.resume(throwing: LibraryIndexerError.directoryNotEnumerable(directory))
+                    return
                 }
+
+                for case let fileURL as URL in enumerator {
+                    // Read this file's attributes defensively. These used to be
+                    // a bare `try` under a `do` that wrapped the whole walk, so
+                    // a single file that could not be stat'd - one still being
+                    // copied in, an undownloaded iCloud placeholder, a
+                    // permissions blip - threw out every file found before it
+                    // and every file after it. The library then stopped growing
+                    // at the same point on every refresh.
+                    guard let resourceValues = try? fileURL.resourceValues(forKeys: Set(resourceKeys)) else {
+                        unreadableCount += 1
+                        continue
+                    }
+
+                    guard let isRegularFile = resourceValues.isRegularFile, isRegularFile else {
+                        continue
+                    }
+
+                    let pathExtension = fileURL.pathExtension.lowercased()
+                    let supportedExtensions = ["flac", "mp3", "wav", "m4a", "aac", "opus", "ogg", "oga", "dsf", "dff"]
+                    if supportedExtensions.contains(pathExtension) {
+                        musicFiles.append(fileURL)
+                    }
+                }
+
+                if unreadableCount > 0 {
+                    print("⚠️ Skipped \(unreadableCount) unreadable entr\(unreadableCount == 1 ? "y" : "ies") while scanning \(directory.lastPathComponent)")
+                }
+                if traversalErrorCount > 0 {
+                    print("⚠️ Encountered \(traversalErrorCount) traversal error\(traversalErrorCount == 1 ? "" : "s") while scanning \(directory.lastPathComponent)")
+                }
+
+                continuation.resume(returning: MusicFileEnumeration(
+                    files: musicFiles,
+                    isComplete: unreadableCount == 0 && traversalErrorCount == 0
+                ))
             }
         }
     }
     
+    /// Parses and persists files a few at a time.
+    ///
+    /// Each file's work runs off the main actor, so metadata reads and the
+    /// per-track SQLite writes do not serialize behind (and block) UI work.
+    /// The cap keeps memory and the single GRDB writer from being swamped.
+    private func indexFilesWithBoundedConcurrency(
+        _ files: [URL],
+        generation: Int,
+        onProgress: ((Double) -> Void)? = nil
+    ) async {
+        guard isActiveScan(generation) else { return }
+        let totalFiles = files.count
+        guard totalFiles > 0 else { return }
+
+        let maxConcurrentFiles = 4
+        var processedFiles = 0
+        var nextIndex = 0
+
+        await withTaskGroup(of: Void.self) { group in
+            while nextIndex < min(maxConcurrentFiles, totalFiles) {
+                let url = files[nextIndex]
+                group.addTask { [weak self] in await self?.indexFile(url, generation: generation) }
+                nextIndex += 1
+            }
+
+            while await group.next() != nil {
+                guard isActiveScan(generation) else {
+                    group.cancelAll()
+                    continue
+                }
+                processedFiles += 1
+                if processedFiles % 10 == 0 || processedFiles == totalFiles {
+                    onProgress?(Double(processedFiles) / Double(totalFiles))
+                }
+
+                if nextIndex < totalFiles {
+                    let url = files[nextIndex]
+                    group.addTask { [weak self] in await self?.indexFile(url, generation: generation) }
+                    nextIndex += 1
+                }
+            }
+        }
+    }
+
     /// One unit of scan work, safe to run concurrently off the main actor.
     /// The iCloud status is re-read per file rather than snapshotted so a
     /// mid-scan auth failure still halts further iCloud reads.
-    nonisolated private func indexFile(_ fileURL: URL) async {
+    nonisolated private func indexFile(_ fileURL: URL, generation: Int) async {
+        guard await isActiveScan(generation) else { return }
         let isLocalFile = !fileURL.path.contains("Mobile Documents")
 
         if !isLocalFile {
@@ -733,11 +2170,13 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
         }
 
-        await processLocalFile(fileURL)
+        guard await isActiveScan(generation) else { return }
+        await processLocalFile(fileURL, generation: generation)
     }
 
-    nonisolated private func processLocalFile(_ fileURL: URL) async {
+    nonisolated private func processLocalFile(_ fileURL: URL, generation: Int) async {
         do {
+            guard await isActiveScan(generation) else { return }
             print("🎵 Starting to process file: \(fileURL.lastPathComponent)")
             
             let isLocalFile = !fileURL.path.contains("Mobile Documents")
@@ -745,7 +2184,15 @@ class LibraryIndexer: NSObject, ObservableObject {
             // Only try to download from iCloud if it's actually an iCloud file
             if !isLocalFile {
                 do {
-                    try await CloudDownloadManager.shared.ensureLocal(fileURL)
+                    // downloadTimeout 0: kick the download off but do not block
+                    // the scan on it. The file is skipped this pass and indexed
+                    // by the live metadata query once its bytes land - which is
+                    // why the .downloadPending branch below records it through
+                    // recordScanPendingDownload() and deliberately does NOT
+                    // withhold the scan-success timestamp. (It used to call
+                    // recordScanFileFailure(), which meant a library that is
+                    // not fully downloaded rescanned itself on every launch.)
+                    try await CloudDownloadManager.shared.ensureLocal(fileURL, downloadTimeout: 0)
                     print("✅ iCloud file ensured local: \(fileURL.lastPathComponent)")
                 } catch {
                     print("⚠️ Failed to ensure iCloud file is local: \(fileURL.lastPathComponent) - \(error)")
@@ -757,16 +2204,27 @@ class LibraryIndexer: NSObject, ObservableObject {
                             print("🔐 Authentication error in LibraryIndexer - switching to offline mode")
                             await AppCoordinator.shared.handleiCloudAuthenticationError()
                             return // Skip this file
+                        case .downloadPending:
+                            // The bytes are on their way. Parsing now would
+                            // only fail on an unreadable placeholder and be
+                            // recorded as a file failure, which withholds the
+                            // scan-success timestamp for ever on a library
+                            // that is not fully downloaded.
+                            print("⏳ Skipping until its download lands: \(fileURL.lastPathComponent)")
+                            await recordScanPendingDownload()
+                            return
                         default:
                             break
                         }
                     }
-                    
+
                     // Continue processing even if download fails (for other errors)
                 }
             } else {
                 print("📱 Processing local file (no iCloud download needed): \(fileURL.lastPathComponent)")
             }
+
+            guard await isActiveScan(generation) else { return }
             
             print("🆔 Generating stable ID for: \(fileURL.lastPathComponent)")
             let stableId = try generateStableId(for: fileURL)
@@ -784,30 +2242,51 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
 
             // Check if track was excluded (removed from library only)
-            if DeleteSettings.isTrackExcluded(stableId) {
+            if isStillExcluded(stableId: stableId, url: fileURL) {
                 print("⏭️ Track excluded from library: \(fileURL.lastPathComponent)")
                 return
             }
 
             print("🎶 Parsing audio file: \(fileURL.lastPathComponent)")
             let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            guard await isActiveScan(generation) else { return }
             print("✅ Audio file parsed successfully: \(parsedFile.track.title)")
             try await saveParsedFile(
                 parsedFile,
                 replacing: existingTrack,
                 sourceDescription: "file"
             )
+            // Indexed cleanly, so a genuinely new failure later counts again.
+            await clearScanFileFailure(forFileAt: fileURL)
             
             // Check if file is downloaded (for iCloud files)
             await checkDownloadStatus(for: fileURL)
             
+        } catch AudioParseError.unplayableFormat {
+            // Deliberately not a scan failure: the file is intact and the scan
+            // did its job, there is simply no decoder for it. Recording a
+            // failure here would stop completeScan from ever stamping
+            // lastLibraryScanDate, so the library would rescan forever.
+            print("⏭️ Not indexing unplayable file: \(fileURL.lastPathComponent)")
+            await removeUnplayableTrackRow(at: fileURL)
+            await clearScanFileFailure(forFileAt: fileURL)
         } catch LibraryIndexerError.parseTimeout {
             print("⏰ Timeout parsing audio file: \(fileURL.lastPathComponent)")
             print("❌ Skipping file due to parsing timeout")
+            await recordScanFileFailure(forFileAt: fileURL)
+        } catch let error as DatabaseError where error.isInterruptionError {
+            // The database was suspended underneath us - see
+            // DatabaseSuspensionCoordinator. That says nothing about this file,
+            // so recording it as a file failure was wrong: it withheld
+            // lastLibraryScanDate and made the whole library rescan on the next
+            // launch because the user happened to background the app mid-scan.
+            print("⏸️ Database suspended while indexing \(fileURL.lastPathComponent) - will retry")
+            await recordScanInterrupted()
         } catch {
             print("❌ Failed to process local track at \(fileURL.lastPathComponent): \(error)")
             print("❌ Error type: \(type(of: error))")
             print("❌ Error details: \(String(describing: error))")
+            await recordScanFileFailure(forFileAt: fileURL)
         }
     }
     
@@ -836,11 +2315,20 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
     }
     
-    private func processMetadataItem(_ item: NSMetadataItem) async {
+    private func processMetadataItem(_ item: NSMetadataItem, generation: Int?) async {
+        if let generation, !isActiveScan(generation, mode: .metadataQuery) { return }
         guard let fileURL = item.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
         let ext = fileURL.pathExtension.lowercased()
-        let supportedFormats = ["flac", "mp3", "wav", "m4a", "aac", "opus", "ogg", "dsf", "dff"]
+        let supportedFormats = ["flac", "mp3", "wav", "m4a", "aac", "opus", "ogg", "oga", "dsf", "dff"]
         guard supportedFormats.contains(ext) else { return }
+
+        // Recorded even when the track itself is already current: folder
+        // playlists describe what is on disk, not what this pass re-parsed.
+        // Only during an owned scan - a live query keeps sending updates
+        // between scans and this list would otherwise grow without bound.
+        if generation != nil {
+            scanCollectedFiles.append(fileURL)
+        }
 
         do {
             let stableId = try generateStableId(for: fileURL)
@@ -854,24 +2342,48 @@ class LibraryIndexer: NSObject, ObservableObject {
                 print("🔄 iCloud file changed; reparsing metadata: \(fileURL.lastPathComponent)")
             }
 
-            if DeleteSettings.isTrackExcluded(stableId) {
+            if isStillExcluded(stableId: stableId, url: fileURL) {
                 return
             }
 
-            try await CloudDownloadManager.shared.ensureLocal(fileURL)
+            try await CloudDownloadManager.shared.ensureLocal(fileURL, downloadTimeout: 0)
+            if let generation, !isActiveScan(generation, mode: .metadataQuery) { return }
 
             let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            if let generation, !isActiveScan(generation, mode: .metadataQuery) { return }
             try await saveParsedFile(
                 parsedFile,
                 replacing: existingTrack,
                 sourceDescription: "iCloud file"
             )
+            clearScanFileFailure(forFileAt: fileURL)
+
+            // Live metadata updates do not own a scan completion, so they do
+            // not run processFolderPlaylists. Add the newly-landed track now.
+            if generation == nil {
+                await processLiveFolderPlaylist(for: fileURL)
+            }
             
             // Check if file is downloaded (for iCloud files)
             await checkDownloadStatus(for: fileURL)
-            
+
+        } catch AudioParseError.unplayableFormat {
+            // See the matching case in processLocalFile: a skip, not a failure.
+            print("⏭️ Not indexing unplayable file: \(fileURL.lastPathComponent)")
+            await removeUnplayableTrackRow(at: fileURL)
+            clearScanFileFailure(forFileAt: fileURL)
+        } catch CloudDownloadError.downloadPending {
+            // Also not a failure - see recordScanPendingDownload().
+            print("⏳ Skipping until its download lands: \(fileURL.lastPathComponent)")
+            recordScanPendingDownload()
+        } catch let error as DatabaseError where error.isInterruptionError {
+            // See the matching case in processLocalFile: the database was
+            // suspended, which is not this file's fault.
+            print("⏸️ Database suspended while indexing \(fileURL.lastPathComponent) - will retry")
+            recordScanInterrupted()
         } catch {
             print("Failed to process track at \(fileURL): \(error)")
+            await recordScanFileFailure(forFileAt: fileURL)
         }
     }
     
@@ -882,28 +2394,16 @@ class LibraryIndexer: NSObject, ObservableObject {
     nonisolated private func parseAudioFile(at url: URL, stableId: String) async throws -> ParsedAudioFile {
         print("🔍 Calling AudioMetadataParser for: \(url.lastPathComponent)")
         
-        // Add timeout to prevent hanging
-        let metadata = try await withThrowingTaskGroup(of: AudioMetadata.self) { group in
-            group.addTask {
-                return try await AudioMetadataParser.parseMetadata(from: url)
-            }
-            
-            group.addTask {
-                // Files are parsed several at a time, so a single file's
-                // wall-clock time now includes contention with its peers (and,
-                // on a fresh install, iCloud still materialising the data).
-                // 10s was tight enough that large files were being skipped
-                // outright; this only bounds a genuine hang.
-                try await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds timeout
-                throw LibraryIndexerError.parseTimeout
-            }
-            
-            guard let result = try await group.next() else {
-                throw LibraryIndexerError.parseTimeout
-            }
-            
-            group.cancelAll()
-            return result
+        // Files are parsed several at a time, so a single file's wall-clock
+        // time now includes contention with its peers (and, on a fresh
+        // install, iCloud still materialising the data). 10s was tight enough
+        // that large files were being skipped outright; this only bounds a
+        // genuine hang.
+        let metadata = try await withHardTimeout(
+            nanoseconds: 30_000_000_000, // 30 seconds
+            timeoutError: LibraryIndexerError.parseTimeout
+        ) {
+            try await AudioMetadataParser.parseMetadata(from: url)
         }
         
         print("✅ AudioMetadataParser completed for: \(url.lastPathComponent)")
@@ -979,8 +2479,15 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         // Split on the common multi-artist separators (issue #16):
         // "\\" (ID3 joined-value convention), ";" (most taggers), and
-        // NUL (ID3v2.4 multi-value text frames)
-        let delimiters = ["\\\\", ";", "\u{0}"]
+        // NUL (ID3v2.4 multi-value text frames).
+        //
+        // A comma is only added on request: it is the one separator that also
+        // occurs inside real names ("Earth, Wind & Fire", "Tyler, The
+        // Creator"), and nothing in the text distinguishes the two uses.
+        var delimiters = ["\\\\", ";", "\u{0}"]
+        if DeleteSettings.load().splitArtistsOnComma {
+            delimiters.append(",")
+        }
         var rawComponents = [featSeparated]
         for delimiter in delimiters {
             rawComponents = rawComponents.flatMap { $0.components(separatedBy: delimiter) }
@@ -1038,6 +2545,26 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
     
     func copyFilesFromSharedContainer() async {
+        if let sharedContainerProcessingTask {
+            await sharedContainerProcessingTask.value
+            return
+        }
+
+        sharedContainerProcessingGeneration &+= 1
+        let generation = sharedContainerProcessingGeneration
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performSharedContainerProcessing()
+        }
+        sharedContainerProcessingTask = task
+        await task.value
+
+        if sharedContainerProcessingGeneration == generation {
+            sharedContainerProcessingTask = nil
+        }
+    }
+
+    private func performSharedContainerProcessing() async {
         print("📁 Checking shared container for new music files...")
 
         guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
@@ -1073,12 +2600,13 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             // Group files by folder for playlist creation
             var folderGroups: [String: [URL]] = [:]
-            var processedFiles: [URL] = []
+            var pendingFiles: [[String: Data]] = []
 
             for fileInfo in sharedFiles {
                 guard let bookmarkData = fileInfo["bookmark"],
                       let filenameData = fileInfo["filename"],
                       let filename = String(data: filenameData, encoding: .utf8) else {
+                    print("❌ Dropping malformed shared import entry")
                     continue
                 }
 
@@ -1086,10 +2614,21 @@ class LibraryIndexer: NSObject, ObservableObject {
                     // Resolve bookmark to get access to the original file
                     var isStale = false
                     let url = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
+                    var durableBookmarkData = bookmarkData
 
                     if isStale {
-                        print("⚠️ Bookmark is stale for: \(filename)")
-                        continue
+                        print("⚠️ Refreshing stale bookmark for: \(filename)")
+                        do {
+                            durableBookmarkData = try url.bookmarkData(
+                                options: .minimalBookmark,
+                                includingResourceValuesForKeys: nil,
+                                relativeTo: nil
+                            )
+                        } catch {
+                            print("⚠️ Could not refresh stale bookmark for \(filename): \(error)")
+                            pendingFiles.append(fileInfo)
+                            continue
+                        }
                     }
 
                     // Reject network URLs
@@ -1101,6 +2640,9 @@ class LibraryIndexer: NSObject, ObservableObject {
                     // Start accessing security-scoped resource
                     guard url.startAccessingSecurityScopedResource() else {
                         print("❌ Failed to access security-scoped resource for: \(filename)")
+                        var pendingFileInfo = fileInfo
+                        pendingFileInfo["bookmark"] = durableBookmarkData
+                        pendingFiles.append(pendingFileInfo)
                         continue
                     }
 
@@ -1109,11 +2651,27 @@ class LibraryIndexer: NSObject, ObservableObject {
                     }
 
                     // Process the file directly from its original location
-                    await processExternalFile(url, allowExcludedReimport: true)
+                    let processingResult = await processExternalFileResult(
+                        url,
+                        allowExcludedReimport: true
+                    )
+                    guard processingResult.succeeded else {
+                        print("⏳ Keeping failed shared import for retry: \(filename)")
+                        var pendingFileInfo = fileInfo
+                        pendingFileInfo["bookmark"] = durableBookmarkData
+                        pendingFiles.append(pendingFileInfo)
+                        continue
+                    }
                     print("✅ Processed shared file from original location: \(filename)")
 
                     // Store the bookmark permanently for future access after app updates
-                    await storeBookmarkPermanently(bookmarkData, for: url)
+                    guard await storeBookmarkPermanently(durableBookmarkData, for: url) else {
+                        print("⏳ Keeping shared import until its permanent bookmark is stored: \(filename)")
+                        var pendingFileInfo = fileInfo
+                        pendingFileInfo["bookmark"] = durableBookmarkData
+                        pendingFiles.append(pendingFileInfo)
+                        continue
+                    }
 
                     // Group by folder path for playlist creation
                     if let folderPathData = fileInfo["folderPath"],
@@ -1124,19 +2682,27 @@ class LibraryIndexer: NSObject, ObservableObject {
                         folderGroups[folderPath]?.append(url)
                     }
 
-                    processedFiles.append(url)
-
                 } catch {
                     print("❌ Failed to resolve bookmark for \(filename): \(error)")
+                    pendingFiles.append(fileInfo)
                 }
             }
 
             // Create folder playlists for shared files
             await processSharedFolderPlaylists(folderGroups: folderGroups)
 
-            // Clear the shared files list after processing and storing bookmarks permanently
-            try FileManager.default.removeItem(at: sharedDataURL)
-            print("🗑️ Cleared shared audio files list (bookmarks moved to permanent storage)")
+            if pendingFiles.isEmpty {
+                try FileManager.default.removeItem(at: sharedDataURL)
+                print("🗑️ Cleared shared audio files list (bookmarks moved to permanent storage)")
+            } else {
+                let pendingData = try PropertyListSerialization.data(
+                    fromPropertyList: pendingFiles,
+                    format: .xml,
+                    options: 0
+                )
+                try pendingData.write(to: sharedDataURL, options: .atomic)
+                print("⏳ Preserved \(pendingFiles.count) shared imports for retry")
+            }
 
         } catch {
             print("❌ Failed to process shared audio files: \(error)")
@@ -1248,64 +2814,44 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
     }
 
-    private func storeBookmarkPermanently(_ bookmarkData: Data, for url: URL) async {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
+    private func storeBookmarkPermanently(_ bookmarkData: Data, for url: URL) async -> Bool {
         do {
-            // Load existing bookmarks or create new dictionary
-            var bookmarks: [String: Data] = [:]
-            if FileManager.default.fileExists(atPath: bookmarksURL.path) {
-                let data = try Data(contentsOf: bookmarksURL)
-                if let existingBookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] {
-                    bookmarks = existingBookmarks
-                }
-            }
-
-            // Generate stableId for this file
+            await databaseManager.waitForExternalBookmarkMigration()
             let stableId = try generateStableId(for: url)
-
-            // Store bookmark data using stableId as key (survives file moves)
-            bookmarks[stableId] = bookmarkData
-
-            // Save updated bookmarks
-            let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
-            try plistData.write(to: bookmarksURL)
+            try await ExternalBookmarkStore.shared.store(bookmarkData, for: stableId)
 
             print("💾 Stored permanent bookmark for shared file: \(url.lastPathComponent) with stableId: \(stableId)")
+            return true
         } catch {
             print("❌ Failed to store permanent bookmark for \(url.lastPathComponent): \(error)")
+            return false
         }
     }
 
     private func processStoredExternalBookmarks() async {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
-        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else {
-            print("📁 No stored external bookmarks found")
-            return
-        }
-
         do {
-            let data = try Data(contentsOf: bookmarksURL)
-            guard var bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else {
-                print("❌ Invalid external bookmarks format")
+            await databaseManager.waitForExternalBookmarkMigration()
+            let bookmarks = try await ExternalBookmarkStore.shared.allBookmarks()
+            guard !bookmarks.isEmpty else {
+                print("📁 No stored external bookmarks found")
                 return
             }
-            var bookmarksChanged = false
 
             print("📁 Found \(bookmarks.count) stored external file bookmarks")
 
-            for (stableId, bookmarkData) in Array(bookmarks) {
+            for stableId in Array(bookmarks.keys) {
                 do {
-                    // Resolve bookmark to get current file location
-                    var isStale = false
-                    let resolvedURL = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
-
-                    if isStale {
-                        print("⚠️ Bookmark is stale for stableId: \(stableId)")
+                    guard let resolution = try await ExternalBookmarkStore.shared.resolveAndRefreshBookmark(for: stableId) else {
+                        // Another serialized bookmark operation may have migrated
+                        // or removed this snapshot key while the scan was running.
                         continue
+                    }
+                    let resolvedURL = resolution.url
+                    let durableBookmarkData = resolution.bookmarkData
+                    if resolution.wasRefreshed {
+                        print("✅ Refreshed stale bookmark for: \(resolvedURL.lastPathComponent)")
+                    } else if resolution.wasStale {
+                        print("⚠️ Using resolved URL although bookmark refresh could not be persisted: \(resolvedURL.lastPathComponent)")
                     }
 
                     // Reject network URLs
@@ -1322,28 +2868,39 @@ class LibraryIndexer: NSObject, ObservableObject {
                     var trackAlreadyExists = false
                     if let existingTrack = try databaseManager.getTrack(byStableId: stableId) {
                         trackAlreadyExists = true
-                        // File exists in DB - check if path has changed
-                        if existingTrack.path != resolvedURL.path {
-                            print("📍 File moved detected! Old: \(existingTrack.path)")
-                            print("📍 File moved detected! New: \(resolvedURL.path)")
+                        // Repair either half of the path-derived identity. A
+                        // playback-time bookmark resolution may already have
+                        // updated the path while an older build left the row
+                        // and bookmark under the old path hash.
+                        if existingTrack.path != resolvedURL.path || stableId != resolvedStableId {
+                            if existingTrack.path != resolvedURL.path {
+                                print("📍 File moved detected! Old: \(existingTrack.path)")
+                                print("📍 File moved detected! New: \(resolvedURL.path)")
+                            } else {
+                                print("🔁 Repairing stale path-derived ID for: \(resolvedURL.lastPathComponent)")
+                            }
 
                             try databaseManager.migrateTrackStableIdAndPath(
                                 oldStableId: stableId,
                                 newStableId: resolvedStableId,
                                 newPath: resolvedURL.path
                             )
-                            bookmarks.removeValue(forKey: stableId)
-                            bookmarks[resolvedStableId] = bookmarkData
-                            bookmarksChanged = true
+                            try await ExternalBookmarkStore.shared.migrate(
+                                from: stableId,
+                                to: resolvedStableId,
+                                fallbackData: durableBookmarkData
+                            )
                             print("✅ Updated database path for: \(resolvedURL.lastPathComponent)")
                         } else {
                             print("📍 External file path unchanged: \(resolvedURL.lastPathComponent)")
                         }
                     } else if try databaseManager.getTrack(byStableId: resolvedStableId) != nil {
                         trackAlreadyExists = true
-                        bookmarks.removeValue(forKey: stableId)
-                        bookmarks[resolvedStableId] = bookmarkData
-                        bookmarksChanged = true
+                        try await ExternalBookmarkStore.shared.migrate(
+                            from: stableId,
+                            to: resolvedStableId,
+                            fallbackData: durableBookmarkData
+                        )
                         print("🔁 Updated stale bookmark key for existing track: \(resolvedURL.lastPathComponent)")
                     }
 
@@ -1375,53 +2932,60 @@ class LibraryIndexer: NSObject, ObservableObject {
                 }
             }
 
-            if bookmarksChanged {
-                let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
-                try plistData.write(to: bookmarksURL, options: .atomic)
-                print("✅ Updated external bookmark keys after stable ID migration")
-            }
-
         } catch {
             print("❌ Failed to process stored external bookmarks: \(error)")
         }
     }
 
-    /// Resolve bookmark for a specific track and update database path if file moved
+    /// Resolve a bookmark and keep its path-derived database/bookmark identity
+    /// consistent before returning it to playback.
     func resolveBookmarkForTrack(_ track: Track) async -> URL? {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
-        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else {
-            return nil
-        }
-
         do {
-            let data = try Data(contentsOf: bookmarksURL)
-            guard let bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data],
-                  let bookmarkData = bookmarks[track.stableId] else {
+            await databaseManager.waitForExternalBookmarkMigration()
+            guard let resolution = try await ExternalBookmarkStore.shared.resolveAndRefreshBookmark(for: track.stableId) else {
                 return nil // No bookmark for this track
             }
-
-            // Resolve bookmark to get current file location
-            var isStale = false
-            let resolvedURL = try URL(resolvingBookmarkData: bookmarkData, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &isStale)
-
-            if isStale {
-                print("⚠️ Bookmark is stale for: \(track.title)")
-                return nil
+            let resolvedURL = resolution.url
+            let durableBookmarkData = resolution.bookmarkData
+            if resolution.wasRefreshed {
+                print("✅ Playback refreshed stale bookmark for: \(track.title)")
+            } else if resolution.wasStale {
+                print("⚠️ Playback is using resolved URL although bookmark refresh could not be persisted: \(track.title)")
             }
 
-            // Update database path if file moved
-            if track.path != resolvedURL.path {
+            let resolvedStableId = try generateStableId(for: resolvedURL)
+
+            // Update all identity-bearing stores together if the file moved.
+            // Updating only Track.path leaves a collision window where a new
+            // file imported at the old path reuses this row's stable ID.
+            // Compare the canonical spelling, not the raw one. A bookmark
+            // resolves to whichever of `/var/...` and `/private/var/...` the
+            // system feels like handing back, and the database stores the
+            // canonical form - so a raw string comparison reported a move on
+            // every single play of an external file, wrote the non-canonical
+            // spelling back, and let the next launch's normalisation flip it
+            // straight back again.
+            let resolvedPath = DatabaseManager.canonicalPath(resolvedURL.path)
+            if DatabaseManager.canonicalPath(track.path) != resolvedPath
+                || track.stableId != resolvedStableId {
                 print("📍 Playback: File moved detected! Old: \(track.path)")
                 print("📍 Playback: File moved detected! New: \(resolvedURL.path)")
 
-                try databaseManager.write { db in
-                    var updatedTrack = track
-                    updatedTrack.path = resolvedURL.path
-                    try updatedTrack.update(db)
-                }
-                print("✅ Updated database path for playback: \(resolvedURL.lastPathComponent)")
+                try databaseManager.migrateTrackStableIdAndPath(
+                    oldStableId: track.stableId,
+                    newStableId: resolvedStableId,
+                    newPath: resolvedPath
+                )
+                try await ExternalBookmarkStore.shared.migrate(
+                    from: track.stableId,
+                    to: resolvedStableId,
+                    fallbackData: durableBookmarkData
+                )
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("LibraryNeedsRefresh"),
+                    object: nil
+                )
+                print("✅ Migrated database and bookmark identity for playback: \(resolvedURL.lastPathComponent)")
             }
 
             return resolvedURL
@@ -1474,14 +3038,21 @@ class AudioMetadataParser {
         case "m4a":
             // Detect if AAC or Opus
             if isOpusInM4A(url) {
-                return try await parseBasicMetadata(url, format: "Opus") // Opus → Basic parsing
+                // Opus inside an ISO-BMFF container has no decoder here.
+                // SFBAudioEngineManager.canHandle routes every .m4a to native
+                // playback, and AVAudioFile/Core Audio reject Opus-in-MP4;
+                // SFBAudioEngine's own Opus decoder only accepts Ogg Opus, so
+                // there is no branch to route it to either. Indexing it added
+                // a fully-tagged row that every playback path then silently
+                // skipped, which reads as "this song does nothing".
+                print("⏭️ Opus in an MP4 container has no decoder on this platform: \(url.lastPathComponent)")
+                throw AudioParseError.unplayableFormat
             } else {
                 return try await parseAacMetadata(url)  // AAC → Native
             }
 
-        // SFBAudioEngine formats (but use basic parsing for metadata to avoid hangs)
-        case "opus", "ogg":
-            return try await parseBasicMetadata(url, format: "Opus/Vorbis")
+        case "opus", "ogg", "oga":
+            return try await parseOpusOrVorbis(url)
 
         case "dsf", "dff":
             return try await parseDSDBasicMetadata(url)
@@ -1617,14 +3188,17 @@ class AudioMetadataParser {
                 album = metadata["ALBUM"]
                 albumArtist = metadata["ALBUMARTIST"]
                 
+                // "1/12" for TRACKNUMBER/DISCNUMBER and a full "2024-05-01"
+                // for DATE are all ordinary in Vorbis comments; handing them
+                // straight to Int() returned nil and dropped the value.
                 if let trackStr = metadata["TRACKNUMBER"] {
-                    trackNumber = Int(trackStr)
+                    trackNumber = parseSlashSeparatedNumber(trackStr)
                 }
                 if let discStr = metadata["DISCNUMBER"] {
-                    discNumber = Int(discStr)
+                    discNumber = parseSlashSeparatedNumber(discStr)
                 }
-                if let dateStr = metadata["DATE"] {
-                    year = Int(dateStr)
+                if let dateStr = metadata["DATE"] ?? metadata["YEAR"] {
+                    year = parseYear(dateStr)
                 }
                 
                 if let gainStr = metadata["REPLAYGAIN_TRACK_GAIN"] {
@@ -1720,6 +3294,17 @@ class AudioMetadataParser {
         return Double(cleaned)
     }
 
+    /// Accepts a bare year, an ISO date ("2024-05-01"), or anything else that
+    /// starts with a four-digit year.
+    private static func parseYear(_ value: String) -> Int? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let exact = Int(trimmed) { return exact }
+
+        let digits = trimmed.prefix { $0.isNumber }
+        guard digits.count == 4, let year = Int(digits) else { return nil }
+        return year
+    }
+
     private static func parseSlashSeparatedNumber(_ value: String) -> Int? {
         let firstPart = value.components(separatedBy: "/").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? value
         return Int(firstPart)
@@ -1767,38 +3352,73 @@ class AudioMetadataParser {
         return nil
     }
     
+    /// Carries one coordinated parse's outcome out of the accessor block.
+    /// Created, written and read by a single call; the semaphore below orders
+    /// the one write against the one read.
+    private final class CoordinatedParseOutcome: @unchecked Sendable {
+        var result: Result<AudioMetadata, Error>?
+    }
+
     private static func parseMp3MetadataSync(from url: URL) async throws -> AudioMetadata {
         print("📖 Reading MP3 metadata for: \(url.lastPathComponent)")
-        
-        // Use NSFileCoordinator for iCloud files (same as FLAC)
-        let asset: AVURLAsset = try await withCheckedThrowingContinuation { continuation in
+
+        // Use NSFileCoordinator for iCloud files (same as FLAC).
+        //
+        // The whole parse happens INSIDE the accessor. Coordinated access ends
+        // the moment that block returns, and this used to return immediately
+        // with a lazily-constructed AVURLAsset: every `asset.load(...)` and the
+        // AVAudioFile read below then ran with no coordination at all, which is
+        // exactly the window this call exists to close (a file still being
+        // written, or an iCloud item being replaced under us). The accessor is
+        // synchronous and the reads are not, so it is held open on a semaphore.
+        // This runs on a global queue, never the cooperative pool, and
+        // parseAudioFile's 30s hard timeout still bounds the whole thing.
+        return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                var error: NSError?
+                var coordinationError: NSError?
                 let coordinator = NSFileCoordinator()
-                
-                coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &error) { (readingURL) in
+                let outcome = CoordinatedParseOutcome()
+
+                coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { (readingURL) in
                     // Create fresh URL to avoid stale metadata
                     let freshURL = URL(fileURLWithPath: readingURL.path)
                     print("🔄 Using NSFileCoordinator for MP3: \(freshURL.lastPathComponent)")
-                    
+
                     // Check if file actually exists at path
                     guard FileManager.default.fileExists(atPath: freshURL.path) else {
-                        continuation.resume(throwing: AudioParseError.fileNotReadable)
+                        outcome.result = .failure(AudioParseError.fileNotReadable)
                         return
                     }
-                    
-                    let asset = AVURLAsset(url: freshURL)
-                    print("✅ MP3 AVURLAsset created successfully via NSFileCoordinator")
-                    continuation.resume(returning: asset)
+
+                    let finished = DispatchSemaphore(value: 0)
+                    Task.detached(priority: .utility) {
+                        let metadata = await readTrackMetadata(from: freshURL)
+                        outcome.result = .success(metadata)
+                        finished.signal()
+                    }
+                    finished.wait()
                 }
-                
-                if let error = error {
-                    print("❌ NSFileCoordinator error for MP3: \(error)")
-                    continuation.resume(throwing: error)
+
+                // Exactly one resume on every path: Foundation runs the
+                // accessor only when coordination succeeded, and populates the
+                // error only when it did not.
+                if let coordinationError {
+                    print("❌ NSFileCoordinator error for MP3: \(coordinationError)")
+                    continuation.resume(throwing: coordinationError)
+                } else if let result = outcome.result {
+                    continuation.resume(with: result)
+                } else {
+                    continuation.resume(throwing: AudioParseError.fileNotReadable)
                 }
             }
         }
-        
+    }
+
+    /// The MP3/AAC parse proper. Called from inside a coordinated read, so
+    /// `url` is the reading URL Foundation handed out rather than the caller's.
+    private static func readTrackMetadata(from url: URL) async -> AudioMetadata {
+        let asset = AVURLAsset(url: url)
+
         var title: String?
         var artist: String?
         var album: String?
@@ -2124,17 +3744,14 @@ class AudioMetadataParser {
         }
     }
 
-    // Check if M4A contains Opus codec
-    private static func isOpusInM4A(_ url: URL) -> Bool {
-        // Check MP4 atoms for Opus codec
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
-            return false
-        }
-
-        // Look for 'Opus' atom in MP4 structure
-        // MP4 structure: ftyp → moov → trak → mdia → minf → stbl → stsd → Opus
-        let opusSignature = "Opus".data(using: .ascii)!
-        return data.range(of: opusSignature, in: 0..<min(data.count, 10000)) != nil
+    /// Whether an M4A file holds an Opus stream rather than AAC.
+    ///
+    /// One implementation, in `PlaybackRouter`: this answer decides both how a
+    /// file is routed for playback and - through `AudioParseError`
+    /// `.unplayableFormat` - whether its row is deleted from the library, so
+    /// the two must never be able to disagree.
+    static func isOpusInM4A(_ url: URL) -> Bool {
+        PlaybackRouter.isOpusInM4A(url)
     }
 
     // Parse AAC metadata using native AVFoundation
@@ -2143,6 +3760,57 @@ class AudioMetadataParser {
 
         // Use similar logic to MP3 parsing since AAC can have similar metadata
         return try await parseMp3MetadataSync(from: url)
+    }
+
+    /// Reads real tags for Opus/Vorbis, falling back to the filename parser
+    /// only when metadata extraction fails but the playback decoder still opens.
+    ///
+    /// These formats used to go straight to parseBasicMetadata, which does
+    /// nothing but split the filename on " - ": every Opus/Ogg track in the
+    /// library lost its album, track number, disc number, year and ReplayGain,
+    /// and was stored with a zero duration, sample rate and channel count - so
+    /// they all piled into "Unknown Album" in arbitrary order showing 0:00.
+    /// parseSFBAudioFile already extracted all of it correctly and had no
+    /// callers anywhere. parseAudioFile still bounds this with its 30s timeout.
+    private static func parseOpusOrVorbis(_ url: URL) async throws -> AudioMetadata {
+        do {
+            return try await parseSFBAudioFile(url)
+        } catch {
+            let metadataError = error
+            print("⚠️ SFBAudioEngine metadata failed for \(url.lastPathComponent) - falling back to filename parsing: \(metadataError)")
+            try Task.checkCancellation()
+
+            // Metadata can be unreadable even when the audio stream is fine,
+            // which is the case the filename fallback is meant to preserve.
+            // Only use that fallback after proving the playback decoder can
+            // open the stream. A failed second open is not proof that the file
+            // is permanently unplayable: file protection, an in-progress
+            // replacement, or a transient provider failure makes both reads
+            // fail for the same reason. Preserve any existing library row and
+            // its user data by reporting an ordinary scan failure instead of
+            // promoting this ambiguous result to `.unplayableFormat`.
+            guard canOpenSFBAudioDecoder(for: url) else {
+                print("⚠️ Audio stream could not be validated; preserving any existing library row: \(url.lastPathComponent)")
+                throw metadataError
+            }
+
+            try Task.checkCancellation()
+            return try await parseBasicMetadata(url, format: "Opus/Vorbis")
+        }
+    }
+
+    /// Validates the playback decoder before allowing graceful tag fallback.
+    private static func canOpenSFBAudioDecoder(for url: URL) -> Bool {
+        do {
+            let decoder = try SFBAudioEngine.AudioDecoder(url: url)
+            try decoder.open()
+            defer { try? decoder.close() }
+            return decoder.processingFormat.sampleRate > 0
+                && decoder.processingFormat.channelCount > 0
+        } catch {
+            print("⚠️ Decoder validation failed for \(url.lastPathComponent): \(error)")
+            return false
+        }
     }
 
     // Parse using SFBAudioEngine for Opus, Vorbis, etc.
@@ -2206,14 +3874,22 @@ class AudioMetadataParser {
     // Simple artwork detection for supported formats
     private static func checkForEmbeddedArtwork(url: URL) async -> Bool {
         do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            // The Ogg/Vorbis picture field is part of the comment header, and
+            // the DSD checks below were already bounded to this same range.
+            // Read only that prefix instead of mapping and paging through an
+            // entire song for one marker. FileHandle also keeps the operation
+            // bounded when a scan timeout cancels its surrounding task.
+            let maximumHeaderBytes = 1_048_576
+            let fileHandle = try FileHandle(forReadingFrom: url)
+            defer { try? fileHandle.close() }
+            let data = try fileHandle.read(upToCount: maximumHeaderBytes) ?? Data()
             let ext = url.pathExtension.lowercased()
 
             // Common image format signatures
             let jpegSignature = Data([0xFF, 0xD8, 0xFF])
             let pngSignature = Data([0x89, 0x50, 0x4E, 0x47])
 
-            if ext == "opus" || ext == "ogg" {
+            if ext == "opus" || ext == "ogg" || ext == "oga" {
                 // OGG/Opus files use Vorbis Comments with base64-encoded METADATA_BLOCK_PICTURE
                 // Search for "METADATA_BLOCK_PICTURE=" tag
                 if let pictureTag = "METADATA_BLOCK_PICTURE=".data(using: .utf8),
@@ -2227,7 +3903,7 @@ class AudioMetadataParser {
                 let dsfSignature = Data([0x44, 0x53, 0x44, 0x20])
                 if data.starts(with: dsfSignature) {
                     // Search for image signatures in the file (DSF can contain embedded artwork)
-                    let searchRange = 0..<min(data.count, 1048576) // Search first 1MB
+                    let searchRange = 0..<data.count
                     return data.range(of: jpegSignature, in: searchRange) != nil ||
                            data.range(of: pngSignature, in: searchRange) != nil
                 }
@@ -2241,7 +3917,7 @@ class AudioMetadataParser {
                     if data.starts(with: frm8Signature) &&
                        data.subdata(in: 8..<12) == dsdSignature {
                         // Search for image signatures in DSDIFF file
-                        let searchRange = 0..<min(data.count, 1048576) // Search first 1MB
+                        let searchRange = 0..<data.count
                         return data.range(of: jpegSignature, in: searchRange) != nil ||
                                data.range(of: pngSignature, in: searchRange) != nil
                     }
@@ -2278,7 +3954,7 @@ class AudioMetadataParser {
         var bitDepth: Int? = nil
 
         switch ext {
-        case "opus", "ogg", "m4a":
+        case "opus", "ogg", "oga", "m4a":
             bitDepth = nil      // Lossy format
         default:
             break
@@ -2286,7 +3962,7 @@ class AudioMetadataParser {
 
         // Check for embedded artwork in supported formats
         var hasEmbeddedArt = false
-        if ext == "opus" || ext == "ogg" {
+        if ext == "opus" || ext == "ogg" || ext == "oga" {
             // These formats can have embedded artwork, check with basic methods
             hasEmbeddedArt = await checkForEmbeddedArtwork(url: url)
         }
@@ -2321,6 +3997,38 @@ class AudioMetadataParser {
     // Parse DSD metadata with proper ID3v2 tag extraction from DSF files
     private static func parseDSDBasicMetadata(_ url: URL) async throws -> AudioMetadata {
         print("📖 Reading DSD metadata with ID3v2 extraction for: \(url.lastPathComponent)")
+
+        // Try the real tag reader first. TagLib (via SFBAudioEngine) handles
+        // both DSF and DSDIFF, including the duration, sample rate and channel
+        // count the hand-rolled path below never produced.
+        //
+        // Without this every DSD row landed in the library with filename-only
+        // tags at 0:00: the ID3 extractor was reached only for .dsf, and it
+        // bails out above 50MB - which a stereo DSD64 track passes after about
+        // 70 seconds, so in practice it never ran on a real song either.
+        if let tagged = try? await parseSFBAudioFile(url),
+           (tagged.durationMs ?? 0) > 0 || (tagged.sampleRate ?? 0) > 0 || tagged.title != nil {
+            print("✅ Read DSD tags with TagLib: \(url.lastPathComponent)")
+            return AudioMetadata(
+                title: tagged.title,
+                artist: tagged.artist,
+                album: tagged.album,
+                albumArtist: tagged.albumArtist,
+                trackNumber: tagged.trackNumber,
+                discNumber: tagged.discNumber,
+                year: tagged.year,
+                durationMs: tagged.durationMs,
+                sampleRate: tagged.sampleRate,
+                bitDepth: 1,  // DSD is always 1-bit; TagLib does not report it
+                channels: tagged.channels,
+                replaygainTrackGain: tagged.replaygainTrackGain,
+                replaygainAlbumGain: tagged.replaygainAlbumGain,
+                replaygainTrackPeak: tagged.replaygainTrackPeak,
+                replaygainAlbumPeak: tagged.replaygainAlbumPeak,
+                hasEmbeddedArt: tagged.hasEmbeddedArt
+            )
+        }
+        print("⚠️ TagLib could not read DSD tags - falling back to the ID3/filename path: \(url.lastPathComponent)")
 
         var title: String?
         var artist: String?
@@ -2716,4 +4424,9 @@ enum AudioParseError: Error {
     case unsupportedFormat
     case fileNotReadable
     case fileSizeError
+    /// The file parses fine but nothing on this platform can decode it, so
+    /// indexing it would only put a permanently unplayable row in the library.
+    /// Distinct from a parse failure: callers skip the file without recording
+    /// a scan failure, so the scan still completes successfully.
+    case unplayableFormat
 }

@@ -202,7 +202,26 @@ struct PlayerView: View {
     }
 
     private var lyricsSheet: some View {
-        LiveLyricsSheet(lyrics: currentLyrics, isLoading: isLoadingLyrics)
+        LiveLyricsSheet(
+            lyrics: currentLyrics,
+            isLoading: isLoadingLyrics,
+            trackTitle: playerEngine.currentTrack?.title,
+            trackArtist: lyricsArtistName,
+            onRetry: { loadLyrics(forceRefresh: true) },
+            track: playerEngine.currentTrack,
+            onSelectAlternative: { id in applyLyricsAlternative(id) }
+        )
+    }
+
+    /// Resolved once for the sheet header. `artistButton` looks this up the
+    /// same way, but the sheet re-renders on every playback tick, so the
+    /// lookup is kept out of the lyrics view itself.
+    private var lyricsArtistName: String? {
+        guard let track = playerEngine.currentTrack else { return nil }
+        return try? DatabaseManager.shared.getArtistDisplayName(
+            forTrackStableId: track.stableId,
+            fallbackArtistId: track.artistId
+        )
     }
 
     // MARK: - Artwork Section
@@ -527,9 +546,7 @@ struct PlayerView: View {
             duration: playerEngine.duration,
             accentColor: settings.backgroundColorChoice.color,
             onSeek: { newTime in
-                Task {
-                    await playerEngine.seek(to: newTime)
-                }
+                await playerEngine.seek(to: newTime)
             }
         )
     }
@@ -786,13 +803,32 @@ struct PlayerView: View {
         sleepTimerEndDate = nil
     }
 
-    private func loadLyrics() {
+    /// Adopts a specific lrclib record the user picked over the automatic match.
+    private func applyLyricsAlternative(_ id: Int) {
         guard let currentTrack = playerEngine.currentTrack else { return }
 
         isLoadingLyrics = true
+        Task {
+            let lyrics = await LyricsManager.shared.useAlternative(id, for: currentTrack)
+            await MainActor.run {
+                if let lyrics { currentLyrics = lyrics }
+                isLoadingLyrics = false
+            }
+        }
+    }
+
+    /// - Parameter forceRefresh: ignore a remembered "lrclib has nothing for
+    ///   this song" and ask again. Backs the retry on the not-found card.
+    private func loadLyrics(forceRefresh: Bool = false) {
+        guard let currentTrack = playerEngine.currentTrack else { return }
+
+        isLoadingLyrics = true
+        if forceRefresh { currentLyrics = nil }
 
         Task {
-            let lyrics = await LyricsManager.shared.getLyrics(for: currentTrack)
+            let lyrics = forceRefresh
+                ? await LyricsManager.shared.refreshLyrics(for: currentTrack)
+                : await LyricsManager.shared.getLyrics(for: currentTrack)
 
             await MainActor.run {
                 currentLyrics = lyrics
@@ -936,7 +972,7 @@ private struct PlayerProgressSection: View {
     @ObservedObject private var progress = PlayerEngine.shared.progress
     let duration: TimeInterval
     let accentColor: Color
-    let onSeek: (TimeInterval) -> Void
+    let onSeek: (TimeInterval) async -> Void
 
     private var fraction: Double {
         guard duration > 0 else { return 0 }
@@ -949,7 +985,7 @@ private struct PlayerProgressSection: View {
         VStack(spacing: UIScreen.main.scale < UIScreen.main.nativeScale ? 12 : 16) {
             InteractiveProgressBar(
                 progress: fraction,
-                onSeek: { onSeek($0 * duration) },
+                onSeek: { await onSeek($0 * duration) },
                 accentColor: accentColor
             )
             .frame(height: 1)
@@ -983,19 +1019,34 @@ private struct LiveLyricsSheet: View {
     @ObservedObject private var progress = PlayerEngine.shared.progress
     let lyrics: Lyrics?
     let isLoading: Bool
+    let trackTitle: String?
+    let trackArtist: String?
+    let onRetry: (() -> Void)?
+    let track: Track?
+    let onSelectAlternative: ((Int) -> Void)?
 
     var body: some View {
         LyricsView(
             lyrics: lyrics,
             currentTime: progress.playbackTime,
-            isLoading: isLoading
+            isLoading: isLoading,
+            trackTitle: trackTitle,
+            trackArtist: trackArtist,
+            onSeek: { time in
+                Task { await PlayerEngine.shared.seek(to: time) }
+            },
+            onRetry: onRetry,
+            loadAlternatives: track.map { track in
+                { await LyricsManager.shared.alternatives(for: track) }
+            },
+            onSelectAlternative: onSelectAlternative
         )
     }
 }
 
 struct InteractiveProgressBar: View {
     let progress: Double
-    let onSeek: (Double) -> Void
+    let onSeek: (Double) async -> Void
     let accentColor: Color
     
     @State private var isDragging = false
@@ -1025,11 +1076,9 @@ struct InteractiveProgressBar: View {
                     .offset(x: (geometry.size.width * displayProgress) - 6)
             }
             .contentShape(Rectangle())
-            .onTapGesture { location in
-                let newProgress = max(0, min(1, location.x / geometry.size.width))
-                onSeek(newProgress)
-            }
             .gesture(
+                // A zero minimum distance handles taps as well as drags and
+                // avoids launching two competing seek tasks for one touch.
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         isDragging = true
@@ -1037,8 +1086,11 @@ struct InteractiveProgressBar: View {
                     }
                     .onEnded { value in
                         let finalProgress = max(0, min(1, value.location.x / geometry.size.width))
-                        onSeek(finalProgress)
-                        isDragging = false
+                        dragProgress = finalProgress
+                        Task { @MainActor in
+                            await onSeek(finalProgress)
+                            isDragging = false
+                        }
                     }
             )
         }
@@ -1058,6 +1110,34 @@ struct MiniPlayerView: View {
             if playerEngine.currentTrack != nil {
                 // Mini player that shows sheet when tapped
                 VStack(spacing: 0) {
+                    // A track that cannot be played says so here. Previously
+                    // playbackState went to .loading or .stopped and no view
+                    // read it, so a file that had gone missing - or an iCloud
+                    // download that stalled - just sat silent and selected.
+                    if let message = playerEngine.playbackErrorMessage {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text(message)
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .lineLimit(2)
+                            Spacer(minLength: 0)
+                            Button {
+                                playerEngine.playbackErrorMessage = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.orange.opacity(0.12))
+                        .accessibilityElement(children: .combine)
+                    }
+
                     // Mini player content
                     HStack(spacing: 12) {
                         // Album artwork
@@ -1167,6 +1247,9 @@ struct MiniPlayerView: View {
                     .padding(.horizontal, 12)
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        // The sheet would otherwise open on top of a
+                        // keyboard left up by a list's search field.
+                        dismissSearchKeyboard()
                         isExpanded = true
                     }
                 }
@@ -1255,6 +1338,19 @@ struct TrackRowView: View, @MainActor Equatable {
     let playlist: Playlist?
     let showDirectDeleteButton: Bool
     let onEnterBulkMode: (() -> Void)?
+
+    /// Everything the closures above capture that can change without any of
+    /// the compared fields changing.
+    ///
+    /// `.equatable()` skips `body` whenever `==` answers true, and the stored
+    /// view - including `onTap` - is kept as it was. So a closure that reads
+    /// the parent's state acts on whatever that state held the last time this
+    /// row actually re-rendered. That is how searching a list produced a queue
+    /// built from the *unfiltered* list: the surviving rows compared equal, so
+    /// they kept the `onTap` that had captured the pre-search track array.
+    /// Anything a closure reads has to be folded in here.
+    /// Composed by the parent; see `TrackListContentView.rowContextIdentity`.
+    let contextIdentity: String
     
     @EnvironmentObject private var appCoordinator: AppCoordinator
     
@@ -1277,7 +1373,9 @@ struct TrackRowView: View, @MainActor Equatable {
         lhs.activeTrackId == rhs.activeTrackId &&
         lhs.isAudioPlaying == rhs.isAudioPlaying &&
         lhs.artistName == rhs.artistName &&
-        lhs.playlist?.id == rhs.playlist?.id
+        lhs.playlist?.id == rhs.playlist?.id &&
+        lhs.showDirectDeleteButton == rhs.showDirectDeleteButton &&
+        lhs.contextIdentity == rhs.contextIdentity
     }
 
     private func resolvedArtistName() -> String? {
@@ -1429,8 +1527,8 @@ struct TrackRowView: View, @MainActor Equatable {
                 .accentColor(deleteSettings.backgroundColorChoice.color)
         }
         .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
-            Button("Delete", role: .destructive) { deleteFile() }
-            Button("Cancel", role: .cancel) { }
+            Button(Localized.delete, role: .destructive) { deleteFile() }
+            Button(Localized.cancel, role: .cancel) { }
         } message: {
             Text(Localized.deleteFileConfirmation(track.title))
         }
@@ -1438,6 +1536,7 @@ struct TrackRowView: View, @MainActor Equatable {
             isFavorite = (try? appCoordinator.isFavorite(trackStableId: track.stableId)) ?? false
             if artworkImage == nil { loadArtwork() }
         }
+        .reloadsArtwork(for: track.stableId) { loadArtwork() }
     }
     
     private func loadArtwork() {
@@ -1451,7 +1550,7 @@ struct TrackRowView: View, @MainActor Equatable {
             do {
                 let settings = DeleteSettings.load()
                 if settings.deleteFromLibraryOnly {
-                    DeleteSettings.addExcludedTrack(track.stableId)
+                    DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                 } else {
                     do {
                         try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
@@ -1460,7 +1559,7 @@ struct TrackRowView: View, @MainActor Equatable {
                     }
                 }
 
-                try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
                 print("❌ Failed to delete track: \(error)")

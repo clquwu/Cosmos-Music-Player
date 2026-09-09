@@ -110,9 +110,7 @@
 "keep_folder_playlists" = "Сохранить плейлисты";
 "player_controls" = "Элементы управления плеером";
 "show_lyrics_button" = "Показывать кнопку текста песни";
-"show_lyrics_button_description" = "Показывать кнопку текста песни в плеере, когда кнопка таймера сна отключена.";
 "show_sleep_timer_button" = "Показывать кнопку таймера сна";
-"show_sleep_timer_button_description" = "Заменить кнопку текста песни в плеере на кнопку таймера сна.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Добавить в любимые";
@@ -255,10 +253,10 @@
 "audio_settings" = "Аудио";
 "dsd_playback_mode" = "Режим воспроизведения DSD";
 "dsd_playback_mode_description" = "Выберите способ воспроизведения DSD-аудиофайлов (DSF/DFF)";
-"dsd_mode_auto" = "Авто (определение DAC)";
+"dsd_mode_auto" = "Авто (безопасно)";
 "dsd_mode_pcm" = "Преобразование в PCM";
 "dsd_mode_dop" = "DoP (DSD over PCM)";
-"dsd_mode_auto_description" = "Автоматически определять внешний DAC и использовать DoP при поддержке, иначе преобразовывать в PCM";
+"dsd_mode_auto_description" = "Безопасно преобразует в PCM, поскольку iOS не может проверить поддержку DoP; выбирайте DoP явно только для совместимого DAC";
 "dsd_mode_pcm_description" = "Всегда преобразовывать DSD в PCM для воспроизведения (совместимо со всеми устройствами)";
 "dsd_mode_dop_description" = "Всегда использовать кодирование DoP (требуется внешний DAC с поддержкой DSD)";
 
@@ -383,3 +381,89 @@
 
 "ai_playlist_created_title" = "Плейлист создан";
 "ai_playlist_created_message" = "Плейлист «%@» создан. Песен: %d.";
+
+/* In-place search bars and queue navigation */
+"search_songs" = "Поиск песен, исполнителей, альбомов";
+"search_artists" = "Поиск исполнителей";
+"search_albums" = "Поиск альбомов";
+"search_playlists" = "Поиск плейлистов";
+
+/* Library scan interval and album-artist browsing */
+"album_artists" = "Исполнители альбомов";
+"all_artists" = "Все исполнители";
+"library_scan_frequency" = "Автоматическое сканирование";
+"library_scan_frequency_description" = "Как часто Cosmos пересканирует файлы при запуске. iOS часто закрывает приложение в фоне, поэтому короткий интервал означает полное сканирование почти при каждом открытии. Кнопка синхронизации всегда сканирует сразу.";
+"checking_library_formats" = "Проверка аудиоформатов…";
+"scan_every_launch" = "При каждом запуске";
+"scan_hourly" = "Не чаще раза в час";
+"scan_daily" = "Не чаще раза в день";
+"scan_weekly" = "Не чаще раза в неделю";
+"scan_manual_only" = "Только вручную";
+
+/* Playback failures the user can act on */
+"playback_track_unavailable" = "Не удалось воспроизвести этот трек. Возможно, файл перемещён или удалён.";
+"playback_download_stalled" = "Загрузка остановилась. Проверьте подключение и повторите попытку.";
+"playback_audio_unavailable" = "Аудиовыход временно недоступен. Проверьте подключение и повторите попытку.";
+"playback_format_needs_phone" = "Этот формат нельзя воспроизвести через CarPlay. Включите его на телефоне или выберите другой трек.";
+
+/* Lyrics screen */
+"lyrics" = "Текст песни";
+"close" = "Закрыть";
+"lyrics_copy" = "Скопировать текст";
+"lyrics_more_actions" = "Другие действия с текстом";
+"lyrics_seek_hint" = "Воспроизводит песню с этой строки";
+"lyrics_back_to_current" = "К текущей строке";
+"lyrics_instrumental_break" = "Инструментальная часть";
+"lyrics_instrumental" = "Инструментал";
+"lyrics_instrumental_message" = "У этого трека нет текста";
+"lyrics_unavailable" = "Текст недоступен";
+"lyrics_unavailable_message" = "Текст для этого трека не найден";
+"lyrics_loading" = "Загрузка текста";
+"lyrics_loading_message" = "Поиск в метаданных и онлайн-источниках";
+"lyrics_search_again" = "Искать снова";
+
+/* App appearance */
+"app_appearance" = "Оформление приложения";
+"app_appearance_description" = "Выберите оформление Cosmos или следуйте настройке устройства.";
+"appearance_system" = "Системное";
+"appearance_light" = "Светлое";
+"appearance_dark" = "Тёмное";
+"lyrics_choose_version" = "Выбрать версию";
+"lyrics_synced" = "С синхронизацией";
+"queue_full_list_from_search" = "Ставить в очередь весь список из поиска";
+"queue_full_list_from_search_description" = "При воспроизведении найденного трека ставить в очередь весь исходный список, а не только результаты поиска.";
+"split_artists_on_comma" = "Разделять исполнителей по запятым";
+"split_artists_on_comma_description" = "Считать «A, B» в теге исполнителя двумя исполнителями. По умолчанию выключено: запятые встречаются и внутри настоящих названий, например «Earth, Wind & Fire».";
+
+/* Дополнительная локализация интерфейса */
+"playlist_cover" = "Обложка плейлиста";
+"change_cover_image" = "Изменить обложку";
+"remove_custom_cover" = "Удалить пользовательскую обложку";
+"unknown" = "Неизвестно";
+"searching" = "Поиск…";
+"albums_count_singular" = "%d альбом";
+"albums_count_plural" = "%d альбомов";
+"disc_number" = "Диск %d";
+"imported_song_count_singular" = "Импортирована %d песня";
+"imported_song_count_plural" = "Импортировано %d песен";
+"songs_already_in_library" = "Уже в медиатеке: %d";
+"import_summary" = "Импортировано: %d, пропущено: %d";
+"setting_up_icloud_library" = "Настройка музыкальной медиатеки iCloud…";
+"setting_up_offline_library" = "Настройка автономной музыкальной медиатеки…";
+"setting_up_local_library" = "Настройка локальной музыкальной медиатеки…";
+"manual_parametric_eq" = "Ручной параметрический эквалайзер";
+"create_manual_eq" = "Создать ручной эквалайзер";
+"bands" = "Полосы";
+"create_parametric_eq_description" = "Создайте параметрический пресет эквалайзера с количеством полностью настраиваемых полос до 16.";
+"edit_parametric_bands_description" = "После создания можно изменить частоту, усиление и добротность каждой полосы.";
+"parametric_editor" = "Параметрический редактор";
+"band_count" = "%d / %d полос";
+"add_band" = "Добавить полосу";
+"remove_band" = "Удалить полосу";
+"selected_band" = "Выбранная полоса";
+"band_number" = "Полоса %d";
+"frequency" = "Частота";
+"gain" = "Усиление";
+"sort_manual_order" = "Ручной порядок";
+"sort_artist_az" = "Исполнитель А–Я";
+"sort_artist_za" = "Исполнитель Я–А";

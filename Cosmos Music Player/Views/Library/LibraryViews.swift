@@ -168,16 +168,16 @@ struct LibraryView: View {
                     syncToastColor = .green
                     if skippedCount == 0 {
                         if addedCount == 1 {
-                            syncToastMessage = "1 song imported"
+                            syncToastMessage = Localized.importedSongCount(addedCount)
                         } else {
-                            syncToastMessage = "\(addedCount) songs imported"
+                            syncToastMessage = Localized.importedSongCount(addedCount)
                         }
                     } else if addedCount == 0 {
                         syncToastIcon = "info.circle.fill"
                         syncToastColor = .blue
-                        syncToastMessage = "\(skippedCount) already in library"
+                        syncToastMessage = Localized.songsAlreadyInLibrary(skippedCount)
                     } else {
-                        syncToastMessage = "\(addedCount) imported, \(skippedCount) skipped"
+                        syncToastMessage = Localized.importSummary(imported: addedCount, skipped: skippedCount)
                     }
 
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -201,28 +201,10 @@ struct LibraryView: View {
     }
 
     private func storeBookmarkData(_ bookmarkData: Data, for url: URL) async {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
         do {
-            // Load existing bookmarks or create new dictionary
-            var bookmarks: [String: Data] = [:]
-            if FileManager.default.fileExists(atPath: bookmarksURL.path) {
-                if let data = try? Data(contentsOf: bookmarksURL),
-                   let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] {
-                    bookmarks = plist
-                }
-            }
-
-            // Generate stableId for this file
+            await DatabaseManager.shared.waitForExternalBookmarkMigration()
             let stableId = try libraryIndexer.generateStableId(for: url)
-
-            // Store bookmark using stableId as key (survives file moves)
-            bookmarks[stableId] = bookmarkData
-
-            // Save updated bookmarks
-            let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
-            try plistData.write(to: bookmarksURL)
+            try await ExternalBookmarkStore.shared.store(bookmarkData, for: stableId)
 
             print("Stored bookmark for external file: \(url.lastPathComponent) with stableId: \(stableId)")
         } catch {
@@ -680,36 +662,15 @@ struct LibrarySectionRowView: View {
 
 struct AllSongsScreen: View {
     let tracks: [Track]
-    @EnvironmentObject private var appCoordinator: AppCoordinator
-    @State private var settings = DeleteSettings.load()
 
     var body: some View {
-        TrackListView(tracks: tracks, listIdentifier: "all_songs")
+        // Shuffle lives in TrackListView so that it shuffles the songs on
+        // screen - with a search active, shuffling the whole library instead
+        // would ignore what the user just narrowed down to.
+        TrackListView(tracks: tracks, listIdentifier: "all_songs", showsShuffleButton: true)
             .background(ScreenSpecificBackgroundView(screen: .allSongs))
             .navigationTitle(Localized.allSongs)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        shuffleAllSongs()
-                    } label: {
-                        Image(systemName: "shuffle")
-                            .foregroundColor(settings.backgroundColorChoice.color)
-                    }
-                    .disabled(tracks.isEmpty)
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
-                settings = DeleteSettings.load()
-            }
-    }
-
-    private func shuffleAllSongs() {
-        guard !tracks.isEmpty else { return }
-        let shuffled = tracks.shuffled()
-        Task {
-            await appCoordinator.playTrack(shuffled[0], queue: shuffled)
-        }
     }
 }
 
@@ -717,41 +678,23 @@ struct LikedSongsScreen: View {
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var likedTracks: [Track] = []
-    @State private var settings = DeleteSettings.load()
 
     var body: some View {
-        TrackListView(tracks: likedTracks, listIdentifier: "liked_songs", isLikedSongsScreen: true)
+        TrackListView(
+            tracks: likedTracks,
+            listIdentifier: "liked_songs",
+            isLikedSongsScreen: true,
+            showsShuffleButton: true
+        )
             .background(ScreenSpecificBackgroundView(screen: .likedSongs))
             .navigationTitle(Localized.likedSongs)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        shuffleLikedSongs()
-                    } label: {
-                        Image(systemName: "shuffle")
-                            .foregroundColor(settings.backgroundColorChoice.color)
-                    }
-                    .disabled(likedTracks.isEmpty)
-                }
-            }
             .onAppear {
                 loadLikedTracks()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
                 loadLikedTracks()
             }
-            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
-                settings = DeleteSettings.load()
-            }
-    }
-
-    private func shuffleLikedSongs() {
-        guard !likedTracks.isEmpty else { return }
-        let shuffled = likedTracks.shuffled()
-        Task {
-            await appCoordinator.playTrack(shuffled[0], queue: shuffled)
-        }
     }
 
     private func loadLikedTracks() {
@@ -777,13 +720,13 @@ enum TrackSortOption: String, CaseIterable {
 
     var localizedString: String {
         switch self {
-        case .playlistOrder: return "Manual Order"
+        case .playlistOrder: return Localized.sortManualOrder
         case .dateNewest: return Localized.sortDateNewest
         case .dateOldest: return Localized.sortDateOldest
         case .nameAZ: return Localized.sortNameAZ
         case .nameZA: return Localized.sortNameZA
-        case .artistAZ: return "Artist A-Z"
-        case .artistZA: return "Artist Z-A"
+        case .artistAZ: return Localized.sortArtistAZ
+        case .artistZA: return Localized.sortArtistZA
         case .sizeLargest: return Localized.sortSizeLargest
         case .sizeSmallest: return Localized.sortSizeSmallest
         }
@@ -791,11 +734,13 @@ enum TrackSortOption: String, CaseIterable {
 }
 
 struct TrackListView: View {
+
     let tracks: [Track]
     let playlist: Playlist?
     let isEditMode: Bool
     let listIdentifier: String?
     let isLikedSongsScreen: Bool
+    let showsShuffleButton: Bool
 
     @EnvironmentObject private var appCoordinator: AppCoordinator
 
@@ -809,27 +754,55 @@ struct TrackListView: View {
     @State private var showBulkPlaylistDialog = false
     @State private var showBulkDeleteConfirmation = false
     @State private var settings = DeleteSettings.load()
+    @StateObject private var search = LibrarySearchState()
+    @State private var searchIndex = TrackSearchIndex()
 
-    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil, isLikedSongsScreen: Bool = false) {
+    init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil, isLikedSongsScreen: Bool = false, showsShuffleButton: Bool = false) {
         self.tracks = tracks
         self.playlist = playlist
         self.isEditMode = isEditMode
         self.listIdentifier = listIdentifier
         self.isLikedSongsScreen = isLikedSongsScreen
+        self.showsShuffleButton = showsShuffleButton
     }
 
-    // Sorting logic stays here
-    private var sortedTracks: [Track] {
-        let filteredTracks: [Track]
-        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
-            filteredTracks = tracks.filter { track in
-                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-                return !["ogg", "opus", "dsf", "dff"].contains(ext)
-            }
-        } else {
-            filteredTracks = tracks
-        }
+    // Subscribed, not merely read: the list has to be rebuilt when the route
+    // changes. Reading the singleton without subscribing meant connecting could
+    // leave incompatible formats on screen and disconnecting left Opus/DSD
+    // missing until some other refresh happened to fire.
+    //
+    // Deliberately CarPlayRouteState and not SFBAudioEngineManager: that class
+    // also publishes `currentTime` from a 0.1s timer, so observing it rebuilt
+    // this whole list ten times a second for the duration of every
+    // Opus/Vorbis/DSD track.
+    @ObservedObject private var carPlayState = CarPlayRouteState.shared
 
+    // Sorting logic stays here
+    private var playableTracks: [Track] {
+        guard carPlayState.isConnected else { return tracks }
+        return tracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            return !["ogg", "oga", "opus", "dsf", "dff"].contains(ext)
+        }
+    }
+
+    private var sortedTracks: [Track] {
+        // Narrow before sorting - the artist sorts below build a cache over
+        // whatever survives this, and there is no point resolving names for
+        // rows the search has already excluded.
+        sorted(searchIndex.filter(playableTracks, query: search.text))
+    }
+
+    /// The same list in the same order, with the search not applied.
+    ///
+    /// Only ever evaluated inside a tap handler (see `queueSource`), never in
+    /// `body`: sorting the unnarrowed library on every pass would undo exactly
+    /// the work the line above exists to save.
+    private var fullSortedTracks: [Track] {
+        sorted(playableTracks)
+    }
+
+    private func sorted(_ filteredTracks: [Track]) -> [Track] {
         switch sortOption {
         case .playlistOrder: return filteredTracks
         case .dateNewest: return filteredTracks.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
@@ -893,9 +866,12 @@ struct TrackListView: View {
         selectedTracks = Set(sortedTracks.map { $0.stableId })
     }
 
+    // Selections survive a change of query, so these resolve ids against the
+    // full list. Looking them up in the filtered list silently dropped every
+    // song that the current query happens to hide.
     private func bulkAddToLikedSongs() {
         for trackId in selectedTracks {
-            if let track = sortedTracks.first(where: { $0.stableId == trackId }) {
+            if let track = tracks.first(where: { $0.stableId == trackId }) {
                 try? appCoordinator.toggleFavorite(trackStableId: track.stableId)
             }
         }
@@ -906,17 +882,60 @@ struct TrackListView: View {
         Task {
             let deleteSettings = DeleteSettings.load()
             for trackId in selectedTracks {
-                if let track = sortedTracks.first(where: { $0.stableId == trackId }) {
+                if let track = tracks.first(where: { $0.stableId == trackId }) {
                     if deleteSettings.deleteFromLibraryOnly {
-                        DeleteSettings.addExcludedTrack(track.stableId)
+                        DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                     } else {
                         try? FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
                     }
-                    try? DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                    try? await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 }
             }
             NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             exitBulkMode()
+        }
+    }
+
+    private var shuffleButton: some View {
+        Button {
+            shuffleVisibleTracks()
+        } label: {
+            Image(systemName: "shuffle")
+                .font(.title3)
+                .foregroundColor(settings.backgroundColorChoice.color)
+                .padding(4)
+                .contentShape(Rectangle())
+        }
+        .disabled(sortedTracks.isEmpty)
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(TrackSortOption.allCases, id: \.self) { option in
+                Button(action: {
+                    sortOption = option
+                    saveSortPreference()
+                }) {
+                    HStack {
+                        Text(option.localizedString)
+                        if sortOption == option { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down.circle")
+                .font(.title3)
+                .foregroundColor(settings.backgroundColorChoice.color)
+                .padding(4)
+                .contentShape(Rectangle())
+        }
+    }
+
+    private func shuffleVisibleTracks() {
+        let shuffled = sortedTracks.shuffled()
+        guard let first = shuffled.first else { return }
+        Task {
+            await appCoordinator.playTrack(first, queue: shuffled)
         }
     }
 
@@ -939,8 +958,10 @@ struct TrackListView: View {
         // The Inner View observes PlayerEngine, so IT updates, but THIS view (and the Toolbar) remains stable.
         TrackListContentView(
             tracks: sortedTracks,
+            fullTracks: { fullSortedTracks },
             playlist: playlist,
             isEditMode: isEditMode,
+            isSearching: search.isSearching,
             isBulkMode: $isBulkMode,
             selectedTracks: $selectedTracks,
             recentlyActedTracks: $recentlyActedTracks,
@@ -987,25 +1008,14 @@ struct TrackListView: View {
                     .buttonStyle(.plain)
                 }
             } else {
+                // One item holding both, rather than two items: the bar
+                // spreads separate toolbar items far apart, and these read as
+                // a single group.
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        ForEach(TrackSortOption.allCases, id: \.self) { option in
-                            Button(action: {
-                                sortOption = option
-                                saveSortPreference()
-                            }) {
-                                HStack {
-                                    Text(option.localizedString)
-                                    if sortOption == option { Image(systemName: "checkmark") }
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down.circle")
-                            .font(.title3)
-                            .foregroundColor(settings.backgroundColorChoice.color)
-                            .padding(4)
-                            .contentShape(Rectangle())
+                    HStack(spacing: 0) {
+                        LibrarySearchButton(state: search)
+                        if showsShuffleButton { shuffleButton }
+                        sortMenu
                     }
                 }
             }
@@ -1020,14 +1030,44 @@ struct TrackListView: View {
         } message: {
             Text(Localized.deleteFilesConfirmationMessage(selectedTracks.count))
         }
-        .onAppear { loadSortPreference() }
+        .librarySearchField(search, prompt: Localized.searchSongs)
+        .onAppear {
+            loadSortPreference()
+        }
+        // .task rather than onAppear + onChange: the rebuild is asynchronous
+        // now, and this both starts it on the first appearance and restarts it
+        // whenever the row set changes, cancelling the previous one.
+        .task(id: TrackSearchIndex.identity(for: tracks)) {
+            let rebuilt = await TrackSearchIndex.rebuilt(from: searchIndex, for: tracks)
+            // The detached build does not inherit this task's cancellation, so
+            // a superseded run still finishes - and could land after the run
+            // that replaced it. Drop it rather than store an index for a row
+            // set that is no longer on screen.
+            guard !Task.isCancelled else { return }
+            searchIndex = rebuilt
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            Task {
+                searchIndex = await TrackSearchIndex.rebuilt(
+                    from: searchIndex,
+                    for: tracks,
+                    force: true
+                )
+            }
+        }
     }
 }
 
 struct TrackListContentView: View {
     let tracks: [Track]
+    /// The list without the search applied, evaluated only when a tap actually
+    /// needs it.
+    let fullTracks: () -> [Track]
     let playlist: Playlist?
     let isEditMode: Bool
+    /// Tells "this list is empty" apart from "your search matched nothing",
+    /// which need different empty states.
+    let isSearching: Bool
 
     // Bindings to parent state
     @Binding var isBulkMode: Bool
@@ -1053,6 +1093,20 @@ struct TrackListContentView: View {
         "\(tracks.count)-\(tracks.first?.stableId ?? "")-\(tracks.last?.stableId ?? "")"
     }
 
+    /// Identity for `TrackRowView`'s Equatable check - see its
+    /// `contextIdentity`. Must fold in everything a row's closures read that
+    /// is not already compared field-by-field: the visible track set (which is
+    /// also the playback queue built by `queueForPlayback`), whether a search
+    /// is narrowing it, and the two modes that change what a tap does.
+    ///
+    /// Deliberately O(1). This is recomputed on every body pass, and this view
+    /// observes PlayerEngine, so hashing the whole array here would undo the
+    /// optimisation `.equatable()` exists to provide. Count plus the first and
+    /// last id is the same trade `TrackListIdentity` documents.
+    private var rowContextIdentity: String {
+        "\(trackDisplaySignature)|\(isSearching)|\(isBulkMode)|\(isEditMode)"
+    }
+
     private func toggleSelection(for track: Track) {
         if selectedTracks.contains(track.stableId) {
             selectedTracks.remove(track.stableId)
@@ -1069,13 +1123,19 @@ struct TrackListContentView: View {
     }
 
     private func queueForPlayback(startingAt selectedTrack: Track) -> [Track] {
-        guard tracks.count > largeQueueCap,
-              let selectedIndex = tracks.firstIndex(where: { $0.stableId == selectedTrack.stableId }) else {
-            return tracks
+        let source = LibrarySearch.queueSource(
+            filtered: tracks,
+            full: fullTracks(),
+            isSearching: isSearching
+        )
+
+        guard source.count > largeQueueCap,
+              let selectedIndex = source.firstIndex(where: { $0.stableId == selectedTrack.stableId }) else {
+            return source
         }
 
-        let endIndex = min(selectedIndex + largeQueueCap, tracks.count)
-        return Array(tracks[selectedIndex..<endIndex])
+        let endIndex = min(selectedIndex + largeQueueCap, source.count)
+        return Array(source[selectedIndex..<endIndex])
     }
 
     private func loadArtistNameCache() {
@@ -1120,9 +1180,12 @@ struct TrackListContentView: View {
     var body: some View {
         if tracks.isEmpty {
             VStack(spacing: 16) {
-                Image(systemName: "music.note").font(.system(size: 40)).foregroundColor(.secondary)
-                Text(Localized.noSongsFound).font(.headline)
-                Text(Localized.yourMusicWillAppearHere).font(.subheadline).foregroundColor(.secondary)
+                Image(systemName: isSearching ? "magnifyingglass" : "music.note")
+                    .font(.system(size: 40)).foregroundColor(.secondary)
+                Text(isSearching ? Localized.noResultsFound : Localized.noSongsFound).font(.headline)
+                Text(isSearching ? Localized.tryDifferentKeywords : Localized.yourMusicWillAppearHere)
+                    .font(.subheadline).foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -1148,6 +1211,7 @@ struct TrackListContentView: View {
                                 if isBulkMode {
                                     toggleSelection(for: track)
                                 } else {
+                                    dismissSearchKeyboard()
                                     Task {
                                         if let playlist = playlist, let playlistId = playlist.id {
                                             try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
@@ -1159,7 +1223,8 @@ struct TrackListContentView: View {
                             },
                             playlist: playlist,
                             showDirectDeleteButton: playlist != nil && isEditMode,
-                            onEnterBulkMode: { onEnterBulkMode(track.stableId) }
+                            onEnterBulkMode: { onEnterBulkMode(track.stableId) },
+                            contextIdentity: rowContextIdentity
                         )
                         .equatable() // Crucial for performance
                         .onLongPressGesture(minimumDuration: 0.5) {
@@ -1491,7 +1556,7 @@ struct SearchView: View {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(.secondary)
 
-                            TextField("Search your library", text: $searchText)
+                            TextField(Localized.searchYourMusicLibrary, text: $searchText)
                                 .textFieldStyle(PlainTextFieldStyle())
                                 .autocorrectionDisabled()
                                 .focused($isSearchFocused)
@@ -1556,7 +1621,7 @@ struct SearchView: View {
                                 .scaleEffect(1.2)
                                 .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
 
-                            Text("Searching...")
+                            Text(Localized.searching)
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                         }
@@ -2034,6 +2099,7 @@ struct SearchView: View {
             } message: {
                 Text(Localized.deleteFileConfirmation(track.title))
             }
+            .reloadsArtwork(for: track.stableId) { loadArtwork() }
         }
 
         private func checkFavoriteStatus() {
@@ -2055,7 +2121,7 @@ struct SearchView: View {
                 do {
                     let settings = DeleteSettings.load()
                     if settings.deleteFromLibraryOnly {
-                        DeleteSettings.addExcludedTrack(track.stableId)
+                        DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                     } else {
                         do {
                             try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
@@ -2064,7 +2130,7 @@ struct SearchView: View {
                         }
                     }
 
-                    try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                    try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                     NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
                 } catch {
                     print("❌ Failed to delete track: \(error)")
@@ -2211,6 +2277,9 @@ struct SearchView: View {
                         .foregroundColor(.primary)
                 }
                 .onAppear { loadArtwork() }
+                .reloadsArtwork(for: tracks.first(where: { $0.albumId == album.id })?.stableId) {
+                    loadArtwork()
+                }
             }
 
             private func loadArtwork() {
@@ -2367,12 +2436,29 @@ struct SearchView: View {
 struct MusicFilePicker: UIViewControllerRepresentable {
     let onFilesPicked: ([URL]) -> Void
 
+    /// iOS declares no system UTI for Opus, OGG or DSD, so those files carry a
+    /// dynamic type conforming to `public.data` and the picker greys them out
+    /// under `UTType.audio` alone. The app's Info.plist now imports them
+    /// (`UTImportedTypeDeclarations`) as conforming to `public.audio`; naming
+    /// them here too keeps the picker working even where a provider hands back
+    /// the dynamic type anyway.
+    private static let audioContentTypes: [UTType] = {
+        var types: [UTType] = [.audio, .mp3, .wav, .mpeg4Audio, .aiff]
+        for identifier in [
+            "org.xiph.flac", "org.xiph.opus", "org.xiph.ogg",
+            "com.sony.dsf", "com.sony.dsdiff"
+        ] {
+            if let type = UTType(identifier) {
+                types.append(type)
+            }
+        }
+        return types
+    }()
+
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [
-            UTType.audio,
-            UTType("public.mp3")!,
-            UTType("org.xiph.flac")!
-        ])
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: Self.audioContentTypes
+        )
 
         picker.delegate = context.coordinator
         picker.allowsMultipleSelection = true

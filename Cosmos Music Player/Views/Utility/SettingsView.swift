@@ -32,12 +32,17 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
-                    Toggle(Localized.forceDarkMode, isOn: $deleteSettings.forceDarkMode)
-                        .onChange(of: deleteSettings.forceDarkMode) { _, _ in
-                            deleteSettings.save()
+                    Picker(Localized.appAppearance, selection: $deleteSettings.appearance) {
+                        ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
-                    
-                    Text(Localized.overrideSystemAppearance)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: deleteSettings.appearance) { _, _ in
+                        deleteSettings.save()
+                    }
+
+                    Text(Localized.appAppearanceDescription)
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
@@ -125,6 +130,31 @@ struct SettingsView: View {
                 }
 
                 Section(Localized.librarySection) {
+                    Toggle(Localized.splitArtistsOnComma, isOn: $deleteSettings.splitArtistsOnComma)
+                        .onChange(of: deleteSettings.splitArtistsOnComma) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                    Text(Localized.splitArtistsOnCommaDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker(Localized.libraryScanFrequency, selection: $deleteSettings.libraryScanInterval) {
+                            ForEach(LibraryScanInterval.allCases, id: \.self) { interval in
+                                Text(interval.displayName).tag(interval)
+                            }
+                        }
+                        .onChange(of: deleteSettings.libraryScanInterval) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                        Text(Localized.libraryScanFrequencyDescription)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+
                     Toggle(Localized.removeFromLibraryOnly, isOn: $deleteSettings.deleteFromLibraryOnly)
                         .onChange(of: deleteSettings.deleteFromLibraryOnly) { _, _ in
                             deleteSettings.save()
@@ -165,16 +195,17 @@ struct SettingsView: View {
                             deleteSettings.save()
                         }
 
-                    Text(Localized.showLyricsButtonDescription)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
                     Toggle(Localized.showSleepTimerButton, isOn: $deleteSettings.showSleepTimerButton)
                         .onChange(of: deleteSettings.showSleepTimerButton) { _, _ in
                             deleteSettings.save()
                         }
 
-                    Text(Localized.showSleepTimerButtonDescription)
+                    Toggle(Localized.queueFullListFromSearch, isOn: $deleteSettings.queueFullListFromSearch)
+                        .onChange(of: deleteSettings.queueFullListFromSearch) { _, _ in
+                            deleteSettings.save()
+                        }
+
+                    Text(Localized.queueFullListFromSearchDescription)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -213,7 +244,7 @@ struct SettingsView: View {
                     HStack {
                         Text(Localized.version)
                         Spacer()
-                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown")
+                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? Localized.unknown)
                             .foregroundColor(.secondary)
                     }
                     

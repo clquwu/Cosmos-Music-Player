@@ -19,6 +19,11 @@ import SwiftUI
 struct TrackBulkActionsModifier: ViewModifier {
     /// Candidates for "Select All" - the tracks currently shown by the list.
     let tracks: [Track]
+    /// Every track the list can select, ignoring any active search. Selections
+    /// survive a change of query, so the actions resolve ids against this;
+    /// resolving them against `tracks` silently dropped every selected song the
+    /// current query happened to hide.
+    let selectionPool: [Track]
     @Binding var isBulkMode: Bool
     @Binding var selectedTracks: Set<String>
     /// Liked Songs phrases the favourite action as "remove" rather than "add".
@@ -102,7 +107,7 @@ struct TrackBulkActionsModifier: ViewModifier {
 
     private func bulkToggleLiked() {
         for trackId in selectedTracks {
-            if let track = tracks.first(where: { $0.stableId == trackId }) {
+            if let track = selectionPool.first(where: { $0.stableId == trackId }) {
                 try? appCoordinator.toggleFavorite(trackStableId: track.stableId)
             }
         }
@@ -113,13 +118,13 @@ struct TrackBulkActionsModifier: ViewModifier {
         Task {
             let deleteSettings = DeleteSettings.load()
             for trackId in selectedTracks {
-                if let track = tracks.first(where: { $0.stableId == trackId }) {
+                if let track = selectionPool.first(where: { $0.stableId == trackId }) {
                     if deleteSettings.deleteFromLibraryOnly {
-                        DeleteSettings.addExcludedTrack(track.stableId)
+                        DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                     } else {
                         try? FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
                     }
-                    try? DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                    try? await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 }
             }
             NotificationCenter.default.post(
@@ -135,6 +140,7 @@ extension View {
     /// Adds the shared selection toolbar and bulk actions to a track list.
     func trackBulkActions(
         tracks: [Track],
+        selectionPool: [Track]? = nil,
         isBulkMode: Binding<Bool>,
         selectedTracks: Binding<Set<String>>,
         isLikedContext: Bool = false
@@ -142,6 +148,7 @@ extension View {
         modifier(
             TrackBulkActionsModifier(
                 tracks: tracks,
+                selectionPool: selectionPool ?? tracks,
                 isBulkMode: isBulkMode,
                 selectedTracks: selectedTracks,
                 isLikedContext: isLikedContext

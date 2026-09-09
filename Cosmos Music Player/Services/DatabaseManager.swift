@@ -7,29 +7,176 @@
 
 import Foundation
 import CryptoKit
-import Combine
 import UIKit
 @preconcurrency import GRDB
 
 class DatabaseManager: @unchecked Sendable {
     static let shared = DatabaseManager()
 
-    private var dbWriter: DatabaseWriter!
+    private var dbWriter: DatabaseWriter?
+    private var databaseInitializationFailureDescription: String?
     private let maxRetries = 3
     private let retryDelay: UInt64 = 500_000_000 // 0.5 seconds in nanoseconds
+    /// Database setup is synchronous, while the actor-isolated bookmark store
+    /// is asynchronous. Bookmark consumers wait on this one startup task so
+    /// path-based stable IDs and bookmark keys become visible together.
+    private var externalBookmarkMigrationTask: Task<Void, Never>?
 
     static func generatePathStableId(forPath path: String) -> String {
-        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-        let digest = SHA256.hash(data: normalizedPath.data(using: .utf8) ?? Data())
+        let digest = SHA256.hash(data: Data(canonicalPath(path).utf8))
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 
     static func standardizedPath(_ path: String) -> String {
-        URL(fileURLWithPath: path).standardizedFileURL.path
+        canonicalPath(path)
+    }
+
+    /// Directories Foundation itself treats as reachable under both spellings,
+    /// because each is a symlink at the root: `/var` -> `/private/var`, and so on.
+    private static let privatePrefixedRoots = ["/private/var", "/private/tmp", "/private/etc"]
+
+    /// The one canonical spelling of a filesystem path, used for identity and
+    /// for comparison.
+    ///
+    /// Deliberately more than `standardizedFileURL`. That call also strips a
+    /// leading `/private`, but *only when the path resolves on disk at that
+    /// moment* - it consults the filesystem. Verified directly:
+    ///
+    ///     /private/var/tmp            -> /var/tmp
+    ///     /private/var/tmp/<missing>  -> /private/var/tmp/<missing>
+    ///
+    /// So the same file produced two spellings, and therefore two different
+    /// "stable" IDs, depending only on whether the app could see it at the
+    /// instant the ID was computed. An external file indexed before its
+    /// security-scoped bookmark was ever opened hashed as `/private/var/...`;
+    /// the same file at playback time, with the bookmark open and the bytes
+    /// resident, hashed as `/var/...`. Each flip looked like the file had
+    /// moved, re-keyed the row, and orphaned everything stored under the old
+    /// ID - cached covers and lyrics most visibly, since unlike favourites and
+    /// playlists those live outside the database and were not carried across.
+    ///
+    /// Stripping the prefix unconditionally makes the answer a pure function of
+    /// the string, which is what "stable" has to mean here.
+    static func canonicalPath(_ path: String) -> String {
+        var canonical = URL(fileURLWithPath: path).standardizedFileURL.path
+
+        for prefix in privatePrefixedRoots where canonical == prefix || canonical.hasPrefix(prefix + "/") {
+            canonical.removeFirst("/private".count)
+            break
+        }
+
+        return canonical
+    }
+
+    /// Returns the path below Documents for an iOS application data
+    /// container. Keeping this structural (including the UUID component)
+    /// avoids treating an arbitrary provider path containing `/Documents/`
+    /// as one of this app's files.
+    static func applicationContainerDocumentsRelativePath(forPath path: String) -> String? {
+        let components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+
+        for documentsIndex in components.indices.reversed() where components[documentsIndex] == "Documents" {
+            guard documentsIndex >= 4,
+                  components[documentsIndex - 2] == "Application",
+                  components[documentsIndex - 3] == "Data",
+                  components[documentsIndex - 4] == "Containers",
+                  UUID(uuidString: components[documentsIndex - 1]) != nil else {
+                continue
+            }
+
+            return components.dropFirst(documentsIndex + 1).joined(separator: "/")
+        }
+
+        return nil
+    }
+
+    /// Resolves a path saved under an earlier app-container UUID into the
+    /// current Documents directory while preserving its relative subpath.
+    static func relocatedApplicationDocumentsURL(
+        forStoredPath path: String,
+        currentDocumentsURL: URL
+    ) -> URL? {
+        guard let relativePath = applicationContainerDocumentsRelativePath(forPath: path) else {
+            return nil
+        }
+
+        let relocatedURL = relativePath.split(separator: "/").reduce(currentDocumentsURL.standardizedFileURL) {
+            $0.appendingPathComponent(String($1))
+        }.standardizedFileURL
+
+        guard relocatedURL.path != standardizedPath(path) else { return nil }
+        return relocatedURL
+    }
+
+    private static func relativePath(_ path: String, inside rootPath: String) -> String? {
+        let normalizedPath = standardizedPath(path)
+        let normalizedRoot = standardizedPath(rootPath)
+        guard normalizedPath == normalizedRoot || normalizedPath.hasPrefix(normalizedRoot + "/") else {
+            return nil
+        }
+        guard normalizedPath != normalizedRoot else { return "" }
+        return String(normalizedPath.dropFirst(normalizedRoot.count + 1))
+    }
+
+    /// Stable persistence identity for local folder playlists. The app's
+    /// sandbox UUID changes on a device restore, while iCloud and external
+    /// folder identities should continue to use their complete paths.
+    static func folderPersistenceKey(forPath path: String) -> String {
+        let normalizedPath = standardizedPath(path)
+        let currentDocumentsPath = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first?.path
+
+        guard let localRelativePath = currentDocumentsPath.flatMap({
+            relativePath(normalizedPath, inside: $0)
+        }) else { return normalizedPath }
+        return "app-documents:\(localRelativePath)"
+    }
+
+    private static func legacyFolderPersistenceKey(forPath path: String) -> String? {
+        applicationContainerDocumentsRelativePath(forPath: path).map {
+            "app-documents:\($0)"
+        }
+    }
+
+    private static func folderPath(
+        _ storedPath: String,
+        matchesPersistenceKey persistenceKey: String
+    ) -> Bool {
+        if folderPersistenceKey(forPath: storedPath) == persistenceKey {
+            return true
+        }
+
+        // Only reinterpret a legacy application-container path when the path
+        // being requested is known to be under Cosmos's current Documents
+        // directory. External provider paths keep their absolute identity.
+        guard persistenceKey.hasPrefix("app-documents:") else { return false }
+        return legacyFolderPersistenceKey(forPath: storedPath) == persistenceKey
     }
 
     private init() {
         setupDatabaseWithRetry()
+    }
+
+    private enum InitializationError: LocalizedError {
+        case unavailable(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable(let reason):
+                return "The music library database is unavailable: \(reason)"
+            }
+        }
+    }
+
+    private func requireDatabaseWriter() throws -> DatabaseWriter {
+        guard let dbWriter else {
+            throw InitializationError.unavailable(
+                databaseInitializationFailureDescription ?? "database initialization did not complete"
+            )
+        }
+        return dbWriter
     }
 
     private func setupDatabaseWithRetry() {
@@ -44,6 +191,21 @@ class DatabaseManager: @unchecked Sendable {
                 lastError = error
                 print("⚠️ Database setup failed on attempt \(attempt)/\(maxRetries): \(error)")
 
+                // setupDatabase may have opened a pool before table creation or
+                // migration failed. Close that exact attempt before retrying so
+                // no live connection or WAL lock survives into recovery.
+                if let dbWriter {
+                    do {
+                        try dbWriter.writeWithoutTransaction { db in
+                            _ = try db.checkpoint(.truncate)
+                        }
+                    } catch {
+                        print("⚠️ Could not checkpoint failed database setup attempt: \(error)")
+                    }
+                    try? dbWriter.close()
+                    self.dbWriter = nil
+                }
+
                 if attempt < maxRetries {
                     // Wait before retrying
                     Thread.sleep(forTimeInterval: Double(retryDelay) / 1_000_000_000.0)
@@ -51,11 +213,29 @@ class DatabaseManager: @unchecked Sendable {
             }
         }
 
-        // If all retries failed, try to recover
-        if let error = lastError {
-            print("❌ Database setup failed after \(maxRetries) attempts. Attempting recovery...")
+        guard let error = lastError else { return }
+
+        if Self.isConfirmedDatabaseCorruption(error) {
+            print("❌ Database setup failed with confirmed corruption after \(maxRetries) attempts. Attempting recovery...")
             attemptDatabaseRecovery(error: error)
+        } else {
+            // A lock, migration bug, permissions failure, or unavailable app
+            // group is not corruption. Replacing the file in any of those cases
+            // turns a recoverable startup problem into an apparently empty
+            // library and can strand committed pages in the WAL.
+            databaseInitializationFailureDescription = String(describing: error)
+            if let dbWriter {
+                try? dbWriter.close()
+                self.dbWriter = nil
+            }
+            print("🛡️ Database setup failed without evidence of corruption; preserving the on-disk library: \(error)")
         }
+    }
+
+    private static func isConfirmedDatabaseCorruption(_ error: Error) -> Bool {
+        guard let databaseError = error as? GRDB.DatabaseError else { return false }
+        return databaseError.resultCode == .SQLITE_CORRUPT
+            || databaseError.resultCode == .SQLITE_NOTADB
     }
 
     private func setupDatabase() throws {
@@ -75,6 +255,7 @@ class DatabaseManager: @unchecked Sendable {
         }
 
         dbWriter = try DatabasePool(path: databaseURL.path, configuration: configuration)
+        databaseInitializationFailureDescription = nil
         try createTables()
         try migrateDatabaseIfNeeded()
 
@@ -106,16 +287,55 @@ class DatabaseManager: @unchecked Sendable {
 
         do {
             let databaseURL = try getDatabaseURL()
-            let backupURL = databaseURL.deletingLastPathComponent()
-                .appendingPathComponent("cosmos_music_backup_\(Int(Date().timeIntervalSince1970)).db")
+            let backupDirectory = databaseURL.deletingLastPathComponent()
+                .appendingPathComponent(
+                    "cosmos_music_backup_\(Int(Date().timeIntervalSince1970))",
+                    isDirectory: true
+                )
 
-            // Try to backup the corrupted database
-            if FileManager.default.fileExists(atPath: databaseURL.path) {
-                try? FileManager.default.moveItem(at: databaseURL, to: backupURL)
-                print("📦 Backed up corrupted database to: \(backupURL.path)")
+            // Flush everything SQLite can still read, then close every pooled
+            // connection before touching the files. A failed checkpoint is
+            // expected for genuinely corrupt databases; preserving all three
+            // files below still keeps any recoverable WAL pages with the backup.
+            if let dbWriter {
+                do {
+                    try dbWriter.writeWithoutTransaction { db in
+                        _ = try db.checkpoint(.truncate)
+                    }
+                } catch {
+                    print("⚠️ Could not checkpoint corrupt database before backup: \(error)")
+                }
+                try dbWriter.close()
+                self.dbWriter = nil
             }
 
-            // Try to create a fresh database
+            try FileManager.default.createDirectory(
+                at: backupDirectory,
+                withIntermediateDirectories: false
+            )
+
+            var sourceFiles: [URL] = []
+            for suffix in ["", "-wal", "-shm"] {
+                let sourceURL = URL(fileURLWithPath: databaseURL.path + suffix)
+                guard FileManager.default.fileExists(atPath: sourceURL.path) else { continue }
+                let destinationURL = backupDirectory.appendingPathComponent(sourceURL.lastPathComponent)
+                try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+                sourceFiles.append(sourceURL)
+            }
+
+            guard !sourceFiles.isEmpty else {
+                throw InitializationError.unavailable("no database files were available to back up")
+            }
+            // Do not remove anything until the complete SQLite file set has a
+            // recoverable copy. If a removal then fails, recovery aborts and the
+            // complete backup remains available.
+            for sourceURL in sourceFiles {
+                try FileManager.default.removeItem(at: sourceURL)
+            }
+            print("📦 Backed up corrupt SQLite file set to: \(backupDirectory.path)")
+
+            // Create a fresh database only after confirmed corruption and a
+            // complete move of every SQLite sidecar that still exists.
             try setupDatabase()
             print("✅ Database recovery successful - created fresh database")
         } catch {
@@ -131,6 +351,7 @@ class DatabaseManager: @unchecked Sendable {
 
                 // Create in-memory database
                 dbWriter = try DatabaseQueue(configuration: configuration)
+                databaseInitializationFailureDescription = nil
                 try createTables()
                 print("✅ In-memory database created successfully")
             } catch {
@@ -153,6 +374,7 @@ class DatabaseManager: @unchecked Sendable {
     }
 
     private func createTables() throws {
+        let dbWriter = try requireDatabaseWriter()
         try dbWriter.write { db in
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS artist (
@@ -467,11 +689,67 @@ class DatabaseManager: @unchecked Sendable {
             do {
                 let tracks = try Track.fetchAll(db)
                 var updatedCount = 0
+                var mergedDuplicateCount = 0
+
+                var normalizedPathCount = 0
 
                 for track in tracks {
+                    // Normalise the stored spelling while we are already
+                    // walking every row. getTrack(byPath:) can only use the
+                    // index on track.path for spellings that match exactly, so
+                    // it used to fall back to loading the entire table and
+                    // standardizing each row in Swift - once per newly-seen
+                    // file, which made every scan quadratic in library size.
+                    // Storing the standardized spelling makes that fallback
+                    // unnecessary.
+                    let standardizedPath = Self.standardizedPath(track.path)
+                    if standardizedPath != track.path {
+                        let alreadyTaken = try Bool.fetchOne(
+                            db,
+                            sql: "SELECT EXISTS(SELECT 1 FROM track WHERE path = ? AND id IS NOT ?)",
+                            arguments: [standardizedPath, track.id]
+                        ) ?? false
+
+                        // Another row already holds the normalised spelling -
+                        // the same file recorded twice. Leave this one for the
+                        // duplicate cleanup rather than creating a collision.
+                        if !alreadyTaken {
+                            try db.execute(
+                                sql: "UPDATE track SET path = ? WHERE id = ?",
+                                arguments: [standardizedPath, track.id]
+                            )
+                            normalizedPathCount += 1
+                        }
+                    }
+
+                    // Safe to recompute from the stored path: canonicalPath is
+                    // a pure function of the string, so this walk converges
+                    // instead of re-keying the row again on the next launch.
                     let newStableId = Self.generatePathStableId(forPath: track.path)
 
                     guard track.stableId != newStableId else {
+                        continue
+                    }
+
+                    // Another row may already hold the canonical ID: the same
+                    // file recorded twice, once under each spelling of
+                    // /private/var. The duplicate sweep above cannot see that
+                    // pair - it matches on exact path equality, and the two
+                    // spellings are not equal as strings. Blindly updating
+                    // would violate the UNIQUE index on stable_id and abort the
+                    // rest of this migration, so fold this row into the
+                    // survivor instead and keep going.
+                    let collidingId = try Int64.fetchOne(
+                        db,
+                        sql: "SELECT id FROM track WHERE stable_id = ? AND id IS NOT ?",
+                        arguments: [newStableId, track.id]
+                    )
+
+                    if collidingId != nil {
+                        try self.mergeTrackReferences(db: db, from: track.stableId, to: newStableId)
+                        try db.execute(sql: "DELETE FROM track WHERE id = ?", arguments: [track.id])
+                        stableIdRemapping[track.stableId] = newStableId
+                        mergedDuplicateCount += 1
                         continue
                     }
 
@@ -480,24 +758,18 @@ class DatabaseManager: @unchecked Sendable {
                         arguments: [newStableId, track.id]
                     )
 
-                    try db.execute(
-                        sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [newStableId, track.stableId]
-                    )
-
-                    try db.execute(
-                        sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [newStableId, track.stableId]
-                    )
-
-                    try db.execute(
-                        sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [newStableId, track.stableId]
-                    )
-                    try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [track.stableId])
+                    try self.mergeTrackReferences(db: db, from: track.stableId, to: newStableId)
 
                     stableIdRemapping[track.stableId] = newStableId
                     updatedCount += 1
+                }
+
+                if normalizedPathCount > 0 {
+                    print("✅ Database: Normalised \(normalizedPathCount) stored track path(s)")
+                }
+
+                if mergedDuplicateCount > 0 {
+                    print("✅ Database: Merged \(mergedDuplicateCount) row(s) duplicated across path spellings")
                 }
 
                 if updatedCount > 0 {
@@ -525,43 +797,34 @@ class DatabaseManager: @unchecked Sendable {
     private func migrateExternalFileBookmarkKeys(_ stableIdRemapping: [String: String]) {
         guard !stableIdRemapping.isEmpty else { return }
 
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
-        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else { return }
-
-        do {
-            let data = try Data(contentsOf: bookmarksURL)
-            guard var bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else {
-                return
-            }
-
-            var updatedCount = 0
-            for (oldStableId, newStableId) in stableIdRemapping {
-                guard let bookmarkData = bookmarks.removeValue(forKey: oldStableId) else {
-                    continue
+        externalBookmarkMigrationTask = Task {
+            do {
+                let updatedCount = try await ExternalBookmarkStore.shared.migrate(stableIdRemapping)
+                if updatedCount > 0 {
+                    print("✅ Database: Migrated \(updatedCount) external bookmark stable IDs")
                 }
-
-                bookmarks[newStableId] = bookmarkData
-                updatedCount += 1
+            } catch {
+                print("⚠️ Database migration: Failed to migrate external bookmark stable IDs: \(error)")
             }
 
-            guard updatedCount > 0 else { return }
-
-            let updatedData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
-            try updatedData.write(to: bookmarksURL, options: .atomic)
-            print("✅ Database: Migrated \(updatedCount) external bookmark stable IDs")
-        } catch {
-            print("⚠️ Database migration: Failed to migrate external bookmark stable IDs: \(error)")
+            // Covers and lyrics are keyed by stable ID too, but live outside the
+            // database, so the relationship merge above cannot reach them.
+            // Bookmarks go first: playback waits on this task, and only the
+            // bookmark is on that critical path.
+            await Self.migrateStableIdKeyedCaches(stableIdRemapping)
         }
     }
 
+    func waitForExternalBookmarkMigration() async {
+        await externalBookmarkMigrationTask?.value
+    }
+
     func read<T>(_ operation: @escaping (Database) throws -> T) throws -> T {
-        return try dbWriter.read(operation)
+        try requireDatabaseWriter().read(operation)
     }
 
     func write<T>(_ operation: @escaping (Database) throws -> T) throws -> T {
-        return try dbWriter.write(operation)
+        try requireDatabaseWriter().write(operation)
     }
 
     // MARK: - Track operations
@@ -569,49 +832,93 @@ class DatabaseManager: @unchecked Sendable {
     func upsertTrack(_ track: Track) throws {
         defer { invalidateArtistDisplayNameCache() }
         try write { db in
-            var trackToSave = track
-
-            // A metadata refresh builds a new Track value with the same
-            // stable ID. Reuse the existing primary key so GRDB performs an
-            // UPDATE, preserving favorites, playlists and every other
-            // stable-ID relationship owned by previous app versions.
-            if trackToSave.id == nil,
-               let existing = try Track
-                .filter(Column("stable_id") == trackToSave.stableId)
-                .fetchOne(db) {
-                trackToSave.id = existing.id
-            }
-
-            // Safety check: Remove any duplicates with the same path but different stable_id
-            // This handles edge cases where migration didn't run or failed
-            let duplicates = try Track.filter(Column("path") == trackToSave.path && Column("stable_id") != trackToSave.stableId).fetchAll(db)
-            if !duplicates.isEmpty {
-                print("⚠️ Found \(duplicates.count) duplicate(s) for path: \(trackToSave.path)")
-                for duplicate in duplicates {
-                    // Transfer favorites and playlist items to the new stable_id
-                    try db.execute(
-                        sql: "UPDATE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [trackToSave.stableId, duplicate.stableId]
-                    )
-                    try db.execute(
-                        sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [trackToSave.stableId, duplicate.stableId]
-                    )
-                    try db.execute(
-                        sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
-                        arguments: [trackToSave.stableId, duplicate.stableId]
-                    )
-                    try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [duplicate.stableId])
-                    // Delete the duplicate
-                    try Track.filter(Column("id") == duplicate.id).deleteAll(db)
-                    print("🗑️ Removed duplicate track with old stable_id: \(duplicate.stableId)")
-                }
-            }
-
-            try trackToSave.save(db)
-
-            try self.cleanupStaleUnplayableDuplicates(db: db, matching: trackToSave)
+            try self.upsertTrack(track, in: db)
         }
+    }
+
+    /// Commits a parsed track and every relationship represented by the same
+    /// metadata snapshot as one unit. If suspension or any write error lands in
+    /// the middle, the fingerprint row rolls back with the link tables, so the
+    /// next scan reparses instead of permanently accepting partial metadata.
+    func upsertTrackWithArtistRelationships(
+        _ track: Track,
+        trackArtistIds: [Int64],
+        albumArtistIds: [Int64]
+    ) throws {
+        defer { invalidateArtistDisplayNameCache() }
+        try write { db in
+            try self.upsertTrack(track, in: db)
+            try self.replaceTrackArtists(
+                trackStableId: track.stableId,
+                artistIds: trackArtistIds,
+                in: db
+            )
+            if let albumId = track.albumId {
+                try self.replaceAlbumArtists(
+                    albumId: albumId,
+                    artistIds: albumArtistIds,
+                    in: db
+                )
+            }
+        }
+    }
+
+    private func upsertTrack(_ track: Track, in db: Database) throws {
+        var trackToSave = track
+        // The single place every new or refreshed row is written, and therefore
+        // the place to guarantee the stored spelling matches the one the stable
+        // ID is derived from.
+        trackToSave.path = Self.canonicalPath(trackToSave.path)
+
+        // A metadata refresh builds a new Track value with the same
+        // stable ID. Reuse the existing primary key so GRDB performs an
+        // UPDATE, preserving favorites, playlists and every other
+        // stable-ID relationship owned by previous app versions.
+        if trackToSave.id == nil,
+           let existing = try Track
+            .filter(Column("stable_id") == trackToSave.stableId)
+            .fetchOne(db) {
+            trackToSave.id = existing.id
+        }
+
+        // Safety check: Remove any duplicates with the same path but different stable_id
+        // This handles edge cases where migration didn't run or failed
+        let duplicates = try Track.filter(Column("path") == trackToSave.path && Column("stable_id") != trackToSave.stableId).fetchAll(db)
+        if !duplicates.isEmpty {
+            print("⚠️ Found \(duplicates.count) duplicate(s) for path: \(trackToSave.path)")
+            for duplicate in duplicates {
+                // Transfer favourites, playlist entries and artist links to the
+                // new stable ID.
+                //
+                // Through mergeTrackReferences rather than inline statements of
+                // its own, which is what this used to be. That copy moved
+                // `favorite` with a bare UPDATE, and `favorite.track_stable_id`
+                // is the table's PRIMARY KEY: when the surviving ID already had
+                // a favourite row, the UPDATE raised SQLITE_CONSTRAINT and took
+                // the whole write transaction down with it. `upsertTrack` is
+                // that transaction, so the track never got written at all - the
+                // scan recorded a file failure and the song stayed missing from
+                // the library, on every scan, with its file sitting right there.
+                //
+                // `UPDATE OR IGNORE` + `DELETE` is the correct shape and the one
+                // both sibling paths already used (the launch migration and
+                // mergeTrackReferences itself): a collision means the surviving
+                // row is already favourited, so dropping the duplicate's row
+                // preserves exactly the state the user sees.
+                try mergeTrackReferences(
+                    db: db,
+                    from: duplicate.stableId,
+                    to: trackToSave.stableId
+                )
+                // Delete the duplicate
+                try Track.filter(Column("id") == duplicate.id).deleteAll(db)
+                print("🗑️ Removed duplicate track with old stable_id: \(duplicate.stableId)")
+            }
+        }
+
+        try trackToSave.save(db)
+
+        try cleanupStaleUnplayableDuplicates(db: db, matching: trackToSave)
     }
 
     private func mergeTrackReferences(db: Database, from oldStableId: String, to newStableId: String) throws {
@@ -647,22 +954,66 @@ class DatabaseManager: @unchecked Sendable {
         return !normalizedDuplicateTitle(track.title).isEmpty
     }
 
+    /// Whether a path's absence is real, or just the whole location being
+    /// unreachable right now.
+    ///
+    /// `fileExists == false` is answered identically by "the user renamed this
+    /// file" and "this document provider is not mounted at the moment" - and
+    /// only the first justifies merging the row into another and deleting it.
+    /// Requiring the containing directory to be readable separates them: a
+    /// rename leaves the folder in place, while an unmounted provider,
+    /// a signed-out iCloud container or a deleted folder takes it with them.
+    ///
+    /// Deliberately checks the immediate parent only, not any ancestor: a
+    /// surviving grandparent says nothing about whether the folder that held
+    /// the file was enumerable.
+    func isPathConfirmedMissing(_ path: String) -> Bool {
+        guard !FileManager.default.fileExists(atPath: path) else { return false }
+
+        let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        var parentIsDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent, isDirectory: &parentIsDirectory),
+              parentIsDirectory.boolValue,
+              FileManager.default.isReadableFile(atPath: parent) else {
+            return false
+        }
+        return true
+    }
+
     private func isStrictStaleDuplicate(_ stale: Track, of keeper: Track) -> Bool {
         guard stale.stableId != keeper.stableId,
-              !FileManager.default.fileExists(atPath: stale.path),
+              // Not merely "not there": see isPathConfirmedMissing. This runs on
+              // every track upsert and has no idea which roots the active scan
+              // managed to enumerate, so it has to establish that for itself.
+              isPathConfirmedMissing(stale.path),
               FileManager.default.fileExists(atPath: keeper.path),
               hasReliableDuplicateMetadata(stale),
               hasReliableDuplicateMetadata(keeper),
               stale.artistId == keeper.artistId,
+              // Album identity too. Without it the remaining criteria are all
+              // properties a track carries across releases - the same song, at
+              // the same duration, from the same encode - so a single and the
+              // album it later appeared on could be conflated, and merging is
+              // not a no-op: it moves the stale row's favourites and playlist
+              // entries onto the keeper and deletes it. A rename, which is the
+              // case this test exists to survive, never changes the album.
+              stale.albumId == keeper.albumId,
               stale.durationMs == keeper.durationMs,
               stale.fileSize == keeper.fileSize else {
             return false
         }
 
-        let staleFilename = URL(fileURLWithPath: stale.path).lastPathComponent.lowercased()
-        let keeperFilename = URL(fileURLWithPath: keeper.path).lastPathComponent.lowercased()
-        return staleFilename == keeperFilename &&
-            normalizedDuplicateTitle(stale.title) == normalizedDuplicateTitle(keeper.title)
+        // Filename equality is deliberately NOT required. Stable IDs are
+        // hashes of the full path, so renaming a file creates a new track and
+        // reconciliation then deletes the old one - and deleteTrack drops its
+        // favourites and playlist entries with it. Requiring the filenames to
+        // match meant a move survived but a rename silently lost that data.
+        //
+        // The guards above already demand the same artist, the same album, the
+        // exact same duration and byte size, and that the stale path is gone
+        // while the keeper's exists; combined with the title match below that
+        // is a far stronger identity test than the filename ever was.
+        return normalizedDuplicateTitle(stale.title) == normalizedDuplicateTitle(keeper.title)
     }
 
     private func cleanupStaleUnplayableDuplicates(db: Database, matching newTrack: Track) throws {
@@ -676,6 +1027,7 @@ class DatabaseManager: @unchecked Sendable {
         // syscalls - the main cause of watchdog kills on 2000+ file imports
         let tracks = try Track
             .filter(Column("artist_id") == newTrack.artistId
+                && Column("album_id") == newTrack.albumId
                 && Column("duration_ms") == newTrack.durationMs
                 && Column("file_size") == newTrack.fileSize
                 && Column("stable_id") != newTrack.stableId)
@@ -710,8 +1062,25 @@ class DatabaseManager: @unchecked Sendable {
     }
 
     func migrateTrackStableIdAndPath(oldStableId: String, newStableId: String, newPath: String) throws {
+        // Every stored path is canonical, so that `generatePathStableId` and
+        // `getTrack(byPath:)` agree with it. Callers hand over whatever spelling
+        // the system gave them; normalise once, here, rather than trusting each
+        // of them to remember.
+        let newPath = Self.canonicalPath(newPath)
+
         try write { db in
             guard var oldTrack = try Track.filter(Column("stable_id") == oldStableId).fetchOne(db) else {
+                return
+            }
+
+            // A bookmark can resolve to a standardized spelling of the same
+            // path. In that case the path-derived ID is already correct and
+            // the operation is only a path repair. Looking the "new" ID up
+            // below would find oldTrack itself, merge its references into
+            // itself, and then delete the track.
+            guard oldStableId != newStableId else {
+                oldTrack.path = newPath
+                try oldTrack.update(db)
                 return
             }
 
@@ -730,8 +1099,119 @@ class DatabaseManager: @unchecked Sendable {
             try self.mergeTrackReferences(db: db, from: oldStableId, to: newStableId)
             print("🔁 Migrated track ID for moved file: \(oldStableId) -> \(newStableId)")
         }
+
+        // Outside the write block: mergeTrackReferences only reaches database
+        // tables, and a genuinely moved file must keep its cover and lyrics.
+        let remapping = [oldStableId: newStableId]
+        Task { await Self.migrateStableIdKeyedCaches(remapping) }
     }
 
+    /// Carries the stable-ID-keyed caches that live outside the database -
+    /// artwork mapping and lyrics - onto new IDs.
+    private static func migrateStableIdKeyedCaches(_ remapping: [String: String]) async {
+        guard !remapping.isEmpty else { return }
+        await LyricsManager.shared.migrateStableIds(remapping)
+        await ArtworkManager.shared.migrateStableIds(remapping)
+    }
+
+    enum AuthoritativeRelocationReferenceResult {
+        case migrated(to: String)
+        case noMatch
+        case ambiguous
+    }
+
+    /// Preserves user-owned references before reconciliation deletes a row
+    /// whose path disappeared from a root the indexer enumerated completely.
+    ///
+    /// `cleanupStaleUnplayableDuplicates` cannot trust a missing parent: for
+    /// an arbitrary provider that may mean the provider is merely unmounted.
+    /// Reconciliation has stronger evidence because its roots were walked
+    /// successfully in this scan. That is the only context in which a whole
+    /// folder rename (where the old immediate parent is gone) may bypass the
+    /// parent-readability guard.
+    ///
+    /// Matching remains deliberately conservative. An unchanged filename is
+    /// preferred (the normal folder-rename case), and a metadata-only match is
+    /// accepted only when exactly one live row qualifies. Ambiguity leaves the
+    /// references on the old row rather than assigning them to the wrong song.
+    ///
+    /// - Returns: whether references were migrated, no candidate exists, or
+    ///   deletion must be deferred because multiple candidates are plausible.
+    func preserveReferencesForAuthoritativelyMissingTrack(
+        _ stale: Track,
+        within successfullyScannedRoots: [URL]
+    ) throws -> AuthoritativeRelocationReferenceResult {
+        let rootPaths = successfullyScannedRoots.map {
+            $0.standardizedFileURL.path
+        }
+        let stalePath = Self.standardizedPath(stale.path)
+
+        func isInsideScannedRoot(_ path: String) -> Bool {
+            rootPaths.contains { rootPath in
+                path == rootPath || path.hasPrefix(rootPath + "/")
+            }
+        }
+
+        guard !rootPaths.isEmpty,
+              isInsideScannedRoot(stalePath),
+              !FileManager.default.fileExists(atPath: stalePath),
+              hasReliableDuplicateMetadata(stale) else {
+            return .noMatch
+        }
+
+        return try write { db in
+            let candidates = try Track
+                .filter(Column("artist_id") == stale.artistId
+                    && Column("album_id") == stale.albumId
+                    && Column("duration_ms") == stale.durationMs
+                    && Column("file_size") == stale.fileSize
+                    && Column("stable_id") != stale.stableId)
+                .fetchAll(db)
+                .filter { candidate in
+                    let candidatePath = Self.standardizedPath(candidate.path)
+                    return isInsideScannedRoot(candidatePath)
+                        && FileManager.default.fileExists(atPath: candidatePath)
+                        && self.hasReliableDuplicateMetadata(candidate)
+                        && self.normalizedDuplicateTitle(candidate.title) == self.normalizedDuplicateTitle(stale.title)
+                }
+
+            let staleFilename = URL(fileURLWithPath: stalePath).lastPathComponent
+            let sameFilename = candidates.filter {
+                URL(fileURLWithPath: $0.path).lastPathComponent == staleFilename
+            }
+            let preferredCandidates = sameFilename.isEmpty ? candidates : sameFilename
+
+            guard !preferredCandidates.isEmpty else { return .noMatch }
+            guard preferredCandidates.count == 1, let keeper = preferredCandidates.first else {
+                print("⚠️ Ambiguous relocated track match for \(stale.title); deferring deletion to preserve its references")
+                return .ambiguous
+            }
+
+            try self.mergeTrackReferences(
+                db: db,
+                from: stale.stableId,
+                to: keeper.stableId
+            )
+            print("🔁 Preserved references across authoritative relocation: \(stale.path) -> \(keeper.path)")
+            return .migrated(to: keeper.stableId)
+        }
+    }
+
+    /// Both lookups are served by `idx_track_path`.
+    ///
+    /// There used to be a third step here: load every row and standardize each
+    /// one in Swift, to catch legacy rows whose stored spelling differed from
+    /// Foundation's standardized form. Its only caller is
+    /// `LibraryIndexer.existingTrack(stableId:path:)`, which reaches it for
+    /// every file whose stable ID is not already in the database - that is,
+    /// every new file - so a first import decoded the whole (growing) track
+    /// table once per file, and adding 500 tracks to a 5,000-track library
+    /// cost roughly 2.5 million row decodes.
+    ///
+    /// The fallback is no longer needed: the startup migration rewrites every
+    /// stored path into its standardized spelling, and `stable_id` is a hash
+    /// of that same standardized path - so a legacy row is already found by
+    /// the `getTrack(byStableId:)` lookup that runs before this one.
     func getTrack(byPath path: String) throws -> Track? {
         let standardizedPath = Self.standardizedPath(path)
         return try read { db in
@@ -739,48 +1219,57 @@ class DatabaseManager: @unchecked Sendable {
                 return exact
             }
 
-            if standardizedPath != path,
-               let standardized = try Track.filter(Column("path") == standardizedPath).fetchOne(db) {
-                return standardized
-            }
-
-            // Preserve compatibility for older rows whose stored URL spelling
-            // differs from Foundation's standardized path representation.
-            let tracks = try Track.fetchAll(db)
-            return tracks.first { Self.standardizedPath($0.path) == standardizedPath }
+            guard standardizedPath != path else { return nil }
+            return try Track.filter(Column("path") == standardizedPath).fetchOne(db)
         }
     }
 
     func setTrackArtists(trackStableId: String, artistIds: [Int64]) throws {
         defer { invalidateArtistDisplayNameCache() }
         try write { db in
-            try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [trackStableId])
-
-            for (position, artistId) in artistIds.enumerated() {
-                try db.execute(
-                    sql: """
-                        INSERT OR IGNORE INTO track_artist (track_stable_id, artist_id, position)
-                        VALUES (?, ?, ?)
-                    """,
-                    arguments: [trackStableId, artistId, position]
-                )
-            }
+            try self.replaceTrackArtists(trackStableId: trackStableId, artistIds: artistIds, in: db)
         }
     }
 
     func setAlbumArtists(albumId: Int64, artistIds: [Int64]) throws {
         try write { db in
-            try db.execute(sql: "DELETE FROM album_artist_link WHERE album_id = ?", arguments: [albumId])
+            try self.replaceAlbumArtists(albumId: albumId, artistIds: artistIds, in: db)
+        }
+    }
 
-            for (position, artistId) in artistIds.enumerated() {
-                try db.execute(
-                    sql: """
-                        INSERT OR IGNORE INTO album_artist_link (album_id, artist_id, position)
-                        VALUES (?, ?, ?)
-                    """,
-                    arguments: [albumId, artistId, position]
-                )
-            }
+    private func replaceTrackArtists(
+        trackStableId: String,
+        artistIds: [Int64],
+        in db: Database
+    ) throws {
+        try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [trackStableId])
+
+        for (position, artistId) in artistIds.enumerated() {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO track_artist (track_stable_id, artist_id, position)
+                    VALUES (?, ?, ?)
+                """,
+                arguments: [trackStableId, artistId, position]
+            )
+        }
+    }
+
+    private func replaceAlbumArtists(
+        albumId: Int64,
+        artistIds: [Int64],
+        in db: Database
+    ) throws {
+        try db.execute(sql: "DELETE FROM album_artist_link WHERE album_id = ?", arguments: [albumId])
+
+        for (position, artistId) in artistIds.enumerated() {
+            try db.execute(
+                sql: """
+                    INSERT OR IGNORE INTO album_artist_link (album_id, artist_id, position)
+                    VALUES (?, ?, ?)
+                """,
+                arguments: [albumId, artistId, position]
+            )
         }
     }
 
@@ -812,6 +1301,34 @@ class DatabaseManager: @unchecked Sendable {
     func getAllArtists() throws -> [Artist] {
         return try read { db in
             return try Artist.order(Column("name")).fetchAll(db)
+        }
+    }
+
+    /// Artists that own at least one album, i.e. the album artists.
+    ///
+    /// A track's featured guests are recorded in `track_artist` only, so they
+    /// are excluded here - that is the point: a 12-track album with ten guests
+    /// otherwise contributes ten single-track artists to the browse list.
+    /// Files with no album-artist tag fall back to their track artists when
+    /// indexed, so nothing with a real album goes missing.
+    func getAlbumArtists() throws -> [Artist] {
+        return try read { db in
+            return try Artist.fetchAll(db, sql: """
+                SELECT artist.*
+                FROM artist
+                WHERE artist.id IN (SELECT artist_id FROM album_artist_link)
+                   OR artist.id IN (SELECT artist_id FROM album WHERE artist_id IS NOT NULL)
+                ORDER BY artist.name COLLATE NOCASE
+            """)
+        }
+    }
+
+    /// The artists the Artists screen should list, honouring the user's
+    /// album-artist preference.
+    func getBrowsableArtists(mode: ArtistListMode) throws -> [Artist] {
+        switch mode {
+        case .albumArtists: return try getAlbumArtists()
+        case .allArtists: return try getAllArtists()
         }
     }
 
@@ -1203,9 +1720,20 @@ class DatabaseManager: @unchecked Sendable {
                 .filter(Column("album_id") == albumId)
                 .fetchAll(db)
 
-            // Sort in Swift to ensure proper integer sorting
+            // Sort in Swift to ensure proper integer sorting.
+            // Disc number FIRST: sorting by track number alone interleaved
+            // multi-disc albums into D1T1, D2T1, D1T2, D2T2 everywhere this
+            // array was used as a playback queue. The album screen regrouped
+            // by disc for display but still handed the flat array to the
+            // player, so what you saw and what you heard disagreed.
             let sortedTracks = tracks.sorted { track1, track2 in
-                // Sort by track number only (ignore disc number)
+                let discNo1 = track1.discNo ?? 1
+                let discNo2 = track2.discNo ?? 1
+
+                if discNo1 != discNo2 {
+                    return discNo1 < discNo2
+                }
+
                 let trackNo1 = track1.trackNo ?? 999
                 let trackNo2 = track2.trackNo ?? 999
 
@@ -1433,27 +1961,16 @@ class DatabaseManager: @unchecked Sendable {
         }
 
         let deletedCount = try write { db in
-            // Get all playlist items
-            let allItems = try PlaylistItem.fetchAll(db)
-            var orphanedCount = 0
-
-            print("🔍 Checking \(allItems.count) playlist items against \(trackCount) tracks")
-
-            for item in allItems {
-                // Check if track still exists
-                let trackExists = try Track.filter(Column("stable_id") == item.trackStableId).fetchOne(db) != nil
-
-                if !trackExists {
-                    // Remove orphaned item
-                    try PlaylistItem
-                        .filter(Column("playlist_id") == item.playlistId && Column("track_stable_id") == item.trackStableId)
-                        .deleteAll(db)
-                    orphanedCount += 1
-                    print("🗑️ Removed orphaned playlist item: \(item.trackStableId)")
-                }
-            }
-
-            return orphanedCount
+            // One anti-join replaces one track lookup (and potentially one
+            // delete) per playlist item.
+            try db.execute(sql: """
+                DELETE FROM playlist_item
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM track
+                    WHERE track.stable_id = playlist_item.track_stable_id
+                )
+                """)
+            return db.changesCount
         }
 
         if deletedCount > 0 {
@@ -1463,7 +1980,11 @@ class DatabaseManager: @unchecked Sendable {
         }
     }
 
-    func deleteTrack(byStableId stableId: String) throws {
+    func deleteTrack(byStableId stableId: String) async throws {
+        // Prevent a removal under the new stable ID from racing startup's
+        // migration of the old bookmark key onto that same ID.
+        await waitForExternalBookmarkMigration()
+
         print("🗃️ Database: Deleting track with stable ID - \(stableId)")
         defer { invalidateArtistDisplayNameCache() }
         let deletedCount = try write { db in
@@ -1497,24 +2018,14 @@ class DatabaseManager: @unchecked Sendable {
         try cleanupOrphanedLibraryEntries()
 
         // Remove stored bookmark so the file won't be re-imported
-        removeExternalFileBookmark(for: stableId)
+        await removeExternalFileBookmark(for: stableId)
     }
 
-    private func removeExternalFileBookmark(for stableId: String) {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let bookmarksURL = documentsURL.appendingPathComponent("ExternalFileBookmarks.plist")
-
-        guard FileManager.default.fileExists(atPath: bookmarksURL.path) else { return }
-
+    private func removeExternalFileBookmark(for stableId: String) async {
         do {
-            let data = try Data(contentsOf: bookmarksURL)
-            guard var bookmarks = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Data] else { return }
-
-            guard bookmarks.removeValue(forKey: stableId) != nil else { return }
-
-            let plistData = try PropertyListSerialization.data(fromPropertyList: bookmarks, format: .xml, options: 0)
-            try plistData.write(to: bookmarksURL)
-            print("🔖 Removed external file bookmark for stableId: \(stableId)")
+            if try await ExternalBookmarkStore.shared.removeBookmark(for: stableId) {
+                print("🔖 Removed external file bookmark for stableId: \(stableId)")
+            }
         } catch {
             print("⚠️ Failed to remove external file bookmark: \(error.localizedDescription)")
         }
@@ -1718,6 +2229,29 @@ class DatabaseManager: @unchecked Sendable {
 
     // MARK: - Playlist operations
 
+    private static func folderPlaylist(
+        in db: Database,
+        matchingPath folderPath: String
+    ) throws -> Playlist? {
+        let normalizedFolderPath = standardizedPath(folderPath)
+
+        if let exact = try Playlist
+            .filter([folderPath, normalizedFolderPath].contains(Column("folder_path")))
+            .filter(Column("is_folder_synced") == true)
+            .fetchOne(db) {
+            return exact
+        }
+
+        let persistenceKey = folderPersistenceKey(forPath: normalizedFolderPath)
+        return try Playlist
+            .filter(Column("is_folder_synced") == true)
+            .fetchAll(db)
+            .first { playlist in
+                guard let existingPath = playlist.folderPath else { return false }
+                return Self.folderPath(existingPath, matchesPersistenceKey: persistenceKey)
+            }
+    }
+
     func createPlaylist(title: String) throws -> Playlist {
         return try write { db in
             let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
@@ -1739,49 +2273,58 @@ class DatabaseManager: @unchecked Sendable {
 
     func createFolderPlaylist(title: String, folderPath: String) throws -> Playlist {
         return try write { db in
-            // Normalize folder path by using just the folder name for comparison
-            // This avoids issues with changing container UUIDs
-            let folderName = URL(fileURLWithPath: folderPath).lastPathComponent
+            let normalizedFolderPath = Self.standardizedPath(folderPath)
+            let persistenceKey = Self.folderPersistenceKey(forPath: normalizedFolderPath)
+            let folderName = URL(fileURLWithPath: normalizedFolderPath).lastPathComponent
 
-            // Check if this folder was previously deleted by the user
-            let count = try Int.fetchOne(
+            // New tombstones use a container-independent key for local
+            // Documents folders. Also honor the absolute-path form written by
+            // recent builds and the bare folder name written by legacy builds.
+            let tombstones = try String.fetchAll(
                 db,
-                sql: "SELECT COUNT(*) FROM deleted_folder_playlist WHERE folder_path = ?",
-                arguments: [folderName]
-            ) ?? 0
+                sql: "SELECT folder_path FROM deleted_folder_playlist"
+            )
+            let wasDeleted = tombstones.contains { tombstone in
+                tombstone == persistenceKey
+                    || tombstone == folderName
+                    || tombstone == folderPath
+                    || tombstone == normalizedFolderPath
+                    || Self.folderPath(tombstone, matchesPersistenceKey: persistenceKey)
+            }
 
-            if count > 0 {
+            if wasDeleted {
                 print("⛔ Folder playlist '\(folderName)' was previously deleted by user, skipping recreation")
                 throw DatabaseError.folderPlaylistDeleted
             }
 
-            let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
             let now = Int64(Date().timeIntervalSince1970)
 
-            // Check if a folder-synced playlist already exists for this path
-            if let existingPlaylist = try Playlist.filter(Column("folder_path") == folderPath).fetchOne(db) {
+            // Match local folders by their Documents-relative identity as
+            // well as their literal path. On a restored device, repair the
+            // surviving playlist row to point at the current container.
+            if var existingPlaylist = try Self.folderPlaylist(in: db, matchingPath: normalizedFolderPath) {
+                if existingPlaylist.folderPath != normalizedFolderPath {
+                    existingPlaylist.folderPath = normalizedFolderPath
+                    existingPlaylist.updatedAt = Int64(Date().timeIntervalSince1970)
+                    try existingPlaylist.update(db)
+                    print("📁 Updated relocated folder playlist path: \(normalizedFolderPath)")
+                }
                 print("📁 Folder playlist already exists: \(existingPlaylist.title)")
                 return existingPlaylist
             }
 
-            // CRITICAL: Check if a manual playlist with the same title/slug already exists
-            // This prevents data loss by not overwriting user-created playlists
-            if let existingManualPlaylist = try Playlist.filter(Column("slug") == slug).fetchOne(db) {
-                if !existingManualPlaylist.isFolderSynced {
-                    print("⚠️ Manual playlist '\(title)' already exists - converting to folder-synced playlist")
-                    // Update the existing playlist to be folder-synced
-                    var updatedPlaylist = existingManualPlaylist
-                    updatedPlaylist.folderPath = folderPath
-                    updatedPlaylist.isFolderSynced = true
-                    updatedPlaylist.lastFolderSync = now
-                    updatedPlaylist.updatedAt = now
-                    try updatedPlaylist.update(db)
-                    print("✅ Converted manual playlist '\(title)' to folder-synced")
-                    return updatedPlaylist
-                } else {
-                    // Another folder playlist with same name but different path
-                    print("⚠️ Folder playlist '\(title)' already exists with different path")
-                    return existingManualPlaylist
+            // Slugs are unique database keys, but folder titles are not unique.
+            // Preserve manual playlists and same-named folders as separate rows.
+            let generatedBaseSlug = title.lowercased().replacingOccurrences(of: " ", with: "-")
+            let baseSlug = generatedBaseSlug.isEmpty ? "folder" : generatedBaseSlug
+            var slug = baseSlug
+            if try Playlist.filter(Column("slug") == slug).fetchOne(db) != nil {
+                let pathHash = String(Self.generatePathStableId(forPath: normalizedFolderPath).prefix(12))
+                slug = "\(baseSlug)-folder-\(pathHash)"
+                var suffix = 2
+                while try Playlist.filter(Column("slug") == slug).fetchOne(db) != nil {
+                    slug = "\(baseSlug)-folder-\(pathHash)-\(suffix)"
+                    suffix += 1
                 }
             }
 
@@ -1792,11 +2335,11 @@ class DatabaseManager: @unchecked Sendable {
                 createdAt: now,
                 updatedAt: now,
                 lastPlayedAt: 0,
-                folderPath: folderPath,
+                folderPath: normalizedFolderPath,
                 isFolderSynced: true,
                 lastFolderSync: now
             )
-            print("📁 Creating folder-synced playlist: \(title) -> \(folderPath)")
+            print("📁 Creating folder-synced playlist: \(title) -> \(normalizedFolderPath)")
             return try playlist.insertAndFetch(db)!
         }
     }
@@ -1830,7 +2373,7 @@ class DatabaseManager: @unchecked Sendable {
 
     func getFolderPlaylist(forPath folderPath: String) throws -> Playlist? {
         return try read { db in
-            return try Playlist.filter(Column("folder_path") == folderPath && Column("is_folder_synced") == true).fetchOne(db)
+            try Self.folderPlaylist(in: db, matchingPath: folderPath)
         }
     }
 
@@ -1938,16 +2481,15 @@ class DatabaseManager: @unchecked Sendable {
             if let playlist = try Playlist.filter(Column("id") == playlistId).fetchOne(db),
                let folderPath = playlist.folderPath,
                playlist.isFolderSynced {
-                // Normalize to just the folder name to avoid container UUID issues
-                let folderName = URL(fileURLWithPath: folderPath).lastPathComponent
+                let persistenceKey = Self.folderPersistenceKey(forPath: folderPath)
 
                 // Add to deleted folder playlists table to prevent recreation
                 let now = Int64(Date().timeIntervalSince1970)
                 try db.execute(
                     sql: "INSERT OR REPLACE INTO deleted_folder_playlist (folder_path, deleted_at) VALUES (?, ?)",
-                    arguments: [folderName, now]
+                    arguments: [persistenceKey, now]
                 )
-                print("📝 Marked folder playlist '\(folderName)' as deleted to prevent recreation")
+                print("📝 Marked folder playlist '\(persistenceKey)' as deleted to prevent recreation")
             }
 
             return try Playlist.filter(Column("id") == playlistId).deleteAll(db)
@@ -1990,12 +2532,25 @@ class DatabaseManager: @unchecked Sendable {
             // Get current playlist items
             let currentItems = try PlaylistItem.filter(Column("playlist_id") == playlistId).fetchAll(db)
             let currentTrackIds = Set(currentItems.map { $0.trackStableId })
-            let newTrackIds = Set(trackStableIds)
+            let requestedTrackIds = Set(trackStableIds)
+            let indexedTrackIds: Set<String>
+            if requestedTrackIds.isEmpty {
+                indexedTrackIds = []
+            } else {
+                indexedTrackIds = Set(
+                    try Track
+                        .filter(Array(requestedTrackIds).contains(Column("stable_id")))
+                        .select(Column("stable_id"))
+                        .asRequest(of: String.self)
+                        .fetchAll(db)
+                )
+            }
 
             // Only add tracks that are in the folder but not in the playlist
-            // This preserves user additions and doesn't remove files (files deleted from
-            // library will be cleaned up automatically by database constraints)
-            let tracksToAdd = newTrackIds.subtracting(currentTrackIds)
+            // This preserves user additions and doesn't remove files. Only IDs
+            // backed by a track row are eligible because playlist_item has no
+            // foreign key to enforce that invariant for us.
+            let tracksToAdd = indexedTrackIds.subtracting(currentTrackIds)
 
             print("🔄 Folder sync: Adding \(tracksToAdd.count) new tracks from folder")
 
@@ -2177,16 +2732,17 @@ private extension String {
 ///
 /// Background audio keeps the process alive and legitimately writing (play
 /// counts, queue state), so the database is only suspended while the app is
-/// backgrounded AND playback is stopped. It resumes on foregrounding or when
-/// playback restarts (e.g. from the lock screen or a remote command).
+/// backgrounded AND playback is genuinely idle. Decoder loads and queue
+/// advances remain active even though `PlayerEngine.isPlaying` briefly becomes
+/// false during cleanup. It resumes on foregrounding or synchronously when a
+/// playback transition starts (e.g. from the lock screen or a remote command).
 @MainActor
 final class DatabaseSuspensionCoordinator {
     static let shared = DatabaseSuspensionCoordinator()
 
     private var observers: [NSObjectProtocol] = []
-    private var playbackCancellable: AnyCancellable?
     private var isInBackground = false
-    private var isPlaying = false
+    private var isPlaybackActivityActive = false
     private var isSuspended = false
 
     private init() {}
@@ -2216,26 +2772,52 @@ final class DatabaseSuspensionCoordinator {
                 let coordinator = DatabaseSuspensionCoordinator.shared
                 coordinator.isInBackground = false
                 coordinator.apply()
+                // apply() is a no-op when the database was never suspended -
+                // the app was backgrounded while playing - so the scan that a
+                // *previous* suspension abandoned would otherwise stay
+                // abandoned. Resuming is only appropriate here, in the
+                // foreground; see resumeScanIfAppropriate().
+                coordinator.resumeScanIfAppropriate()
             }
         }
         observers.append(foregroundObserver)
 
-        isPlaying = PlayerEngine.shared.isPlaying
-        playbackCancellable = PlayerEngine.shared.$isPlaying
-            .removeDuplicates()
-            .sink { playing in
-                Task { @MainActor in
-                    let coordinator = DatabaseSuspensionCoordinator.shared
-                    coordinator.isPlaying = playing
-                    coordinator.apply()
-                }
-            }
+        isPlaybackActivityActive = PlayerEngine.shared.keepsDatabaseActive
+        apply()
+    }
+
+    /// Called directly from PlayerEngine's activity properties. This must be
+    /// synchronous on the main actor: dispatching through an unstructured Task
+    /// let a transient `isPlaying = false` suspend GRDB during the load's 10 ms
+    /// cleanup yield, aborting writes before the later resume task could run.
+    func setPlaybackActivityActive(_ active: Bool) {
+        guard active != isPlaybackActivityActive else { return }
+        isPlaybackActivityActive = active
+        apply()
     }
 
     private func apply() {
-        let shouldSuspend = isInBackground && !isPlaying
+        let shouldSuspend = isInBackground && !isPlaybackActivityActive
         guard shouldSuspend != isSuspended else { return }
         isSuspended = shouldSuspend
+
+        // Take the scanner down BEFORE suspending, never after. Suspension
+        // makes in-flight writes throw SQLITE_INTERRUPT/SQLITE_ABORT, and the
+        // indexer's per-file error handling had no way to tell those from a
+        // corrupt file: backgrounding the app mid-scan recorded a burst of
+        // bogus file failures, which withheld lastLibraryScanDate and made the
+        // whole library re-scan on the next launch. Stopping first means those
+        // writes are never attempted; the scan is simply abandoned and retried
+        // when the app returns to the foreground.
+        //
+        // The database is not kept alive for the scan instead: it lives in the
+        // app group container, and a held SQLite lock at suspension is the
+        // 0xdead10cc kill this whole class exists to prevent.
+        if shouldSuspend, LibraryIndexer.shared.isIndexing {
+            print("⏸️ Stopping the library scan before suspending the database")
+            LibraryIndexer.shared.stop()
+        }
+
         NotificationCenter.default.post(
             name: shouldSuspend ? Database.suspendNotification : Database.resumeNotification,
             object: nil
@@ -2243,5 +2825,33 @@ final class DatabaseSuspensionCoordinator {
         print(shouldSuspend
             ? "🛑 Database suspended (backgrounded, not playing)"
             : "▶️ Database resumed")
+
+        // ...and pick that scan back up, now that the database is live again.
+        if !shouldSuspend {
+            resumeScanIfAppropriate()
+        }
+    }
+
+    /// Restarts a scan that a suspension abandoned - but only in the
+    /// foreground.
+    ///
+    /// A stopped scan publishes no completion, so nothing else would ever run
+    /// its favourites sync, iCloud playlist restoration or maintenance: the
+    /// app's own foreground handler only starts a scan when the scan-interval
+    /// cooldown allows one, which never covers a manual sync or a library set
+    /// to "manual only". Hence resuming at all.
+    ///
+    /// The background check is what keeps that from turning into a treadmill.
+    /// This coordinator watches every `isPlaying` change, so while the app is
+    /// backgrounded each pause suspends the database and stops the scan, and
+    /// each resume starts a brand new one - `resumeInterruptedScan()` calls
+    /// `start()`, not a checkpoint resume. A few transport taps from the lock
+    /// screen or a car therefore re-ran a full library scan several times over,
+    /// each one throwing away the progress of the last, while audio was
+    /// playing. The abandoned mode is remembered either way, so nothing is
+    /// lost by waiting for the app to come back to the foreground.
+    fileprivate func resumeScanIfAppropriate() {
+        guard !isSuspended, !isInBackground else { return }
+        LibraryIndexer.shared.resumeInterruptedScan()
     }
 }

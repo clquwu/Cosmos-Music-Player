@@ -104,9 +104,7 @@
 "remove_from_library_only_description" = "开启后，删除操作只会将曲目从媒体库中移除，你珍贵的无损原文件仍会安全保留在手机硬盘中。";
 "player_controls" = "播放器控制";
 "show_lyrics_button" = "显示歌词按钮";
-"show_lyrics_button_description" = "当睡眠定时按钮关闭时，在播放器中显示歌词按钮。";
 "show_sleep_timer_button" = "显示睡眠定时按钮";
-"show_sleep_timer_button_description" = "用睡眠定时按钮替换播放器中的歌词按钮。";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "标为红心 (喜欢)";
@@ -249,10 +247,10 @@
 "audio_settings" = "音频引擎与解码";
 "dsd_playback_mode" = "DSD 解码输出模式";
 "dsd_playback_mode_description" = "选择 DSD (DSF/DFF) 音频文件的底层解码与播放方式";
-"dsd_mode_auto" = "自动 (智能检测外接 DAC)";
+"dsd_mode_auto" = "自动（安全）";
 "dsd_mode_pcm" = "PCM 转换 (软解直推)";
 "dsd_mode_dop" = "DoP (DSD over PCM 源码输出)";
-"dsd_mode_auto_description" = "自动侦测是否插入了外接解码器(小尾巴)，若支持则优先启用 DoP 源码直通，否则自动转换为 PCM 播放。";
+"dsd_mode_auto_description" = "安全转换为 PCM，因为 iOS 无法确认输出设备是否支持 DoP；仅在连接兼容 DAC 时手动选择 DoP。";
 "dsd_mode_pcm_description" = "强制将 DSD 软解转换为高采样率 PCM 格式播放（完美兼容手机扬声器、蓝牙及普通耳机）。";
 "dsd_mode_dop_description" = "强制打包为 DoP 源码输出（警告：必须连接支持 DSD 硬解的专业外接 DAC 设备，否则会产生严重爆音！）";
 
@@ -387,3 +385,89 @@
 "Saved" = "已保存";
 "Save" = "保存";
 "Save mix as playlist" = "将合集保存为播放列表";
+
+/* In-place search bars and queue navigation */
+"search_songs" = "搜索歌曲、艺术家、专辑";
+"search_artists" = "搜索艺术家";
+"search_albums" = "搜索专辑";
+"search_playlists" = "搜索播放列表";
+
+/* Library scan interval and album-artist browsing */
+"album_artists" = "专辑艺术家";
+"all_artists" = "所有艺术家";
+"library_scan_frequency" = "自动扫描";
+"library_scan_frequency_description" = "Cosmos 启动时重新扫描文件的频率。iOS 经常在后台关闭应用，因此间隔过短意味着几乎每次启动都会完整扫描一次。同步按钮始终会立即重新扫描。";
+"checking_library_formats" = "正在检查音频格式…";
+"scan_every_launch" = "每次启动";
+"scan_hourly" = "最多每小时一次";
+"scan_daily" = "最多每天一次";
+"scan_weekly" = "最多每周一次";
+"scan_manual_only" = "仅手动";
+
+/* Playback failures the user can act on */
+"playback_track_unavailable" = "无法播放此曲目。文件可能已被移动或删除。";
+"playback_download_stalled" = "下载已停滞。请检查网络连接后重试。";
+"playback_audio_unavailable" = "音频输出暂时不可用。请检查连接后重试。";
+"playback_format_needs_phone" = "此格式无法通过 CarPlay 播放。请在手机上播放，或换一首曲目。";
+
+/* Lyrics screen */
+"lyrics" = "歌词";
+"close" = "关闭";
+"lyrics_copy" = "拷贝歌词";
+"lyrics_more_actions" = "更多歌词操作";
+"lyrics_seek_hint" = "从这一行开始播放";
+"lyrics_back_to_current" = "回到当前歌词";
+"lyrics_instrumental_break" = "间奏";
+"lyrics_instrumental" = "纯音乐";
+"lyrics_instrumental_message" = "此曲目没有歌词";
+"lyrics_unavailable" = "暂无歌词";
+"lyrics_unavailable_message" = "未找到此曲目的歌词";
+"lyrics_loading" = "正在加载歌词";
+"lyrics_loading_message" = "正在从元数据和在线来源获取";
+"lyrics_search_again" = "重新搜索";
+
+/* App appearance */
+"app_appearance" = "应用外观";
+"app_appearance_description" = "选择 Cosmos 的外观，或跟随设备设置。";
+"appearance_system" = "跟随系统";
+"appearance_light" = "浅色";
+"appearance_dark" = "深色";
+"lyrics_choose_version" = "选择版本";
+"lyrics_synced" = "已同步";
+"queue_full_list_from_search" = "从搜索结果播放整个列表";
+"queue_full_list_from_search_description" = "播放搜索到的歌曲时，将其所在的整个列表加入播放队列，而不仅是搜索结果。";
+"split_artists_on_comma" = "按逗号拆分艺人";
+"split_artists_on_comma_description" = "将艺人标签中的“A, B”视为两位艺人。默认关闭，因为逗号也会出现在真实名称中，例如“Earth, Wind & Fire”。";
+
+/* 其他界面本地化 */
+"playlist_cover" = "播放列表封面";
+"change_cover_image" = "更改封面图片";
+"remove_custom_cover" = "移除自定义封面";
+"unknown" = "未知";
+"searching" = "正在搜索…";
+"albums_count_singular" = "%d 张专辑";
+"albums_count_plural" = "%d 张专辑";
+"disc_number" = "光盘 %d";
+"imported_song_count_singular" = "已导入 %d 首歌曲";
+"imported_song_count_plural" = "已导入 %d 首歌曲";
+"songs_already_in_library" = "%d 首歌曲已在媒体库中";
+"import_summary" = "已导入 %d 首，已跳过 %d 首";
+"setting_up_icloud_library" = "正在设置你的 iCloud 音乐库…";
+"setting_up_offline_library" = "正在设置你的离线音乐库…";
+"setting_up_local_library" = "正在设置你的本地音乐库…";
+"manual_parametric_eq" = "手动参数均衡器";
+"create_manual_eq" = "创建手动均衡器";
+"bands" = "频段";
+"create_parametric_eq_description" = "创建一个最多包含 16 个完全可编辑频段的参数均衡器预设。";
+"edit_parametric_bands_description" = "创建后，你可以编辑每个频段的频率、增益和 Q 值。";
+"parametric_editor" = "参数编辑器";
+"band_count" = "%d / %d 个频段";
+"add_band" = "添加频段";
+"remove_band" = "移除频段";
+"selected_band" = "所选频段";
+"band_number" = "频段 %d";
+"frequency" = "频率";
+"gain" = "增益";
+"sort_manual_order" = "手动顺序";
+"sort_artist_az" = "艺人 A–Z";
+"sort_artist_za" = "艺人 Z–A";

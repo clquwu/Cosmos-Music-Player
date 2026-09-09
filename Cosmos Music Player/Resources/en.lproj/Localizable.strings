@@ -110,9 +110,7 @@
 "keep_folder_playlists" = "Keep playlists";
 "player_controls" = "Player Controls";
 "show_lyrics_button" = "Show Lyrics Button";
-"show_lyrics_button_description" = "Show the lyrics button in the player when the sleep timer button is disabled.";
 "show_sleep_timer_button" = "Show Sleep Timer Button";
-"show_sleep_timer_button_description" = "Replace the lyrics button in the player with a sleep timer button.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Add to Liked Songs";
@@ -255,10 +253,10 @@
 "audio_settings" = "Audio";
 "dsd_playback_mode" = "DSD Playback Mode";
 "dsd_playback_mode_description" = "Choose how DSD audio files (DSF/DFF) are played back";
-"dsd_mode_auto" = "Auto (Detect DAC)";
+"dsd_mode_auto" = "Auto (Safe)";
 "dsd_mode_pcm" = "PCM Conversion";
 "dsd_mode_dop" = "DoP (DSD over PCM)";
-"dsd_mode_auto_description" = "Automatically detect external DAC and use DoP if available, otherwise convert to PCM";
+"dsd_mode_auto_description" = "Safely converts to PCM because iOS cannot verify whether an output supports DoP; select DoP explicitly only for a compatible DAC";
 "dsd_mode_pcm_description" = "Always convert DSD to PCM for playback (compatible with all devices)";
 "dsd_mode_dop_description" = "Always use DoP encoding (requires external DAC that supports DSD)";
 
@@ -386,3 +384,89 @@
 
 "ai_playlist_created_title" = "Playlist Created";
 "ai_playlist_created_message" = "“%@” was created with %d songs.";
+
+/* In-place search bars and queue navigation */
+"search_songs" = "Search songs, artists, albums";
+"search_artists" = "Search artists";
+"search_albums" = "Search albums";
+"search_playlists" = "Search playlists";
+
+/* Library scan interval and album-artist browsing */
+"album_artists" = "Album Artists";
+"all_artists" = "All Artists";
+"library_scan_frequency" = "Automatic Scan";
+"library_scan_frequency_description" = "How often Cosmos rescans your files when it starts. iOS often closes the app in the background, so a short interval means a full scan on nearly every launch. The sync button always rescans immediately.";
+"checking_library_formats" = "Checking audio formats…";
+"scan_every_launch" = "Every launch";
+"scan_hourly" = "At most hourly";
+"scan_daily" = "At most daily";
+"scan_weekly" = "At most weekly";
+"scan_manual_only" = "Manual only";
+
+/* Playback failures the user can act on */
+"playback_track_unavailable" = "This track could not be played. The file may have been moved or removed.";
+"playback_download_stalled" = "Download stalled. Check your connection and try again.";
+"playback_audio_unavailable" = "Audio output is temporarily unavailable. Check your connection and try again.";
+"playback_format_needs_phone" = "This format can't be played over CarPlay. Play it from your phone, or pick another track.";
+
+/* Lyrics screen */
+"lyrics" = "Lyrics";
+"close" = "Close";
+"lyrics_copy" = "Copy Lyrics";
+"lyrics_more_actions" = "More lyrics actions";
+"lyrics_seek_hint" = "Plays the song from this line";
+"lyrics_back_to_current" = "Back to current line";
+"lyrics_instrumental_break" = "Instrumental break";
+"lyrics_instrumental" = "Instrumental";
+"lyrics_instrumental_message" = "This track has no lyrics";
+"lyrics_unavailable" = "No Lyrics Available";
+"lyrics_unavailable_message" = "Lyrics not found for this track";
+"lyrics_loading" = "Loading Lyrics";
+"lyrics_loading_message" = "Fetching from metadata and online sources";
+"lyrics_search_again" = "Search Again";
+
+/* App appearance */
+"app_appearance" = "App Appearance";
+"app_appearance_description" = "Choose how Cosmos looks, or follow your device setting.";
+"appearance_system" = "System";
+"appearance_light" = "Light";
+"appearance_dark" = "Dark";
+"lyrics_choose_version" = "Choose Version";
+"lyrics_synced" = "Synced";
+"queue_full_list_from_search" = "Queue Whole List From Search";
+"queue_full_list_from_search_description" = "When you play a song found by searching, queue the whole list it came from instead of only the matches.";
+"split_artists_on_comma" = "Split Artists On Commas";
+"split_artists_on_comma_description" = "Treat “A, B” in an artist tag as two artists. Off by default, because commas also appear inside real names like “Earth, Wind & Fire”.";
+
+/* Additional interface localization */
+"playlist_cover" = "Playlist Cover";
+"change_cover_image" = "Change Cover Image";
+"remove_custom_cover" = "Remove Custom Cover";
+"unknown" = "Unknown";
+"searching" = "Searching…";
+"albums_count_singular" = "%d album";
+"albums_count_plural" = "%d albums";
+"disc_number" = "Disc %d";
+"imported_song_count_singular" = "%d song imported";
+"imported_song_count_plural" = "%d songs imported";
+"songs_already_in_library" = "%d already in library";
+"import_summary" = "%d imported, %d skipped";
+"setting_up_icloud_library" = "Setting up your iCloud music library…";
+"setting_up_offline_library" = "Setting up your offline music library…";
+"setting_up_local_library" = "Setting up your local music library…";
+"manual_parametric_eq" = "Manual Parametric EQ";
+"create_manual_eq" = "Create Manual EQ";
+"bands" = "Bands";
+"create_parametric_eq_description" = "Create a parametric EQ preset with up to 16 fully editable bands.";
+"edit_parametric_bands_description" = "You can edit frequency, gain, and Q for every band after creation.";
+"parametric_editor" = "Parametric Editor";
+"band_count" = "%d / %d bands";
+"add_band" = "Add Band";
+"remove_band" = "Remove Band";
+"selected_band" = "Selected Band";
+"band_number" = "Band %d";
+"frequency" = "Frequency";
+"gain" = "Gain";
+"sort_manual_order" = "Manual Order";
+"sort_artist_az" = "Artist A–Z";
+"sort_artist_za" = "Artist Z–A";

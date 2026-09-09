@@ -110,9 +110,7 @@
 "keep_folder_playlists" = "Conserver les playlists";
 "player_controls" = "Contrôles du lecteur";
 "show_lyrics_button" = "Afficher le bouton Paroles";
-"show_lyrics_button_description" = "Affiche le bouton des paroles dans le lecteur lorsque le bouton de minuterie de sommeil est désactivé.";
 "show_sleep_timer_button" = "Afficher la minuterie de sommeil";
-"show_sleep_timer_button_description" = "Remplace le bouton des paroles dans le lecteur par une minuterie de sommeil.";
 
 /* Liked Songs Actions */
 "add_to_liked_songs" = "Ajouter aux favoris";
@@ -255,10 +253,10 @@
 "audio_settings" = "Audio";
 "dsd_playback_mode" = "Mode de Lecture DSD";
 "dsd_playback_mode_description" = "Choisissez comment les fichiers audio DSD (DSF/DFF) sont lus";
-"dsd_mode_auto" = "Auto (Détection DAC)";
+"dsd_mode_auto" = "Auto (Sécurisé)";
 "dsd_mode_pcm" = "Conversion PCM";
 "dsd_mode_dop" = "DoP (DSD sur PCM)";
-"dsd_mode_auto_description" = "Détecte automatiquement le DAC externe et utilise DoP si disponible, sinon convertit en PCM";
+"dsd_mode_auto_description" = "Convertit en PCM en toute sécurité, car iOS ne peut pas vérifier la compatibilité DoP ; sélectionnez DoP explicitement uniquement pour un DAC compatible";
 "dsd_mode_pcm_description" = "Toujours convertir DSD en PCM pour la lecture (compatible avec tous les appareils)";
 "dsd_mode_dop_description" = "Toujours utiliser l'encodage DoP (nécessite un DAC externe qui supporte DSD)";
 
@@ -386,3 +384,89 @@
 
 "ai_playlist_created_title" = "Playlist créée";
 "ai_playlist_created_message" = "« %@ » a été créée avec %d titres.";
+
+/* In-place search bars and queue navigation */
+"search_songs" = "Rechercher titres, artistes, albums";
+"search_artists" = "Rechercher des artistes";
+"search_albums" = "Rechercher des albums";
+"search_playlists" = "Rechercher des playlists";
+
+/* Library scan interval and album-artist browsing */
+"album_artists" = "Artistes d'album";
+"all_artists" = "Tous les artistes";
+"library_scan_frequency" = "Analyse automatique";
+"library_scan_frequency_description" = "Fréquence à laquelle Cosmos réanalyse vos fichiers au démarrage. iOS ferme souvent l'app en arrière-plan : un intervalle court entraîne donc une analyse complète à presque chaque ouverture. Le bouton de synchronisation réanalyse toujours immédiatement.";
+"checking_library_formats" = "Vérification des formats audio…";
+"scan_every_launch" = "À chaque ouverture";
+"scan_hourly" = "Au plus toutes les heures";
+"scan_daily" = "Au plus une fois par jour";
+"scan_weekly" = "Au plus une fois par semaine";
+"scan_manual_only" = "Manuelle uniquement";
+
+/* Playback failures the user can act on */
+"playback_track_unavailable" = "Impossible de lire ce morceau. Le fichier a peut-être été déplacé ou supprimé.";
+"playback_download_stalled" = "Téléchargement interrompu. Vérifiez votre connexion et réessayez.";
+"playback_audio_unavailable" = "La sortie audio est temporairement indisponible. Vérifiez votre connexion et réessayez.";
+"playback_format_needs_phone" = "Ce format ne peut pas être lu via CarPlay. Lisez-le depuis votre téléphone ou choisissez un autre morceau.";
+
+/* Lyrics screen */
+"lyrics" = "Paroles";
+"close" = "Fermer";
+"lyrics_copy" = "Copier les paroles";
+"lyrics_more_actions" = "Autres actions sur les paroles";
+"lyrics_seek_hint" = "Lit le morceau à partir de cette ligne";
+"lyrics_back_to_current" = "Revenir à la ligne en cours";
+"lyrics_instrumental_break" = "Passage instrumental";
+"lyrics_instrumental" = "Instrumental";
+"lyrics_instrumental_message" = "Ce morceau n’a pas de paroles";
+"lyrics_unavailable" = "Aucunes paroles disponibles";
+"lyrics_unavailable_message" = "Paroles introuvables pour ce morceau";
+"lyrics_loading" = "Chargement des paroles";
+"lyrics_loading_message" = "Récupération depuis les métadonnées et les sources en ligne";
+"lyrics_search_again" = "Rechercher à nouveau";
+
+/* App appearance */
+"app_appearance" = "Apparence de l’app";
+"app_appearance_description" = "Choisissez l’apparence de Cosmos, ou suivez le réglage de votre appareil.";
+"appearance_system" = "Système";
+"appearance_light" = "Clair";
+"appearance_dark" = "Sombre";
+"lyrics_choose_version" = "Choisir une version";
+"lyrics_synced" = "Synchronisé";
+"queue_full_list_from_search" = "Mettre toute la liste en file depuis la recherche";
+"queue_full_list_from_search_description" = "Lorsque vous lisez un morceau trouvé par recherche, mettre en file toute la liste d’origine plutôt que les seuls résultats.";
+"split_artists_on_comma" = "Séparer les artistes aux virgules";
+"split_artists_on_comma_description" = "Traiter « A, B » dans une étiquette d’artiste comme deux artistes. Désactivé par défaut, car les virgules figurent aussi dans des noms réels comme « Earth, Wind & Fire ».";
+
+/* Localisation supplémentaire de l’interface */
+"playlist_cover" = "Pochette de la playlist";
+"change_cover_image" = "Modifier l’image de couverture";
+"remove_custom_cover" = "Supprimer la couverture personnalisée";
+"unknown" = "Inconnu";
+"searching" = "Recherche…";
+"albums_count_singular" = "%d album";
+"albums_count_plural" = "%d albums";
+"disc_number" = "Disque %d";
+"imported_song_count_singular" = "%d musique importée";
+"imported_song_count_plural" = "%d musiques importées";
+"songs_already_in_library" = "Déjà dans la bibliothèque : %d";
+"import_summary" = "%d importations, %d éléments ignorés";
+"setting_up_icloud_library" = "Configuration de votre bibliothèque musicale iCloud…";
+"setting_up_offline_library" = "Configuration de votre bibliothèque musicale hors ligne…";
+"setting_up_local_library" = "Configuration de votre bibliothèque musicale locale…";
+"manual_parametric_eq" = "Égaliseur paramétrique manuel";
+"create_manual_eq" = "Créer un égaliseur manuel";
+"bands" = "Bandes";
+"create_parametric_eq_description" = "Créez un préréglage d’égaliseur paramétrique comportant jusqu’à 16 bandes entièrement modifiables.";
+"edit_parametric_bands_description" = "Vous pourrez modifier la fréquence, le gain et le facteur Q de chaque bande après la création.";
+"parametric_editor" = "Éditeur paramétrique";
+"band_count" = "%d / %d bandes";
+"add_band" = "Ajouter une bande";
+"remove_band" = "Supprimer la bande";
+"selected_band" = "Bande sélectionnée";
+"band_number" = "Bande %d";
+"frequency" = "Fréquence";
+"gain" = "Gain";
+"sort_manual_order" = "Ordre manuel";
+"sort_artist_az" = "Artiste A–Z";
+"sort_artist_za" = "Artiste Z–A";

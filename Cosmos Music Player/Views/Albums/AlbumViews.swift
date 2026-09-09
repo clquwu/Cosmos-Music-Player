@@ -6,14 +6,27 @@ struct AlbumsScreen: View {
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var albums: [Album] = []
     @State private var settings = DeleteSettings.load()
-    
+    @StateObject private var search = LibrarySearchState()
+    @State private var artistNamesById: [Int64: String] = [:]
+
+    private var visibleAlbums: [Album] {
+        let terms = LibrarySearch.terms(in: search.text)
+        guard !terms.isEmpty else { return albums }
+        return albums.filter { album in
+            // Match the artist too, so "daft punk" finds their albums without
+            // the user having to remember an album title.
+            let artist = album.albumArtist ?? album.artistId.flatMap { artistNamesById[$0] }
+            return LibrarySearch.matches(terms: terms, in: album.title, artist)
+        }
+    }
+
     var body: some View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .albums)
             
             VStack {
-                if albums.isEmpty {
-                    EmptyAlbumsView()
+                if visibleAlbums.isEmpty {
+                    EmptyAlbumsView(isSearching: !albums.isEmpty)
                 } else {
                     ScrollView {
                         LazyVGrid(
@@ -23,7 +36,7 @@ struct AlbumsScreen: View {
                             ],
                             spacing: 16
                         ) {
-                            ForEach(albums, id: \.id) { album in
+                            ForEach(visibleAlbums, id: \.id) { album in
                                 NavigationLink {
                                     AlbumDetailScreen(album: album, allTracks: allTracks)
                                 } label: {
@@ -42,6 +55,12 @@ struct AlbumsScreen: View {
         }
         .navigationTitle(Localized.albums)
         .navigationBarTitleDisplayMode(.inline)
+        .librarySearchField(search, prompt: Localized.searchAlbums)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                LibrarySearchButton(state: search)
+            }
+        }
         .onAppear(perform: loadAlbums)
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LibraryNeedsRefresh"))) { _ in
             loadAlbums()
@@ -58,6 +77,7 @@ struct AlbumsScreen: View {
     private func loadAlbums() {
         do {
             albums = try appCoordinator.getAllAlbums()
+            artistNamesById = try DatabaseManager.shared.getAllArtistNamesById()
         } catch {
             print("Failed to load albums: \(error)")
         }
@@ -65,13 +85,16 @@ struct AlbumsScreen: View {
 }
 
 private struct EmptyAlbumsView: View {
+    /// The library has albums, they just don't match the current query.
+    var isSearching = false
+
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: "opticaldisc")
+            Image(systemName: isSearching ? "magnifyingglass" : "opticaldisc")
                 .font(.system(size: 40))
                 .foregroundColor(.secondary)
-            Text(Localized.noAlbumsFound).font(.headline)
-            Text(Localized.albumsWillAppear)
+            Text(isSearching ? Localized.noResultsFound : Localized.noAlbumsFound).font(.headline)
+            Text(isSearching ? Localized.tryDifferentKeywords : Localized.albumsWillAppear)
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -123,6 +146,7 @@ private struct AlbumCardView: View {
         .task {
             loadAlbumArtwork()
         }
+        .reloadsArtwork(for: tracks.first?.stableId) { loadAlbumArtwork() }
     }
     
     private func loadAlbumArtwork() {
@@ -136,6 +160,7 @@ private struct AlbumCardView: View {
 
 // Album detail view reconstructed
 struct AlbumDetailScreen: View {
+
     let album: Album
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
@@ -146,16 +171,27 @@ struct AlbumDetailScreen: View {
     @State private var isBulkMode = false
     @State private var selectedTracks: Set<String> = []
 
+    // Subscribed, not merely read: the list has to be rebuilt when the route
+    // changes. Reading the singleton without subscribing meant connecting could
+    // leave incompatible formats on screen and disconnecting left Opus/DSD
+    // missing until some other refresh happened to fire.
+    //
+    // Deliberately CarPlayRouteState and not SFBAudioEngineManager: that class
+    // also publishes `currentTime` from a 0.1s timer, so observing it rebuilt
+    // this whole list ten times a second for the duration of every
+    // Opus/Vorbis/DSD track.
+    @ObservedObject private var carPlayState = CarPlayRouteState.shared
+
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
     }
 
     private var filteredAlbumTracks: [Track] {
         // Filter out incompatible formats when connected to CarPlay
-        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
+        if carPlayState.isConnected {
             return albumTracks.filter { track in
                 let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
+                let incompatibleFormats = ["ogg", "oga", "opus", "dsf", "dff"]
                 return !incompatibleFormats.contains(ext)
             }
         } else {
@@ -295,7 +331,7 @@ struct AlbumDetailScreen: View {
                                 // Disc header (only show if multiple discs)
                                 if hasMultipleDiscs {
                                     HStack {
-                                        Text("Disc \(disc.discNumber)")
+                                        Text(Localized.discNumber(disc.discNumber))
                                             .font(.headline)
                                             .foregroundColor(.secondary)
                                         Spacer()
@@ -554,10 +590,10 @@ struct AlbumTrackRowView: View {
                 .accentColor(deleteSettings.backgroundColorChoice.color)
         }
         .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
-            Button("Delete", role: .destructive) {
+            Button(Localized.delete, role: .destructive) {
                 deleteFile()
             }
-            Button("Cancel", role: .cancel) { }
+            Button(Localized.cancel, role: .cancel) { }
         } message: {
             Text(Localized.deleteFileConfirmation(track.title))
         }
@@ -583,7 +619,7 @@ struct AlbumTrackRowView: View {
             do {
                 let settings = DeleteSettings.load()
                 if settings.deleteFromLibraryOnly {
-                    DeleteSettings.addExcludedTrack(track.stableId)
+                    DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                 } else {
                     do {
                         try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
@@ -592,7 +628,7 @@ struct AlbumTrackRowView: View {
                     }
                 }
 
-                try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
                 print("❌ Failed to delete track: \(error)")

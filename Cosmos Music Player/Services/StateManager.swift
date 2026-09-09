@@ -11,7 +11,6 @@ class StateManager: @unchecked Sendable {
     static let shared = StateManager()
     
     private var resolvedContainerURL: URL?
-    private var hasResolvedContainer = false
     private let containerLock = NSLock()
 
     private init() {
@@ -24,24 +23,50 @@ class StateManager: @unchecked Sendable {
         // point the callers that need it run off the main actor.
     }
 
-    /// The iCloud container URL, resolved once on first use.
+    /// The iCloud container URL, cached only after a successful resolution.
+    ///
+    /// A nil result is deliberately not cached. The container commonly is not
+    /// ready during the first moments of launch, and treating that transient
+    /// state as final leaves every later direct library scan local-only until
+    /// the process is restarted.
     private var iCloudContainerURL: URL? {
-        containerLock.lock()
-        defer { containerLock.unlock() }
-
-        if !hasResolvedContainer {
-            hasResolvedContainer = true
-            if FileManager.default.ubiquityIdentityToken != nil {
-                resolvedContainerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil)
-            }
+        guard FileManager.default.ubiquityIdentityToken != nil else {
+            containerLock.lock()
+            resolvedContainerURL = nil
+            containerLock.unlock()
+            return nil
         }
-        return resolvedContainerURL
+
+        containerLock.lock()
+        if let resolvedContainerURL {
+            containerLock.unlock()
+            return resolvedContainerURL
+        }
+        containerLock.unlock()
+
+        // Do not hold the lock across this potentially slow system call. Two
+        // simultaneous first callers may both resolve, but they cache the same
+        // container and neither blocks unrelated state reads behind the other.
+        guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
+            return nil
+        }
+
+        containerLock.lock()
+        resolvedContainerURL = containerURL
+        containerLock.unlock()
+        return containerURL
     }
 
     /// Resolves the container ahead of time so the first real caller doesn't
     /// pay for it. Call from a background context during launch.
     func prewarmiCloudContainer() {
         _ = iCloudContainerURL
+    }
+
+    /// Exposes the successfully cached container to the coordinator, while
+    /// retaining the retry-on-nil behavior above.
+    func resolveiCloudContainerURL() -> URL? {
+        iCloudContainerURL
     }
 
     private func getAppFolderURL() -> URL? {
@@ -417,19 +442,9 @@ class StateManager: @unchecked Sendable {
             return false
         }
         
-        // Check if we can get the container URL
-        guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
-            return false
-        }
-        
-        // Refresh the cache with what we just resolved, so a container that
-        // only became available after launch is picked up.
-        containerLock.lock()
-        hasResolvedContainer = true
-        resolvedContainerURL = containerURL
-        containerLock.unlock()
-
-        return true
+        // Use the same retrying resolver as every consumer. This both verifies
+        // availability and populates the cache a later scanner read will use.
+        return resolveiCloudContainerURL() != nil
     }
 }
 

@@ -311,11 +311,13 @@ class ExtensionDatabaseAccess {
         guard !stableIds.isEmpty else { return [] }
 
         do {
-            return try dbQueue.read { db in
+            let tracks = try dbQueue.read { db in
                 let placeholders = Array(repeating: "?", count: stableIds.count).joined(separator: ", ")
-                let sql = "SELECT stable_id, title FROM track WHERE stable_id IN (\(placeholders)) ORDER BY id DESC"
+                let sql = "SELECT stable_id, title FROM track WHERE stable_id IN (\(placeholders))"
                 return try SimpleTrack.fetchAll(db, sql: sql, arguments: StatementArguments(stableIds))
             }
+            let tracksByStableId = Dictionary(uniqueKeysWithValues: tracks.map { ($0.stableId, $0) })
+            return stableIds.compactMap { tracksByStableId[$0] }
         } catch {
             print("❌ Error getting tracks by stable IDs: \(error)")
             return []

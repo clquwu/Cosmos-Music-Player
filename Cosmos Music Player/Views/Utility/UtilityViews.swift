@@ -82,11 +82,11 @@ struct InitializationView: View {
     private var statusMessage: String {
         switch appCoordinator.iCloudStatus {
         case .available:
-            return "Setting up your iCloud music library..."
+            return Localized.settingUpICloudLibrary
         case .offline:
-            return "Setting up your offline music library..."
+            return Localized.settingUpOfflineLibrary
         default:
-            return "Setting up your local music library..."
+            return Localized.settingUpLocalLibrary
         }
     }
 }

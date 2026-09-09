@@ -11,6 +11,15 @@ import UniformTypeIdentifiers
 
 class ShareViewController: SLComposeServiceViewController {
 
+    /// How many files actually reached the shared container. The extension
+    /// used to open the main app and report success unconditionally, so a
+    /// share that matched nothing looked identical to one that worked.
+    private var importedFileCount = 0
+    private let sharedFilesLock = NSLock()
+    private var isProcessingAttachments = false
+    private var hasCompletedRequest = false
+    private var isPresentingNothingImportedAlert = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         processAudioFiles()
@@ -21,13 +30,18 @@ class ShareViewController: SLComposeServiceViewController {
     }
 
     override func didSelectPost() {
+        // The attachment providers may still be copying asynchronously. The
+        // group completion below owns completion once processing has begun.
+        guard !isProcessingAttachments else { return }
         completeRequest()
     }
     
     private func processAudioFiles() {
+        isProcessingAttachments = true
         guard let extensionContext = extensionContext,
               let inputItems = extensionContext.inputItems as? [NSExtensionItem] else {
             print("❌ No extension context or input items")
+            isProcessingAttachments = false
             completeRequest()
             return
         }
@@ -71,15 +85,76 @@ class ShareViewController: SLComposeServiceViewController {
 
         group.notify(queue: .main) { [weak self] in
             print("✅ All attachments processed, completing request")
+            self?.isProcessingAttachments = false
             self?.completeRequest()
         }
     }
     
+    /// Everything the main app can index. The share extension used to accept
+    /// only mp3/flac/wav while its activation rule matched any file, so
+    /// sharing an m4a, aac, opus, ogg, dsf or dff ran the whole flow and
+    /// silently imported nothing.
+    static let supportedAudioExtensions: Set<String> = [
+        "mp3", "flac", "wav", "m4a", "aac", "opus", "ogg", "oga", "dsf", "dff"
+    ]
+
+    /// Concrete identifiers worth asking `loadItem` for, most specific first.
+    /// iOS declares no UTI at all for Opus, OGG or DSD, which is exactly why
+    /// the extension-name fallback below has to exist.
+    private static let knownAudioTypeIdentifiers: [String] = [
+        UTType.mp3.identifier,
+        "org.xiph.flac",
+        "com.microsoft.waveform-audio",
+        UTType.wav.identifier,
+        UTType.mpeg4Audio.identifier,
+        "public.aac-audio",
+        UTType.aiff.identifier,
+        "org.xiph.ogg",
+        "org.xiph.opus",
+        "com.sony.dsf",
+        "com.sony.dsdiff"
+    ]
+
+    static func isSupportedAudioFileName(_ name: String) -> Bool {
+        supportedAudioExtensions.contains(
+            (name as NSString).pathExtension.lowercased()
+        )
+    }
+
     private func isAudioFile(_ attachment: NSItemProvider) -> Bool {
-        return attachment.hasItemConformingToTypeIdentifier(UTType.mp3.identifier) ||
-               attachment.hasItemConformingToTypeIdentifier("org.xiph.flac") ||
-               attachment.hasItemConformingToTypeIdentifier("com.microsoft.waveform-audio") ||
-               attachment.hasItemConformingToTypeIdentifier(UTType.wav.identifier)
+        if attachment.hasItemConformingToTypeIdentifier(UTType.audio.identifier) {
+            return true
+        }
+
+        for identifier in Self.knownAudioTypeIdentifiers
+        where attachment.hasItemConformingToTypeIdentifier(identifier) {
+            return true
+        }
+
+        // Opus/OGG/DSD arrive as a dynamic type conforming only to
+        // public.data, so the name is the only thing left to go on.
+        if let name = attachment.suggestedName, Self.isSupportedAudioFileName(name) {
+            return true
+        }
+
+        return false
+    }
+
+    /// The identifier to hand `loadItem`. Prefer one the provider actually
+    /// registered so it is never asked to vend a supertype it does not have.
+    private func audioTypeIdentifier(for attachment: NSItemProvider) -> String? {
+        let registered = attachment.registeredTypeIdentifiers
+
+        if let exact = registered.first(where: { Self.knownAudioTypeIdentifiers.contains($0) }) {
+            return exact
+        }
+        if let conforming = registered.first(where: { UTType($0)?.conforms(to: .audio) == true }) {
+            return conforming
+        }
+        if registered.contains(UTType.fileURL.identifier) {
+            return UTType.fileURL.identifier
+        }
+        return registered.first
     }
 
     private func isFolder(_ attachment: NSItemProvider) -> Bool {
@@ -101,29 +176,20 @@ class ShareViewController: SLComposeServiceViewController {
     }
     
     private func copyAudioFile(_ attachment: NSItemProvider, completion: @escaping () -> Void) {
-        let typeIdentifier: String
-
-        if attachment.hasItemConformingToTypeIdentifier(UTType.mp3.identifier) {
-            typeIdentifier = UTType.mp3.identifier
-        } else if attachment.hasItemConformingToTypeIdentifier("org.xiph.flac") {
-            typeIdentifier = "org.xiph.flac"
-        } else if attachment.hasItemConformingToTypeIdentifier("com.microsoft.waveform-audio") {
-            typeIdentifier = "com.microsoft.waveform-audio"
-        } else if attachment.hasItemConformingToTypeIdentifier(UTType.wav.identifier) {
-            typeIdentifier = UTType.wav.identifier
-        } else {
-            // Fallback - shouldn't happen with our filtering
-            typeIdentifier = UTType.mp3.identifier
+        guard let typeIdentifier = audioTypeIdentifier(for: attachment) else {
+            print("❌ Attachment registered no usable type identifier")
+            completion()
+            return
         }
-        
+
         attachment.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { [weak self] (item, error) in
             defer { completion() }
-            
+
             guard error == nil, let url = item as? URL else {
                 print("Error loading audio file: \(error?.localizedDescription ?? "Unknown error")")
                 return
             }
-            
+
             self?.copyFileToSharedContainer(from: url)
         }
     }
@@ -182,9 +248,7 @@ class ShareViewController: SLComposeServiceViewController {
             if !isDirectory.boolValue {
                 print("❌ Path is not a directory: \(folderURL.path)")
                 // Maybe it's a single file, let's try to process it as such
-                let fileExtension = folderURL.pathExtension.lowercased()
-                let supportedExtensions = ["mp3", "flac", "wav"]
-                if supportedExtensions.contains(fileExtension) {
+                if Self.isSupportedAudioFileName(folderURL.lastPathComponent) {
                     print("🎵 Treating as single audio file: \(folderURL.lastPathComponent)")
                     self?.storeSharedURL(folderURL)
                 }
@@ -204,7 +268,6 @@ class ShareViewController: SLComposeServiceViewController {
     }
 
     private func processFolder(at folderURL: URL) {
-        let supportedExtensions = ["mp3", "flac", "wav"]
         var audioFilesFound = 0
 
         do {
@@ -222,8 +285,7 @@ class ShareViewController: SLComposeServiceViewController {
                     processFolder(at: itemURL)
                 } else {
                     // Check if it's a supported audio file
-                    let fileExtension = itemURL.pathExtension.lowercased()
-                    if supportedExtensions.contains(fileExtension) {
+                    if Self.isSupportedAudioFileName(itemURL.lastPathComponent) {
                         print("🎵 Found audio file: \(itemURL.lastPathComponent)")
 
                         // Start accessing security-scoped resource for the individual file
@@ -262,6 +324,11 @@ class ShareViewController: SLComposeServiceViewController {
             return
         }
 
+        guard Self.isSupportedAudioFileName(url.lastPathComponent) else {
+            print("❌ Not a format Cosmos can index: \(url.lastPathComponent)")
+            return
+        }
+
         guard let sharedContainer = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
             print("❌ Failed to get shared container URL")
             return
@@ -275,6 +342,13 @@ class ShareViewController: SLComposeServiceViewController {
         do {
             // Create bookmark data for security-scoped access
             let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+
+            // NSItemProvider completion handlers may arrive concurrently. Keep
+            // the plist read/append/write and the success counter in one
+            // critical section so sibling attachments cannot overwrite one
+            // another (or race a folder attachment's serial enumeration).
+            sharedFilesLock.lock()
+            defer { sharedFilesLock.unlock() }
 
             // Load existing shared files or create new array
             var sharedFiles: [[String: Data]] = []
@@ -303,19 +377,73 @@ class ShareViewController: SLComposeServiceViewController {
 
             // Save updated list
             let plistData = try PropertyListSerialization.data(fromPropertyList: sharedFiles, format: .xml, options: 0)
-            try plistData.write(to: sharedDataURL)
+            try plistData.write(to: sharedDataURL, options: .atomic)
 
             print("✅ Successfully stored shared audio file reference: \(url.lastPathComponent)")
+            importedFileCount += 1
         } catch {
             print("❌ Failed to store shared audio file reference: \(error)")
         }
     }
+
+    private var storedImportCount: Int {
+        sharedFilesLock.lock()
+        defer { sharedFilesLock.unlock() }
+        return importedFileCount
+    }
     
     private func completeRequest() {
+        guard !hasCompletedRequest else { return }
+
+        guard storedImportCount > 0 else {
+            // Nothing matched. Say so rather than opening the app and letting
+            // the user hunt for a track that was never imported.
+            guard !isPresentingNothingImportedAlert else { return }
+            isPresentingNothingImportedAlert = true
+            presentNothingImportedAlert()
+            return
+        }
+
+        hasCompletedRequest = true
+
         // Open main app to trigger library refresh
         openMainApp()
-        
+
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+    }
+
+    private func presentNothingImportedAlert() {
+        let formats = ShareViewController.supportedAudioExtensions
+            .sorted()
+            .map { $0.uppercased() }
+            .joined(separator: ", ")
+
+        // `value:` carries the English text inline: the Share target has no
+        // Localizable.strings of its own, and an extension resolves keys
+        // against its own bundle, not the app's.
+        let alert = UIAlertController(
+            title: NSLocalizedString(
+                "share_nothing_imported_title",
+                value: "Nothing Imported",
+                comment: "Shown when a share matched no supported audio file"
+            ),
+            message: String(
+                format: NSLocalizedString(
+                    "share_nothing_imported_message",
+                    value: "Cosmos did not find a supported audio file to import. Supported formats: %@.",
+                    comment: "Body of the nothing-imported share alert"
+                ),
+                formats
+            ),
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: NSLocalizedString("ok", value: "OK", comment: ""), style: .default) { [weak self] _ in
+            guard let self, !self.hasCompletedRequest else { return }
+            self.isPresentingNothingImportedAlert = false
+            self.hasCompletedRequest = true
+            self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        })
+        present(alert, animated: true)
     }
     
     private func openMainApp() {

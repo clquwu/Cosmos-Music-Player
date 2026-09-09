@@ -34,35 +34,88 @@ final class WidgetDataManager: @unchecked Sendable {
     private let userDefaults: UserDefaults?
     private let currentTrackKey = "widget.currentTrack"
     private let artworkFileName = "widget_artwork.jpg"
-    
+
+    /// Every write to the App Group container runs here, one at a time.
+    ///
+    /// Saves and clears are dispatched from independent detached tasks, so
+    /// without this they could interleave inside `saveArtwork`/`clearArtwork`
+    /// and leave the defaults describing one track while the shared image file
+    /// held another's.
+    private let writeQueue = DispatchQueue(label: "dev.clq.cosmos.widget-write")
+    /// The newest write that has been applied. Serialising alone is not enough:
+    /// the two detached tasks can reach the queue in either order, so a stale
+    /// save could still land after the clear that was meant to supersede it.
+    /// Callers stamp their intent on the main actor, where the ordering is real.
+    private var lastAppliedSequence: UInt64 = 0
+
     private init() {
         // Use App Group to share data between app and widget
         userDefaults = UserDefaults(suiteName: "group.dev.clq.Cosmos-Music-Player")
     }
-    
+
+    /// Discards a write that a newer one has already superseded.
+    /// `sequence == 0` means "unsequenced" and always applies - the widget
+    /// extension and other one-off callers do not order their writes.
+    private func shouldApply(_ sequence: UInt64) -> Bool {
+        guard sequence != 0 else { return true }
+        guard sequence > lastAppliedSequence else { return false }
+        lastAppliedSequence = sequence
+        return true
+    }
+
     // MARK: - Track Data (without artwork to avoid 4MB limit)
-    
-    func saveCurrentTrack(_ data: WidgetTrackData, artworkData: Data? = nil) {
-        guard let userDefaults = userDefaults else {
-            print("⚠️ Widget: Failed to access shared UserDefaults")
-            return
-        }
-        
-        do {
-            // Save track data to UserDefaults (small, < 1KB)
-            let encoded = try JSONEncoder().encode(data)
-            userDefaults.set(encoded, forKey: currentTrackKey)
-            userDefaults.synchronize()
-            print("✅ Widget: Saved track data - \(data.title) (\(encoded.count) bytes)")
-            
-            // Save artwork to shared file (can be > 4MB)
-            if let artworkData = artworkData {
-                saveArtwork(artworkData)
-            } else {
-                clearArtwork()
+
+    /// What to do with the shared artwork file on this save.
+    ///
+    /// `unchanged` exists because the overwhelmingly common widget update is a
+    /// play/pause of the track that is already showing. Re-encoding and
+    /// rewriting a multi-megabyte cover for those was pure cost - the image on
+    /// disk is already the right one.
+    enum ArtworkUpdate {
+        case replace(Data)
+        case clear
+        case unchanged
+    }
+
+    /// - Parameter sequence: the caller's ordering stamp. Pass a value that
+    ///   increases with the order the updates were *decided* in; a write older
+    ///   than one already applied is dropped. Omit it when the write is not
+    ///   racing anything.
+    func saveCurrentTrack(
+        _ data: WidgetTrackData,
+        artwork: ArtworkUpdate = .clear,
+        sequence: UInt64 = 0
+    ) {
+        writeQueue.sync {
+            guard shouldApply(sequence) else {
+                print("⏭️ Widget: Dropped a superseded track update - \(data.title)")
+                return
             }
-        } catch {
-            print("❌ Widget: Failed to encode track data - \(error)")
+
+            guard let userDefaults = userDefaults else {
+                print("⚠️ Widget: Failed to access shared UserDefaults")
+                return
+            }
+
+            do {
+                // Save track data to UserDefaults (small, < 1KB)
+                let encoded = try JSONEncoder().encode(data)
+                userDefaults.set(encoded, forKey: currentTrackKey)
+                userDefaults.synchronize()
+                print("✅ Widget: Saved track data - \(data.title) (\(encoded.count) bytes)")
+
+                // Save artwork to shared file (can be > 4MB)
+                switch artwork {
+                case .replace(let artworkData):
+                    saveArtwork(artworkData)
+                case .clear:
+                    clearArtwork()
+                case .unchanged:
+                    break
+                }
+            } catch {
+                print("❌ Widget: Failed to encode track data - \(error)")
+            }
         }
     }
     
@@ -95,11 +148,20 @@ final class WidgetDataManager: @unchecked Sendable {
         }
     }
     
-    func clearCurrentTrack() {
-        userDefaults?.removeObject(forKey: currentTrackKey)
-        userDefaults?.synchronize()
-        clearArtwork()
-        print("🗑️ Widget: Cleared track data")
+    /// - Parameter sequence: see `saveCurrentTrack(_:artwork:sequence:)`. A
+    ///   clear that an in-flight save would otherwise overwrite is exactly what
+    ///   this ordering exists for.
+    func clearCurrentTrack(sequence: UInt64 = 0) {
+        writeQueue.sync {
+            guard shouldApply(sequence) else {
+                print("⏭️ Widget: Dropped a superseded clear")
+                return
+            }
+            userDefaults?.removeObject(forKey: currentTrackKey)
+            userDefaults?.synchronize()
+            clearArtwork()
+            print("🗑️ Widget: Cleared track data")
+        }
     }
     
     // MARK: - Artwork File Storage (avoids 4MB UserDefaults limit)

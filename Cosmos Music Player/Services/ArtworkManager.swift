@@ -7,6 +7,7 @@
 
 import Foundation
 import UIKit
+import SwiftUI
 import AVFoundation
 import CryptoKit
 import ImageIO
@@ -34,6 +35,25 @@ class ArtworkManager: ObservableObject {
 
     private let maxMemoryCacheItems = 250
     private let maxMemoryCacheCost = 40 * 1024 * 1024
+
+    /// Tracks whose cover is waiting on an iCloud download to finish.
+    private var pendingCloudArtworkIds: Set<String> = []
+    /// Tracks whose file has been read and genuinely has no cover.
+    ///
+    /// Nothing was remembering this, so a track without artwork was re-parsed
+    /// for every request in a session - the row, the player, the widget, each
+    /// re-entry - and each attempt is now two full tag reads, the format
+    /// parser plus the TagLib fallback. In memory only, and deliberately not
+    /// cleared alongside the image caches: those are dropped on backgrounding
+    /// and memory warnings, which would bring the churn straight back. A file
+    /// that later gains a cover is picked up by `forceRefreshArtwork`, which
+    /// the scanner calls when a file's fingerprint changes.
+    private var knownArtworkless: Set<String> = []
+    /// Scrolling a large un-downloaded library must not spawn one waiting task
+    /// per row. Rows that miss a slot are retried by their next `.onAppear` or
+    /// by the end-of-scan refresh, so nothing is lost by capping this.
+    private static let maxPendingCloudArtworkRetries = 8
+    private static let cloudArtworkStallTimeout: TimeInterval = 45
 
     private init() {
         // Create artwork cache directory
@@ -120,6 +140,7 @@ class ArtworkManager: ObservableObject {
             memoryCache.removeAllObjects()
             thumbnailCache.removeAllObjects()
             cachedTrackIds.removeAll()
+            knownArtworkless.removeAll()
             artworkMapping.removeAll()
             saveMapping()
             print("🗑️ Cleared \(files.count) artwork files from disk cache")
@@ -138,10 +159,13 @@ class ArtworkManager: ObservableObject {
         // Note: We don't delete the actual artwork file as other tracks might use it
         // Just remove the mapping for this track
         artworkMapping.removeValue(forKey: track.stableId)
+        knownArtworkless.remove(track.stableId)
         saveMapping()
 
         print("🔄 Force refreshing artwork for: \(track.title)")
-        return await getArtwork(for: track)
+        let refreshed = await getArtwork(for: track)
+        notifyArtworkChanged(for: track.stableId)
+        return refreshed
     }
 
     /// Pre-process and cache artwork during library indexing (background operation)
@@ -153,11 +177,32 @@ class ArtworkManager: ObservableObject {
 
         print("💾 Pre-caching artwork for: \(track.title)")
 
-        // Extract artwork from audio file
-        if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
-            // Save to disk cache (will deduplicate automatically)
-            await saveToDiskCache(image: image, stableId: track.stableId)
-        }
+        // Through the bookmark, like every other read: an external file is not
+        // openable by path alone. See beginReadAccess.
+        let access = await beginReadAccess(for: track)
+        defer { access.relinquish() }
+
+        await extractAndStoreArtwork(for: track.stableId, at: access.url)
+    }
+
+    /// Posted when a track's cover has been extracted for the first time or
+    /// replaced. `userInfo["trackStableId"]` carries the track's stable ID.
+    ///
+    /// Anything holding a rendered copy of the cover has to be told, because
+    /// nothing about the track itself changes when this happens. The widget in
+    /// particular writes the cover into the App Group container and then skips
+    /// that write for as long as the same track is showing; without this it
+    /// would keep displaying whatever it wrote at the moment the track
+    /// started - most visibly nothing at all, for a track first played before
+    /// the scan had got round to extracting its artwork.
+    static let artworkChangedNotification = Notification.Name("TrackArtworkChanged")
+
+    private func notifyArtworkChanged(for stableId: String) {
+        NotificationCenter.default.post(
+            name: Self.artworkChangedNotification,
+            object: nil,
+            userInfo: ["trackStableId": stableId]
+        )
     }
 
     func getArtwork(for track: Track) async -> UIImage? {
@@ -173,16 +218,185 @@ class ArtworkManager: ObservableObject {
             return diskImage
         }
 
-        // 3. Extract from audio file and cache (slow - should be rare after indexing)
-        if let extracted = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
-            let image = await Self.downsampledOffMain(extracted, maxPixelSize: Self.maxFullArtworkPixelSize)
-            // Store in both caches
-            cacheImage(image, for: track.stableId)
-            await saveToDiskCache(image: image, stableId: track.stableId)
+        if knownArtworkless.contains(track.stableId) {
+            return nil
+        }
+
+        // 3. Read the file itself. This is the only step that can fill the two
+        // caches above, so everything it needs must be in place here or the
+        // track has no cover for the rest of the app's life: the scan
+        // deliberately does not pre-extract (see LibraryIndexer.saveParsedFile),
+        // and nothing else writes ArtworkCache.
+        //
+        // Two things can stand between us and the bytes, and they need opposite
+        // answers. Permission is taken first, because an external file cannot
+        // be opened by path at all. Residency is only requested - `downloadTimeout: 0`
+        // asks iCloud to start fetching and returns immediately, since a cover
+        // must never block a row from drawing - and if the bytes are genuinely
+        // still in flight the wait is handed to the retry below.
+        let access = await beginReadAccess(for: track)
+        defer { access.relinquish() }
+        let url = access.url
+
+        try? await CloudDownloadManager.shared.ensureLocal(url, downloadTimeout: 0)
+
+        if let image = await extractAndStoreArtwork(for: track.stableId, at: url) {
             return image
         }
 
+        // Nothing was read. If that is only because the bytes have not landed
+        // yet, keep waiting off to one side instead of answering "no cover" for
+        // the rest of the session.
+        if isAwaitingCloudDownload(url) {
+            scheduleCloudArtworkRetryIfNeeded(for: track, at: url)
+        } else {
+            // The file was readable and has no cover. Do not ask it again.
+            knownArtworkless.insert(track.stableId)
+        }
         return nil
+    }
+
+    /// A file open for reading, plus whatever has to be handed back afterwards.
+    private struct ScopedFile {
+        let url: URL
+        private let stopAccessing: Bool
+
+        init(url: URL, stopAccessing: Bool = false) {
+            self.url = url
+            self.stopAccessing = stopAccessing
+        }
+
+        func relinquish() {
+            guard stopAccessing else { return }
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    /// Opens a track's file for reading, through its security-scoped bookmark
+    /// when the file lives outside the app's own container.
+    ///
+    /// A song added from Files - anywhere in iCloud Drive, or another provider -
+    /// is never copied in; the app stores a bookmark and nothing else. Reading
+    /// `track.path` directly is then denied by the sandbox, and confusingly so:
+    /// `fileExists` answers false (it cannot even stat the path) and AVAsset
+    /// reports NSCocoaErrorDomain 257 "you do not have permission". Both look
+    /// like a missing or corrupt file rather than a missing entitlement.
+    ///
+    /// `PlayerEngine.performLoadTrack` has always resolved the bookmark before
+    /// opening a track, which is why playing a song showed its cover while the
+    /// list next to it could not - the list's reader was the only one going in
+    /// without permission.
+    ///
+    /// Deliberately read-only: unlike `LibraryIndexer.resolveBookmarkForTrack`
+    /// this never migrates identity or writes to the database. Drawing a cover
+    /// must not rewrite the library, and a stale bookmark is simply declined -
+    /// the playback path owns repairing that.
+    private func beginReadAccess(for track: Track) async -> ScopedFile {
+        let databaseURL = URL(fileURLWithPath: track.path)
+
+        guard let bookmarkData = try? await ExternalBookmarkStore.shared.bookmarkData(for: track.stableId) else {
+            return ScopedFile(url: databaseURL)
+        }
+
+        var isStale = false
+        guard let resolved = try? URL(
+            resolvingBookmarkData: bookmarkData,
+            options: .withoutUI,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ), !isStale else {
+            return ScopedFile(url: databaseURL)
+        }
+
+        guard resolved.startAccessingSecurityScopedResource() else {
+            print("⚠️ Could not take security-scoped access for cover: \(resolved.lastPathComponent)")
+            return ScopedFile(url: resolved)
+        }
+
+        return ScopedFile(url: resolved, stopAccessing: true)
+    }
+
+    /// Extracts, downsamples and stores a cover, then tells every view drawing
+    /// this track to redraw.
+    ///
+    /// The notification is the point: rows and cover cards load their artwork
+    /// once, from `.onAppear`. Without it the only view that ever sees a
+    /// freshly extracted cover is the one whose own call produced it, and every
+    /// other row showing the same track keeps its placeholder until something
+    /// rebuilds it.
+    @discardableResult
+    private func extractAndStoreArtwork(for stableId: String, at url: URL) async -> UIImage? {
+        guard let extracted = await extractArtwork(from: url) else { return nil }
+
+        let image = await Self.downsampledOffMain(extracted, maxPixelSize: Self.maxFullArtworkPixelSize)
+        // Store in both caches
+        cacheImage(image, for: stableId)
+        await saveToDiskCache(image: image, stableId: stableId)
+        notifyArtworkChanged(for: stableId)
+        return image
+    }
+
+    /// A cover that could not be read because its file is still an iCloud
+    /// placeholder is not "no cover" - it is "not yet".
+    ///
+    /// `getArtwork` only ever *requests* the download and returns, because a
+    /// cover must never block a row from drawing. So the first attempt on a
+    /// freshly added track reliably lands on zero bytes - and nothing re-asked
+    /// afterwards: the row had already been handed nil, `.onAppear` does not
+    /// fire again while it stays on screen, and the next launch simply repeated
+    /// the same too-early attempt. The one path that did produce a cover was
+    /// playing the song, because `loadTrack` waits for the download for real
+    /// before the player asks for artwork - which is exactly why the cover
+    /// appeared the moment the track was tapped, and only then.
+    private func scheduleCloudArtworkRetryIfNeeded(for track: Track, at url: URL) {
+        let stableId = track.stableId
+
+        guard !pendingCloudArtworkIds.contains(stableId),
+              pendingCloudArtworkIds.count < Self.maxPendingCloudArtworkRetries else {
+            return
+        }
+
+        pendingCloudArtworkIds.insert(stableId)
+        print("⏳ Cover is waiting on an iCloud download: \(url.lastPathComponent)")
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.pendingCloudArtworkIds.remove(stableId) }
+
+            do {
+                try await CloudDownloadManager.shared.waitUntilLocal(
+                    url,
+                    stallTimeout: Self.cloudArtworkStallTimeout
+                )
+            } catch {
+                print("⚠️ Gave up waiting for cover bytes: \(url.lastPathComponent) (\(error))")
+                return
+            }
+
+            // Playback, a rescan or another row may have cached it meanwhile.
+            guard self.artworkMapping[stableId] == nil else { return }
+
+            // Access was relinquished when the original read returned, so an
+            // external file has to be opened again for this second attempt.
+            let access = await self.beginReadAccess(for: track)
+            defer { access.relinquish() }
+            await self.extractAndStoreArtwork(for: stableId, at: access.url)
+        }
+    }
+
+    /// True only for a cloud file whose bytes have genuinely not arrived yet.
+    private func isAwaitingCloudDownload(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey
+        ]) else {
+            // Unreadable even for a metadata query: not a download problem.
+            return false
+        }
+
+        guard values.isUbiquitousItem == true else { return false }
+        return values.ubiquitousItemDownloadingStatus != .current
+            && !CloudDownloadManager.isLocallyResident(url)
     }
 
     /// Small artwork for list rows and grid cells. Decoding and holding these
@@ -331,6 +545,43 @@ class ArtworkManager: ObservableObject {
         saveMapping()
     }
 
+    /// Moves cached covers onto new stable IDs after the library re-keys tracks.
+    ///
+    /// `ArtworkMapping.plist` is keyed by stable ID and lives outside the
+    /// database, so `mergeTrackReferences` - which carries favourites, playlist
+    /// entries and artist links across a re-key - never touched it. A re-keyed
+    /// track therefore lost its cover twice over: the mapping entry no longer
+    /// matched any row, and `cleanupOrphanedArtwork` then deleted both that
+    /// entry and the JPEG it was the last reference to.
+    func migrateStableIds(_ remapping: [String: String]) {
+        var movedCount = 0
+
+        for (oldStableId, newStableId) in remapping where oldStableId != newStableId {
+            guard let artworkHash = artworkMapping.removeValue(forKey: oldStableId) else { continue }
+
+            // Never overwrite a cover the new ID already has: that one was
+            // extracted for the row that survives.
+            if artworkMapping[newStableId] == nil {
+                artworkMapping[newStableId] = artworkHash
+            }
+
+            memoryCache.removeObject(forKey: oldStableId as NSString)
+            cachedTrackIds.remove(oldStableId)
+            if knownArtworkless.remove(oldStableId) != nil {
+                knownArtworkless.insert(newStableId)
+            }
+            movedCount += 1
+        }
+
+        guard movedCount > 0 else { return }
+
+        // Thumbnail keys carry a size suffix and NSCache cannot be enumerated,
+        // so the only way to drop the stale ones is to drop them all.
+        thumbnailCache.removeAllObjects()
+        saveMapping()
+        print("🔁 Artwork cache: re-keyed \(movedCount) cover(s)")
+    }
+
     /// Clean up artwork files for tracks that no longer exist
     func cleanupOrphanedArtwork(validStableIds: Set<String>) async {
         // First, clean up mapping entries for deleted tracks
@@ -374,19 +625,70 @@ class ArtworkManager: ObservableObject {
     private nonisolated func extractArtwork(from url: URL) async -> UIImage? {
         let ext = url.pathExtension.lowercased()
 
-        if ext == "flac" {
-            return await extractFlacArtwork(from: url)
-        } else if ext == "mp3" {
-            return await extractMp3Artwork(from: url)
-        } else if ext == "m4a" || ext == "mp4" || ext == "aac" {
-            return await extractM4AArtwork(from: url)
-        } else if ext == "dsf" || ext == "dff" {
-            return await extractDSDArtwork(from: url)
-        } else if ext == "opus" || ext == "ogg" {
+        // Ogg containers are deliberately handled whole by extractGenericArtwork:
+        // it reads TagLib FIRST and only then falls back to the byte scan, because
+        // that scan corrupts any picture spanning more than one Ogg page (#75).
+        // Reversing that order here would hand the broken reader the first word
+        // again, so this branch returns directly and never reaches the fallback
+        // below - which would be a second, pointless TagLib read anyway.
+        if ext == "opus" || ext == "ogg" || ext == "oga" {
             return await extractGenericArtwork(from: url)
         }
 
+        let formatSpecific: UIImage?
+        switch ext {
+        case "flac":
+            formatSpecific = await extractFlacArtwork(from: url)
+        case "mp3":
+            formatSpecific = await extractMp3Artwork(from: url)
+        // WAV carries its cover in a RIFF `id3 ` chunk, which AVAsset surfaces
+        // as commonKeyArtwork exactly like it does for MP4. It had no branch at
+        // all here, so every WAV fell straight through to `return nil` - on
+        // every launch, for ever, because nothing about the file was going to
+        // change. The library scanner does read it (parseWavMetadataSync sets
+        // hasEmbeddedArt from the same key) and so does the player, which is why
+        // the cover appeared on the Now Playing screen but never in a list.
+        case "m4a", "mp4", "aac", "wav", "aiff", "aif":
+            formatSpecific = await extractAVAssetArtwork(from: url)
+        case "dsf", "dff":
+            formatSpecific = await extractDSDArtwork(from: url)
+        default:
+            formatSpecific = nil
+        }
+
+        if let formatSpecific {
+            return formatSpecific
+        }
+
+        // Universal last resort, so a format can never again be indexable but
+        // silently unreadable here: LibraryIndexer decides what enters the
+        // library, this method decided what could show a cover, and the two
+        // lists were free to drift apart. TagLib reads every container the app
+        // indexes, so it also rescues a file whose bespoke parser above simply
+        // could not find a picture the tag really does contain.
+        if let tagged = Self.extractArtworkWithTagLib(from: url) {
+            print("🎨 Extracted artwork via TagLib fallback: \(url.lastPathComponent)")
+            return tagged
+        }
+
         return nil
+    }
+
+    /// Reads the cover through SFBAudioEngine's TagLib-backed metadata reader.
+    /// Format-agnostic: whatever the app can index, this can read.
+    private nonisolated static func extractArtworkWithTagLib(from url: URL) -> UIImage? {
+        do {
+            let audioFile = try AudioFile(readingPropertiesAndMetadataFrom: url)
+            let pictures = audioFile.metadata.attachedPictures
+            let preferred = pictures.first(where: { $0.type == .frontCover }) ?? pictures.first
+            guard let preferred, let image = UIImage(data: preferred.imageData) else {
+                return nil
+            }
+            return image
+        } catch {
+            print("⚠️ TagLib artwork read failed for \(url.lastPathComponent): \(error)")
+            return nil
+        }
     }
 
     private nonisolated func extractMp3Artwork(from url: URL) async -> UIImage? {
@@ -503,27 +805,34 @@ class ArtworkManager: ObservableObject {
 
     // MARK: - M4A/AAC Artwork Extraction
 
-    private nonisolated func extractM4AArtwork(from url: URL) async -> UIImage? {
-        return await withCheckedContinuation { continuation in
-            Task {
-                do {
-                    let asset = AVAsset(url: url)
-                    let commonMetadata = asset.commonMetadata
+    /// Common-metadata artwork, for every container AVFoundation reads natively
+    /// - MP4/M4A/AAC and RIFF WAV/AIFF alike.
+    ///
+    /// Deliberately the same reader the scanner uses to decide `hasEmbeddedArt`
+    /// (`parseWavMetadataSync`): the async `load(.commonMetadata)`, matched on
+    /// `commonKey`. The synchronous `asset.commonMetadata` this replaced is not
+    /// merely deprecated - it answers with whatever happens to be loaded, so it
+    /// can report no artwork on a file the scanner has already flagged as
+    /// having some. Detection and extraction now agree by construction.
+    private nonisolated func extractAVAssetArtwork(from url: URL) async -> UIImage? {
+        let asset = AVURLAsset(url: url)
 
-                    for item in commonMetadata {
-                        if item.commonKey == .commonKeyArtwork,
-                           let data = item.dataValue,
-                           let image = UIImage(data: data) {
-                            print("🎨 Extracted M4A artwork: \(url.lastPathComponent)")
-                            continuation.resume(returning: image)
-                            return
-                        }
-                    }
+        do {
+            let commonMetadata = try await asset.load(.commonMetadata)
 
-                    print("⚠️ No artwork found in M4A file: \(url.lastPathComponent)")
-                    continuation.resume(returning: nil)
+            for item in commonMetadata where item.commonKey == .commonKeyArtwork {
+                if let data = try await item.load(.dataValue),
+                   let image = UIImage(data: data) {
+                    print("🎨 Extracted artwork via AVAsset: \(url.lastPathComponent)")
+                    return image
                 }
             }
+
+            print("⚠️ No AVAsset artwork found in: \(url.lastPathComponent)")
+            return nil
+        } catch {
+            print("⚠️ AVAsset artwork read failed for \(url.lastPathComponent): \(error)")
+            return nil
         }
     }
 
@@ -983,5 +1292,44 @@ class ArtworkManager: ObservableObject {
         let byte3 = UInt32(data[offset + 3]) << 24
 
         return byte0 | byte1 | byte2 | byte3
+    }
+}
+
+extension View {
+    /// Reloads a view's cover when the library extracts or replaces it.
+    ///
+    /// Rows and cover cards load their artwork exactly once, from `.onAppear`,
+    /// and only when they are still showing nothing. A track indexed moments
+    /// before its row appeared has no cover yet, so `getThumbnail` answers nil,
+    /// the placeholder is drawn - and nothing ever asks again. `.onAppear` does
+    /// not fire a second time while the row stays on screen, so newly added
+    /// songs kept their placeholder for as long as the list was open, while the
+    /// player and the lock screen (which already observe this notification)
+    /// showed the cover correctly.
+    ///
+    /// - Parameter stableId: the track whose cover this view draws. For an
+    ///   album, playlist or artist card that is the track its cover is taken
+    ///   from. `nil` never matches, so a view with nothing to draw stays quiet.
+    func reloadsArtwork(for stableId: String?, perform reload: @escaping () -> Void) -> some View {
+        onReceive(
+            NotificationCenter.default.publisher(for: ArtworkManager.artworkChangedNotification)
+        ) { notification in
+            guard let stableId,
+                  notification.userInfo?["trackStableId"] as? String == stableId else { return }
+            reload()
+        }
+        // Also retry at the end of a scan. The notification above only fires
+        // when a cover is actually extracted or replaced, so it cannot rescue
+        // the case that matters most: a row whose first extraction attempt
+        // found an iCloud placeholder and answered nil. By the time the scan
+        // reports in, the bytes have usually landed. `loadArtwork` is a cache
+        // hit whenever the cover is already known, so the retry is cheap.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSNotification.Name("LibraryNeedsRefresh")
+            )
+        ) { _ in
+            reload()
+        }
     }
 }

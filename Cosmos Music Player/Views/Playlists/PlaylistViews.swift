@@ -42,26 +42,45 @@ struct PlaylistsScreen: View {
     @State private var showAIPlaylistSheet = false
     @State private var showCreatePlaylist = false
     @State private var newPlaylistName = ""
+    @StateObject private var search = LibrarySearchState()
+
+    private var visiblePlaylists: [Playlist] {
+        let terms = LibrarySearch.terms(in: search.text)
+        guard !terms.isEmpty else { return playlists }
+        return playlists.filter { LibrarySearch.matches(terms: terms, in: $0.title) }
+    }
 
     var body: some View {
         ZStack {
             ScreenSpecificBackgroundView(screen: .playlists)
 
             VStack {
-                if playlists.isEmpty {
+                if visiblePlaylists.isEmpty {
                     VStack(spacing: 16) {
-                        Image(systemName: "music.note.list")
+                        Image(systemName: playlists.isEmpty ? "music.note.list" : "magnifyingglass")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
 
-                        Text(Localized.noPlaylistsYet)
+                        Text(playlists.isEmpty ? Localized.noPlaylistsYet : Localized.noResultsFound)
                             .font(.headline)
 
-                        Text(Localized.createPlaylistsInstruction)
+                        Text(playlists.isEmpty ? Localized.createPlaylistsInstruction : Localized.tryDifferentKeywords)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
+
+                        if playlists.isEmpty {
+                            Button {
+                                newPlaylistName = ""
+                                showCreatePlaylist = true
+                            } label: {
+                                Label(Localized.createPlaylist, systemImage: "plus")
+                                    .fontWeight(.semibold)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .padding(.top, 4)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -70,7 +89,7 @@ struct PlaylistsScreen: View {
                             GridItem(.flexible(), spacing: 8),
                             GridItem(.flexible(), spacing: 8)
                         ], spacing: 16) {
-                            ForEach(playlists, id: \.id) { playlist in
+                            ForEach(visiblePlaylists, id: \.id) { playlist in
                                 if isEditMode {
                                     PlaylistCardView(playlist: playlist, allTracks: getAllPlaylistTracks(playlist), isEditMode: true, onEdit: {
                                         playlistToEdit = playlist
@@ -108,14 +127,18 @@ struct PlaylistsScreen: View {
             }
             .navigationTitle(Localized.playlists)
             .navigationBarTitleDisplayMode(.inline)
+            .librarySearchField(search, prompt: Localized.searchPlaylists)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(isEditMode ? Localized.done : Localized.edit) {
-                        withAnimation {
-                            isEditMode.toggle()
+                    HStack(spacing: 8) {
+                        LibrarySearchButton(state: search)
+                        Button(isEditMode ? Localized.done : Localized.edit) {
+                            withAnimation {
+                                isEditMode.toggle()
+                            }
                         }
+                        .disabled(playlists.isEmpty)
                     }
-                    .disabled(playlists.isEmpty)
                 }
             }
             .alert(Localized.editPlaylist, isPresented: $showEditDialog) {
@@ -679,6 +702,7 @@ struct PlaylistCardView: View {
 }
 
 struct PlaylistDetailScreen: View {
+
     let playlist: Playlist
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @State private var tracks: [Track] = []
@@ -695,6 +719,10 @@ struct PlaylistDetailScreen: View {
     @State private var showCoverOptions = false
     @State private var artistNameCache: [Int64: String] = [:]
     @State private var artistDisplayNameCache: [String: String] = [:]
+    @StateObject private var search = LibrarySearchState()
+    @State private var searchIndex = TrackSearchIndex()
+
+    private var isSearching: Bool { search.isSearching }
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
@@ -708,19 +736,38 @@ struct PlaylistDetailScreen: View {
         }
     }
 
-    private var sortedTracks: [Track] {
-        // Filter out incompatible formats when connected to CarPlay
-        let filteredTracks: [Track]
-        if SFBAudioEngineManager.shared.isCarPlayEnvironment {
-            filteredTracks = tracks.filter { track in
-                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-                let incompatibleFormats = ["ogg", "opus", "dsf", "dff"]
-                return !incompatibleFormats.contains(ext)
-            }
-        } else {
-            filteredTracks = tracks
-        }
+    // Subscribed, not merely read: the list has to be rebuilt when the route
+    // changes. Reading the singleton without subscribing meant connecting could
+    // leave incompatible formats on screen and disconnecting left Opus/DSD
+    // missing until some other refresh happened to fire.
+    //
+    // Deliberately CarPlayRouteState and not SFBAudioEngineManager: that class
+    // also publishes `currentTime` from a 0.1s timer, so observing it rebuilt
+    // this whole list ten times a second for the duration of every
+    // Opus/Vorbis/DSD track.
+    @ObservedObject private var carPlayState = CarPlayRouteState.shared
 
+    private var playableTracks: [Track] {
+        // Filter out incompatible formats when connected to CarPlay
+        guard carPlayState.isConnected else { return tracks }
+        return tracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            let incompatibleFormats = ["ogg", "oga", "opus", "dsf", "dff"]
+            return !incompatibleFormats.contains(ext)
+        }
+    }
+
+    private var sortedTracks: [Track] {
+        sorted(searchIndex.filter(playableTracks, query: search.text))
+    }
+
+    /// The same playlist in the same order, with the search not applied.
+    /// Evaluated only inside a tap handler - see `queueSource`.
+    private var fullSortedTracks: [Track] {
+        sorted(playableTracks)
+    }
+
+    private func sorted(_ filteredTracks: [Track]) -> [Track] {
         switch sortOption {
         case .playlistOrder:
             // Respect the playlist position order (tracks are already loaded in position order)
@@ -935,11 +982,29 @@ struct PlaylistDetailScreen: View {
                                 isEditMode: isEditMode,
                                 artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
                                 onTap: {
+                                    dismissSearchKeyboard()
                                     Task {
                                         guard let playlistId = playlist.id else { return }
                                         try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
                                         try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
-                                        await playerEngine.playTrack(track, queue: sortedTracks)
+
+                                        let visible = sortedTracks
+                                        let queue = LibrarySearch.queueSource(
+                                            filtered: visible,
+                                            full: fullSortedTracks,
+                                            isSearching: search.isSearching
+                                        )
+                                        // A playlist may hold the same track twice, so the
+                                        // tapped copy has to be located by position rather
+                                        // than by stable ID.
+                                        let start = queue.count == visible.count
+                                            ? row.index
+                                            : LibrarySearch.fullListIndex(
+                                                ofFiltered: row.index,
+                                                in: visible,
+                                                within: queue
+                                            )
+                                        await playerEngine.playTrack(at: start, in: queue)
                                     }
                                 }
                             )
@@ -969,7 +1034,7 @@ struct PlaylistDetailScreen: View {
                             .listRowSeparator(index < sortedTracks.count - 1 ? .visible : .hidden)
                             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         }
-                        .onMove(perform: sortOption == .playlistOrder ? { source, destination in
+                        .onMove(perform: sortOption == .playlistOrder && !isSearching ? { source, destination in
                             guard let playlistId = playlist.id else { return }
                             do {
                                 // Calculate actual destination index
@@ -1021,14 +1086,14 @@ struct PlaylistDetailScreen: View {
                 } else {
                     Section {
                         VStack(spacing: 16) {
-                            Image(systemName: "music.note")
+                            Image(systemName: isSearching ? "magnifyingglass" : "music.note")
                                 .font(.system(size: 40))
                                 .foregroundColor(.secondary)
 
-                            Text(Localized.noSongsFound)
+                            Text(isSearching ? Localized.noResultsFound : Localized.noSongsFound)
                                 .font(.headline)
 
-                            Text(Localized.yourMusicWillAppearHere)
+                            Text(isSearching ? Localized.tryDifferentKeywords : Localized.yourMusicWillAppearHere)
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -1046,14 +1111,18 @@ struct PlaylistDetailScreen: View {
             .environment(\.editMode, .constant(isEditMode ? .active : .inactive))
         }
         .navigationBarTitleDisplayMode(.inline)
+        .librarySearchField(search, prompt: Localized.searchSongs)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(isEditMode ? Localized.done : Localized.edit) {
-                    withAnimation {
-                        isEditMode.toggle()
+                HStack(spacing: 8) {
+                    LibrarySearchButton(state: search)
+                    Button(isEditMode ? Localized.done : Localized.edit) {
+                        withAnimation {
+                            isEditMode.toggle()
+                        }
                     }
+                    .disabled(tracks.isEmpty)
                 }
-                .disabled(tracks.isEmpty)
             }
         }
         .onAppear {
@@ -1062,24 +1131,40 @@ struct PlaylistDetailScreen: View {
             loadCustomCover()
             loadArtistNameCache()
         }
+        // See TrackListView: the rebuild is asynchronous, so one .task covers
+        // both the first appearance and every later change of the row set.
+        .task(id: TrackSearchIndex.identity(for: tracks)) {
+            let rebuilt = await TrackSearchIndex.rebuilt(from: searchIndex, for: tracks)
+            // See TrackListView: a superseded build must not overwrite the one
+            // that replaced it.
+            guard !Task.isCancelled else { return }
+            searchIndex = rebuilt
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
             loadPlaylistTracks()
+            Task {
+                searchIndex = await TrackSearchIndex.rebuilt(
+                    from: searchIndex,
+                    for: tracks,
+                    force: true
+                )
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
             settings = DeleteSettings.load()
         }
-        .confirmationDialog("Playlist Cover", isPresented: $showCoverOptions) {
+        .confirmationDialog(Localized.playlistCover, isPresented: $showCoverOptions) {
             PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                Text("Change Cover Image")
+                Text(Localized.changeCoverImage)
             }
 
             if customCoverImage != nil {
-                Button("Remove Custom Cover", role: .destructive) {
+                Button(Localized.removeCustomCover, role: .destructive) {
                     removeCustomCover()
                 }
             }
 
-            Button("Cancel", role: .cancel) { }
+            Button(Localized.cancel, role: .cancel) { }
         }
         .onChange(of: selectedPhotoItem) { newItem in
             Task {
@@ -1433,10 +1518,10 @@ struct PlaylistTrackRowView: View {
                 .accentColor(deleteSettings.backgroundColorChoice.color)
         }
         .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
-            Button("Delete", role: .destructive) {
+            Button(Localized.delete, role: .destructive) {
                 deleteFile()
             }
-            Button("Cancel", role: .cancel) { }
+            Button(Localized.cancel, role: .cancel) { }
         } message: {
             Text(Localized.deleteFileConfirmation(track.title))
         }
@@ -1444,6 +1529,7 @@ struct PlaylistTrackRowView: View {
             isFavorite = (try? appCoordinator.isFavorite(trackStableId: track.stableId)) ?? false
             if artworkImage == nil { loadArtwork() }
         }
+        .reloadsArtwork(for: track.stableId) { loadArtwork() }
     }
 
     private func loadArtwork() {
@@ -1457,7 +1543,7 @@ struct PlaylistTrackRowView: View {
             do {
                 let settings = DeleteSettings.load()
                 if settings.deleteFromLibraryOnly {
-                    DeleteSettings.addExcludedTrack(track.stableId)
+                    DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
                 } else {
                     do {
                         try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
@@ -1466,7 +1552,7 @@ struct PlaylistTrackRowView: View {
                     }
                 }
 
-                try DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
+                try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
                 NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             } catch {
                 print("❌ Failed to delete track: \(error)")
@@ -1498,10 +1584,10 @@ struct PlaylistListView: View {
                     .font(.system(size: 40))
                     .foregroundColor(.secondary)
 
-                Text("No playlists yet")
+                Text(Localized.noPlaylistsYet)
                     .font(.headline)
 
-                Text("Create playlists by adding songs to them from the library")
+                Text(Localized.createPlaylistsInstruction)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
