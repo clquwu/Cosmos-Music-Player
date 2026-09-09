@@ -522,7 +522,7 @@ Thank you for contributing! 🚀
 
 ## License 📄
 
-This project is licensed under [Your License] - see the LICENSE file for details.
+This project is licensed under GPL-3.0 - see the LICENSE file for details.
 
 ## Environment Variables 🔧
 
