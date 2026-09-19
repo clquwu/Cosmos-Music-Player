@@ -672,3 +672,53 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+
+# Apple App Store Distribution Exception
+
+## Additional Permission under GNU GPLv3 Section 7
+
+This project, **Cosmos Music Player**, is licensed under the GNU General Public License version 3.0 ("GPLv3").
+
+In addition to the permissions granted by the GPLv3, the copyright holders of Cosmos Music Player grant the following additional permission pursuant to Section 7 of the GPLv3:
+
+### 1. Apple App Store Distribution
+
+You may convey, distribute, and publish this Program, including modified versions and forks of the Program, through the **Apple App Store, Mac App Store, TestFlight, or other Apple-operated software distribution services**.
+
+This permission applies even where Apple's standard distribution terms, code signing requirements, digital rights management, device restrictions, account restrictions, or other technical or contractual conditions imposed by Apple would otherwise be considered an additional or further restriction under the GPLv3.
+
+This exception applies only to restrictions imposed by Apple as a necessary consequence of distributing the Program through an Apple-operated software distribution service.
+
+### 2. GPLv3 Continues to Apply
+
+Except for the specific permission described above, the Program and any modified version or fork remain subject to the GNU General Public License version 3.
+
+This exception does not grant permission to relicense the Program, or a derivative work of the Program, under a proprietary or otherwise GPL-incompatible license.
+
+When distributing a modified version or fork, you must continue to satisfy the applicable GPLv3 requirements, including making the Corresponding Source available as required by the GPLv3.
+
+### 3. Cosmos Music Player Name
+
+This additional permission grants **no right to use the name "Cosmos Music Player" as the name of a fork, application, product, or service**.
+
+Any independently distributed fork must use a different application and product name.
+
+This restriction does not prevent reasonable nominative references to the original project for attribution or description, such as:
+
+> "Based on Cosmos Music Player"
+
+or:
+
+> "Forked from Cosmos Music Player"
+
+provided that such references do not imply that the fork is the official Cosmos Music Player application or is endorsed by the Cosmos Music Player project.
+
+### 4. No Other Trademark or Branding Rights
+
+No trademark, service mark, logo, icon, branding, or other identity rights belonging to the Cosmos Music Player project are granted by this exception unless expressly stated otherwise.
+
+### 5. Scope
+
+This exception supplements the GNU GPLv3 and should be interpreted as an additional permission under Section 7 of that license.
+
+Where this exception does not apply, the terms of the GNU GPLv3 remain unchanged and continue to govern the Program.
