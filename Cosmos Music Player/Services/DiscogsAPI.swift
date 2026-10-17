@@ -273,7 +273,7 @@ class DiscogsAPIService: ObservableObject, @unchecked Sendable {
         }
         
         // Check disk cache
-        let filename = name.lowercased().replacingOccurrences(of: " ", with: "_") + ".json"
+        let filename = name.cacheFilename + ".json"
         let fileURL = cacheDirectory.appendingPathComponent(filename)
         
         guard let data = try? Data(contentsOf: fileURL),
@@ -302,7 +302,7 @@ class DiscogsAPIService: ObservableObject, @unchecked Sendable {
         cache.setObject(cached, forKey: key)
         
         // Store in disk cache
-        let filename = name.lowercased().replacingOccurrences(of: " ", with: "_") + ".json"
+        let filename = name.cacheFilename + ".json"
         let fileURL = cacheDirectory.appendingPathComponent(filename)
         
         do {
