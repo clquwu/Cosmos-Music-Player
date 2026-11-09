@@ -558,7 +558,7 @@ We use Spotify and Discogs to fetch artist details, and LRCLIB for synchronized 
 
 - **Lyrics Api**: Special thanks to the [LRCLIB](https://github.com/tranxuanthang/lrclib) project by tranxuanthang
 - **Logo Design**: Created by **Zerrotic** (zerrotic on Discord)
-- **App Store Screenshots**: Designed by **MrVedakkaN** (mrvedakkan on Discord)
+- **App Store Screenshots**: Designed by **Daniil Mitioglo** https://www.upwork.com/freelancers/~0129faf011061bf8a2
 
 ## Authors 👥
 
