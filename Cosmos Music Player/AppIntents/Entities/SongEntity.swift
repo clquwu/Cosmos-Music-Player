@@ -78,18 +78,31 @@ struct SongQuery {
 extension SongQuery: EntityQuery {
     func entities(for identifiers: [SongEntity.ID]) async throws -> [SongEntity] {
         SiriDiag.log("APP SongQuery.entities(for:) ids=\(identifiers)")
-        return try await store.songEntities(for: identifiers)
+        do {
+            return try await store.songEntities(for: identifiers)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "SongQuery.entities(for:)")
+        }
     }
 
     func suggestedEntities() async throws -> [SongEntity] {
-        try await store.suggestedSongEntities()
+        do {
+            return try await store.suggestedSongEntities()
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "SongQuery.suggestedEntities")
+        }
     }
 }
 
 @available(iOS 27.0, *)
 extension SongQuery: EntityStringQuery {
     func entities(matching string: String) async throws -> [SongEntity] {
-        let results = try await store.songEntities(matching: string)
+        let results: [SongEntity]
+        do {
+            results = try await store.songEntities(matching: string)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "SongQuery.entities(matching:)")
+        }
         SiriDiag.log("APP SongQuery.entities(matching:) query=\(string) results=\(results.count)")
         return results
     }

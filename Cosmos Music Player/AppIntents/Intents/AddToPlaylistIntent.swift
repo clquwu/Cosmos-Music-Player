@@ -30,6 +30,9 @@ struct AddToPlaylistIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ShowsSnippetIntent {
+        IntentRuntime.begin("AddToPlaylistIntent")
+        defer { IntentRuntime.end("AddToPlaylistIntent") }
+        SiriDiag.log("APP AddToPlaylistIntent.perform target=\(audioEntity.title) playlist=\(playlist.title)")
         guard case .song(let song) = audioEntity else {
             throw AppIntentError(wrapping: AudioIntentError.unsupportedTarget)
         }
@@ -37,7 +40,12 @@ struct AddToPlaylistIntent {
             throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
         }
 
-        let added = try playback.addToPlaylist(playlistId: playlistId, trackStableId: song.id)
+        let added: Bool
+        do {
+            added = try playback.addToPlaylist(playlistId: playlistId, trackStableId: song.id)
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "AddToPlaylistIntent")
+        }
         guard added else {
             throw AppIntentError(wrapping: AudioIntentError.alreadyInPlaylist)
         }

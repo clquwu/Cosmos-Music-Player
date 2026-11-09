@@ -27,13 +27,19 @@ struct UpdateAudioAffinityIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ShowsSnippetIntent {
+        IntentRuntime.begin("UpdateAudioAffinityIntent")
+        defer { IntentRuntime.end("UpdateAudioAffinityIntent") }
         SiriDiag.log("APP UpdateAudioAffinityIntent.perform state=\(affinityState) target=\(target.title)")
         guard case .song(let song) = target else {
             throw AppIntentError(wrapping: AudioIntentError.unsupportedTarget)
         }
 
         let isLiked = (affinityState == .like)
-        try playback.setFavorite(trackStableId: song.id, isFavorite: isLiked)
+        do {
+            try playback.setFavorite(trackStableId: song.id, isFavorite: isLiked)
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "UpdateAudioAffinityIntent")
+        }
 
         let dialog: IntentDialog
         switch affinityState {

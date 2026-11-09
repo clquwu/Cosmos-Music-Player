@@ -41,7 +41,21 @@ struct GenerateMixIntent: AudioPlaybackIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ShowsSnippetIntent {
-        let mix = try await MixGenerator().generate(matching: mixDescription)
+        IntentRuntime.begin("GenerateMixIntent")
+        defer { IntentRuntime.end("GenerateMixIntent") }
+        SiriDiag.log("APP GenerateMixIntent.perform description=\(mixDescription)")
+        let mix: MixGenerator.Mix
+        do {
+            // Siri drops the request when perform() runs past its response
+            // window, so the model gets a hard budget here; MixGenerator
+            // falls back to the plain library ranking when it runs out.
+            mix = try await MixGenerator().generate(
+                matching: mixDescription,
+                budget: .siri
+            )
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "GenerateMixIntent")
+        }
 
         await playback.play(tracks: mix.tracks)
         playback.setPendingMix(title: mix.title, tracks: mix.tracks)
@@ -74,7 +88,13 @@ struct SaveMixIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        _ = try playback.savePendingMix()
+        IntentRuntime.begin("SaveMixIntent")
+        defer { IntentRuntime.end("SaveMixIntent") }
+        do {
+            _ = try playback.savePendingMix()
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "SaveMixIntent")
+        }
         return .result()
     }
 }

@@ -38,12 +38,14 @@ struct TrackBulkActionsModifier: ViewModifier {
         content
             .toolbar {
                 if isBulkMode {
-                    ToolbarItem(placement: .navigationBarLeading) {
+                    // Plain, like the Select button they replace: the app
+                    // keeps glass capsules for the system's own chrome.
+                    ToolbarItem(placement: .topBarLeading) {
                         Button(Localized.cancel) { exitBulkMode() }
-                            .foregroundColor(settings.backgroundColorChoice.color)
                     }
+                    .cosmosPlainBackground()
 
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                    ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button(action: { selectAll() }) {
                                 Label(Localized.selectAll, systemImage: "checkmark.circle")
@@ -67,15 +69,18 @@ struct TrackBulkActionsModifier: ViewModifier {
                             }
                             .disabled(selectedTracks.isEmpty)
                         } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.title3)
-                                .foregroundColor(settings.backgroundColorChoice.color)
-                                .padding(4)
-                                .contentShape(Rectangle())
+                            Label(Localized.moreOptions, systemImage: "ellipsis.circle")
                         }
-                        .menuStyle(.button)
-                        .buttonStyle(.plain)
                     }
+                    .cosmosPlainBackground()
+                } else if !selectionPool.isEmpty {
+                    // Long-pressing a song selects too, but few found it.
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { isBulkMode = true } label: {
+                            Label(Localized.select, systemImage: "checkmark.circle")
+                        }
+                    }
+                    .cosmosPlainBackground()
                 }
             }
             .sheet(isPresented: $showPlaylistDialog) {
@@ -94,6 +99,20 @@ struct TrackBulkActionsModifier: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
                 settings = DeleteSettings.load()
             }
+            #if DEBUG
+            // -cosmosDebugSelect 1 opens the page already selecting, and
+            // `sheet` with Add to Playlist up - for screenshots.
+            .task(id: selectionPool.isEmpty) {
+                guard let mode = UserDefaults.standard.string(forKey: "cosmosDebugSelect"),
+                      let first = selectionPool.first else { return }
+                isBulkMode = true
+                selectedTracks = [first.stableId]
+                if mode == "sheet" {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    showPlaylistDialog = true
+                }
+            }
+            #endif
     }
 
     private func exitBulkMode() {
@@ -172,5 +191,7 @@ struct TrackSelectionIndicator: View {
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
             .onTapGesture { onTap?() }
+            .accessibilityLabel(Localized.select)
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }

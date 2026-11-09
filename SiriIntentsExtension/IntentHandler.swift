@@ -4,6 +4,34 @@
 //
 //  Created by CLQ on 15/09/2025.
 //
+//  Resolves SiriKit media requests ("Joue … dans Cosmos") into identifiers
+//  the app plays (see SiriPlayRouter / AppCoordinator.handleSiriPlaybackIntent).
+//
+//  Speed: everything runs off the main thread against a cached, pre-folded
+//  library snapshot (SiriLibrarySnapshot.swift). Deterministic ranking
+//  answers almost every request in well under a second; the on-device model
+//  is only consulted when the ranking is genuinely ambiguous, and it is
+//  raced against a hard deadline so a request never waits more than
+//  `modelDeadline` for it. Every path works without Apple Intelligence.
+//
+//  Identifier contract with the app:
+//    <stableId>                 a song
+//    playlist_<id>              a playlist
+//    album_<id>                 an album
+//    search_artist_<name>       an artist (fuzzy-matched again in the app)
+//    liked_songs                Liked Songs
+//    mix_<id>                   a Made for You / Rediscover mix
+//    mixkind_madeForYou|mixkind_rediscover   the first mix of that shelf
+//    radio_current              a song mix from the playing song
+//    radio_song_<stableId>      a song mix from a named song
+//    radio_artist_<name>        a mix grown from an artist
+//    artist_current             the playing song's artist
+//    generate_<text>            a mood/genre mix ("play something calm")
+//    music_all                  the whole library, shuffled
+//    mode_now|mode_tonight      the listening mode that fits the moment
+//                               ("something for now / tonight")
+//    cosmos_not_found           nothing matched (Siri says so)
+//
 
 import Intents
 import Foundation
@@ -12,96 +40,17 @@ import GRDB
 import FoundationModels
 #endif
 
-// String similarity extension for fuzzy matching
+// MARK: - Legacy string helpers (kept for source compatibility)
+
 extension String {
-    var siriSearchNormalized: String {
-        let folded = folding(
-            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-            locale: .current
-        )
-        let searchable = folded.unicodeScalars
-            .map { CharacterSet.alphanumerics.contains($0) ? String($0) : " " }
-            .joined()
-        return searchable
-            .split(whereSeparator: { $0.isWhitespace })
-            .map(String.init)
-            .joined(separator: " ")
-    }
-
-    func levenshteinDistance(to other: String) -> Int {
-        let selfArray = Array(self.lowercased())
-        let otherArray = Array(other.lowercased())
-
-        let selfCount = selfArray.count
-        let otherCount = otherArray.count
-
-        if selfCount == 0 { return otherCount }
-        if otherCount == 0 { return selfCount }
-
-        var matrix = Array(repeating: Array(repeating: 0, count: otherCount + 1), count: selfCount + 1)
-
-        for i in 0...selfCount {
-            matrix[i][0] = i
-        }
-
-        for j in 0...otherCount {
-            matrix[0][j] = j
-        }
-
-        for i in 1...selfCount {
-            for j in 1...otherCount {
-                if selfArray[i-1] == otherArray[j-1] {
-                    matrix[i][j] = matrix[i-1][j-1]
-                } else {
-                    matrix[i][j] = Swift.min(
-                        matrix[i-1][j] + 1,    // deletion
-                        matrix[i][j-1] + 1,    // insertion
-                        matrix[i-1][j-1] + 1   // substitution
-                    )
-                }
-            }
-        }
-
-        return matrix[selfCount][otherCount]
-    }
+    var siriSearchNormalized: String { SiriText.normalize(self) }
 
     func similarityScore(to other: String) -> Double {
-        let left = siriSearchNormalized
-        let right = other.siriSearchNormalized
-        let distance = left.levenshteinDistance(to: right)
-        let maxLength = Swift.max(left.count, right.count)
-        return maxLength == 0 ? 1.0 : 1.0 - (Double(distance) / Double(maxLength))
+        SiriText.ratio(Array(siriSearchNormalized), Array(other.siriSearchNormalized))
     }
 
     func siriSearchScore(against candidate: String) -> Double {
-        let query = siriSearchNormalized
-        let value = candidate.siriSearchNormalized
-        guard !query.isEmpty, !value.isEmpty else { return 0 }
-        if query == value { return 1 }
-        if value.contains(query) {
-            return min(0.98, 0.88 + 0.10 * Double(query.count) / Double(value.count))
-        }
-        if query.contains(value) {
-            return min(0.94, 0.82 + 0.10 * Double(value.count) / Double(query.count))
-        }
-
-        let ignoredWords: Set<String> = [
-            "a", "an", "the", "song", "music", "track", "play", "please", "by", "from", "in", "on", "cosmos",
-            "le", "la", "les", "un", "une", "chanson", "musique", "titre", "joue", "de", "du", "des", "dans", "sur"
-        ]
-        let queryTokens = query.split(separator: " ").map(String.init).filter { !ignoredWords.contains($0) }
-        let valueTokens = value.split(separator: " ").map(String.init)
-        let tokenCoverage: Double
-        if queryTokens.isEmpty || valueTokens.isEmpty {
-            tokenCoverage = 0
-        } else {
-            let total = queryTokens.reduce(0.0) { partial, token in
-                partial + (valueTokens.map { token.similarityScore(to: $0) }.max() ?? 0)
-            }
-            tokenCoverage = total / Double(queryTokens.count)
-        }
-
-        return max(similarityScore(to: value), tokenCoverage * 0.90)
+        SiriKey(self).score(against: SiriKey(candidate))
     }
 }
 
@@ -113,50 +62,34 @@ struct RankedSimpleTrack: Sendable {
 // Temporary Siri-routing diagnostics: append to a log in the app group
 // container so it can be pulled off-device with devicectl.
 enum SiriDiag {
+    private static let queue = DispatchQueue(label: "cosmos.siri.diag")
+
     static func log(_ message: String) {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"
-        ) else { return }
-        let dir = container.appendingPathComponent("Library", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("siri-diagnostics.log")
         let stamp = ISO8601DateFormatter().string(from: Date())
-        guard let data = "\(stamp) \(message)\n".data(using: .utf8) else { return }
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? data.write(to: url)
+        queue.async {
+            guard let container = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: SiriLibraryCache.groupId
+            ) else { return }
+            let dir = container.appendingPathComponent("Library", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("siri-diagnostics.log")
+            guard let data = "\(stamp) \(message)\n".data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
         }
     }
 }
 
-// Simple shared database access for extension
-class ExtensionDatabaseAccess {
+// MARK: - Database access (INAddMedia + legacy callers)
+
+final class ExtensionDatabaseAccess: @unchecked Sendable {
     static let shared = ExtensionDatabaseAccess()
-
-    private var dbQueue: DatabaseQueue?
-
-    private init() {
-        setupDatabase()
-    }
-
-    private func setupDatabase() {
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player") else {
-            print("❌ Unable to get app group container")
-            return
-        }
-
-        let databaseURL = containerURL.appendingPathComponent("cosmos_music.db")
-
-        do {
-            dbQueue = try DatabaseQueue(path: databaseURL.path)
-            print("✅ Extension database connected at: \(databaseURL.path)")
-        } catch {
-            print("❌ Failed to connect to extension database: \(error)")
-        }
-    }
+    private init() {}
 
     func rankedTrackCandidates(
         query: String,
@@ -164,164 +97,15 @@ class ExtensionDatabaseAccess {
         albumName: String? = nil,
         limit: Int = 25
     ) -> [RankedSimpleTrack] {
-        guard let dbQueue = dbQueue else { return [] }
-
-        do {
-            return try dbQueue.read { db in
-                // Rank the complete library. Siri transcription errors may not
-                // share a literal SQL substring, and the previous LIMIT 100
-                // meant most libraries were never considered at all.
-                let tracks = try SimpleTrack.fetchAll(db, sql: """
-                    SELECT track.stable_id,
-                           track.title,
-                           artist.name AS artist_name,
-                           album.title AS album_title
-                    FROM track
-                    LEFT JOIN artist ON artist.id = track.artist_id
-                    LEFT JOIN album ON album.id = track.album_id
-                    ORDER BY track.title
-                    """)
-
-                return tracks.map { track in
-                    let metadata = [track.title, track.artistName, track.albumTitle]
-                        .compactMap { $0 }
-                        .joined(separator: " ")
-                    var score = max(
-                        query.siriSearchScore(against: track.title),
-                        query.siriSearchScore(against: metadata) * 0.94
-                    )
-                    if let artistName, !artistName.siriSearchNormalized.isEmpty {
-                        score += artistName.siriSearchScore(against: track.artistName ?? "") * 0.10
-                    }
-                    if let albumName, !albumName.siriSearchNormalized.isEmpty {
-                        score += albumName.siriSearchScore(against: track.albumTitle ?? "") * 0.08
-                    }
-                    return RankedSimpleTrack(track: track, score: min(score, 1))
-                }
-                .sorted {
-                    if abs($0.score - $1.score) > 0.0001 { return $0.score > $1.score }
-                    return $0.track.title.localizedCaseInsensitiveCompare($1.track.title) == .orderedAscending
-                }
-                .prefix(limit)
-                .map { $0 }
-            }
-        } catch {
-            print("❌ Error ranking tracks: \(error)")
-            return []
-        }
+        SiriRanker(snapshot: SiriLibraryCache.shared.snapshot())
+            .rankTracks(query: SiriKey(query), artist: artistName.map(SiriKey.init), album: albumName.map(SiriKey.init), limit: limit)
     }
 
     func searchTracks(query: String, artistName: String? = nil, albumName: String? = nil) -> [SimpleTrack] {
         let ranked = rankedTrackCandidates(query: query, artistName: artistName, albumName: albumName)
-        guard let best = ranked.first, best.score >= 0.58 else {
-            print("🎵 Track search '\(query)': no confident match")
-            return []
-        }
-        let cutoff = max(0.58, best.score - 0.10)
-        let results = ranked.prefix(5).filter { $0.score >= cutoff }.map(\.track)
-        print("🎵 Smart track search '\(query)': \(results.count) matches, best=\(String(format: "%.2f", best.score))")
-        return results
-    }
-
-    func searchPlaylists(query: String) -> [SimplePlaylist] {
-        guard let dbQueue = dbQueue else { return [] }
-
-        do {
-            return try dbQueue.read { db in
-                if query.isEmpty {
-                    let sql = "SELECT id, title FROM playlist ORDER BY last_played_at DESC, title"
-                    return try SimplePlaylist.fetchAll(db, sql: sql)
-                } else {
-                    var results: [SimplePlaylist] = []
-
-                    // 1. Exact match first
-                    let exactSql = "SELECT id, title FROM playlist WHERE title = ? COLLATE NOCASE ORDER BY title"
-                    results = try SimplePlaylist.fetchAll(db, sql: exactSql, arguments: [query])
-
-                    if results.isEmpty {
-                        // 2. Contains match
-                        let searchPattern = "%\(query)%"
-                        let likeSql = "SELECT id, title FROM playlist WHERE title LIKE ? COLLATE NOCASE ORDER BY title"
-                        results = try SimplePlaylist.fetchAll(db, sql: likeSql, arguments: [searchPattern])
-                    }
-
-                    if results.isEmpty {
-                        // 3. Fuzzy matching - get all playlists and find similar ones
-                        let allSql = "SELECT id, title FROM playlist ORDER BY title"
-                        let allPlaylists = try SimplePlaylist.fetchAll(db, sql: allSql)
-
-                        let fuzzyResults = allPlaylists.compactMap { playlist -> (SimplePlaylist, Double)? in
-                            let similarity = query.similarityScore(to: playlist.title)
-                            // Use a threshold of 0.6 for fuzzy matching (60% similarity)
-                            return similarity >= 0.6 ? (playlist, similarity) : nil
-                        }
-
-                        // Sort by similarity score descending
-                        results = fuzzyResults
-                            .sorted { $0.1 > $1.1 }
-                            .map { $0.0 }
-
-                        print("📋 Fuzzy playlist search '\(query)': found \(results.count) matches with similarity >= 0.6")
-                        for result in results.prefix(3) {
-                            let score = query.similarityScore(to: result.title)
-                            print("  - '\(result.title)' (similarity: \(String(format: "%.2f", score)))")
-                        }
-                    }
-
-                    print("📋 Playlist search '\(query)': \(results.count) results")
-                    return results
-                }
-            }
-        } catch {
-            print("❌ Error searching playlists: \(error)")
-            return []
-        }
-    }
-
-    func getAllTracks() -> [SimpleTrack] {
-        guard let dbQueue = dbQueue else { return [] }
-
-        do {
-            return try dbQueue.read { db in
-                let sql = "SELECT stable_id, title FROM track ORDER BY id DESC"
-                return try SimpleTrack.fetchAll(db, sql: sql)
-            }
-        } catch {
-            print("❌ Error getting all tracks: \(error)")
-            return []
-        }
-    }
-
-    func getFavorites() -> [String] {
-        guard let dbQueue = dbQueue else { return [] }
-
-        do {
-            return try dbQueue.read { db in
-                let sql = "SELECT track_stable_id FROM favorite"
-                return try String.fetchAll(db, sql: sql)
-            }
-        } catch {
-            print("❌ Error getting favorites: \(error)")
-            return []
-        }
-    }
-
-    func getTracksByStableIds(_ stableIds: [String]) -> [SimpleTrack] {
-        guard let dbQueue = dbQueue else { return [] }
-        guard !stableIds.isEmpty else { return [] }
-
-        do {
-            let tracks = try dbQueue.read { db in
-                let placeholders = Array(repeating: "?", count: stableIds.count).joined(separator: ", ")
-                let sql = "SELECT stable_id, title FROM track WHERE stable_id IN (\(placeholders))"
-                return try SimpleTrack.fetchAll(db, sql: sql, arguments: StatementArguments(stableIds))
-            }
-            let tracksByStableId = Dictionary(uniqueKeysWithValues: tracks.map { ($0.stableId, $0) })
-            return stableIds.compactMap { tracksByStableId[$0] }
-        } catch {
-            print("❌ Error getting tracks by stable IDs: \(error)")
-            return []
-        }
+        guard let best = ranked.first, best.score >= SiriRanker.songThreshold else { return [] }
+        let cutoff = max(SiriRanker.songThreshold, best.score - 0.10)
+        return ranked.prefix(5).filter { $0.score >= cutoff }.map(\.track)
     }
 }
 
@@ -342,159 +126,345 @@ struct SimpleTrack: Codable, FetchableRecord, Sendable {
     }
 }
 
+// MARK: - Deterministic ranking
 
-struct SimplePlaylist: Codable, FetchableRecord {
-    var id: Int64?
-    var title: String
+struct SiriRanker {
+    let snapshot: SiriLibrarySnapshot
 
-    static let databaseTableName = "playlist"
-}
+    static let songThreshold = 0.58
+    /// A song match this good, clearly ahead of the next title, needs no model.
+    static let confidentScore = 0.88
 
-struct SimpleFavorite: Codable, FetchableRecord {
-    var trackStableId: String
+    func rankTracks(query: SiriKey, artist: SiriKey?, album: SiriKey?, limit: Int = 25) -> [RankedSimpleTrack] {
+        guard !query.isEmpty else { return [] }
+        var ranked: [RankedSimpleTrack] = []
+        ranked.reserveCapacity(snapshot.tracks.count)
+        for row in snapshot.tracks {
+            var score = query.score(against: row.title)
+            // Metadata only helps when the title alone isn't already close.
+            if score < 0.9 {
+                score = max(score, query.score(against: row.metadata) * 0.94)
+            }
+            if let artist, !artist.isEmpty {
+                score += artist.artistSimilarity(to: row.artist) * 0.10
+            }
+            if let album, !album.isEmpty {
+                score += album.score(against: row.album) * 0.08
+            }
+            ranked.append(RankedSimpleTrack(track: row.track, score: min(score, 1)))
+        }
+        ranked.sort {
+            if abs($0.score - $1.score) > 0.0001 { return $0.score > $1.score }
+            return $0.track.title.localizedCaseInsensitiveCompare($1.track.title) == .orderedAscending
+        }
+        return Array(ranked.prefix(limit))
+    }
 
-    static let databaseTableName = "favorite"
+    /// Best artist for a spoken name and its score (ArtistMatcher semantics).
+    func bestArtist(_ query: SiriKey) -> (name: String, score: Double)? {
+        var best: (String, Double)?
+        for artist in snapshot.artists {
+            let score = query.artistSimilarity(to: artist.key)
+            if score > (best?.1 ?? 0) { best = (artist.name, score) }
+        }
+        return best.map { (name: $0.0, score: $0.1) }
+    }
 
-    enum CodingKeys: String, CodingKey {
-        case trackStableId = "track_stable_id"
+    func bestNamed(_ query: SiriKey, in rows: [SiriNamedRow]) -> (row: SiriNamedRow, score: Double)? {
+        var best: (SiriNamedRow, Double)?
+        for row in rows {
+            let score = query.score(against: row.key)
+            if score > (best?.1 ?? 0) { best = (row, score) }
+        }
+        return best.map { (row: $0.0, score: $0.1) }
+    }
+
+    func bestMix(_ query: SiriKey) -> (record: SiriMixRecord, score: Double)? {
+        var best: (SiriMixRecord, Double)?
+        for mix in snapshot.mixes {
+            let score = query.score(against: mix.key)
+            if score > (best?.1 ?? 0) { best = (mix.record, score) }
+        }
+        return best.map { (record: $0.0, score: $0.1) }
     }
 }
 
+// MARK: - Spoken phrase classification
+
+enum SiriPhrase {
+    private static func words(_ name: String) -> [String] {
+        SiriText.normalize(name).split(separator: " ").map(String.init)
+    }
+
+    private static let possessives: Set<String> = [
+        "my", "mes", "ma", "mon", "the", "les", "la", "le", "all", "of", "toutes", "tous", "toute", "tout",
+        "songs", "song", "tracks", "track", "titres", "titre", "chansons", "chanson", "morceaux", "morceau",
+        "music", "musique", "de", "du", "des", "d", "playlist", "liste", "lecture", "in", "dans", "cosmos",
+        "play", "joue", "mets", "lance", "some", "me", "moi", "a", "un", "une", "mix", "list"
+    ]
+
+    private static let likedWords: Set<String> = [
+        "liked", "like", "likes", "likees", "likee", "love", "loved", "favorite", "favorites", "favourite",
+        "favourites", "favori", "favoris", "favorite", "prefere", "preferes", "preferee", "preferees",
+        "aime", "aimes", "aimee", "aimees", "coup", "coups", "coeur", "coeurs", "cœur", "cœurs", "j", "heart", "hearted",
+        "избранное", "любимые", "любимое"
+    ]
+
+    /// "mes titres likés", "my liked songs", "mes coups de cœur", "favoris"…
+    /// Only when *every* meaningful word is a liked-word, so a song called
+    /// "Love Story" is not mistaken for Liked Songs.
+    static func isLikedSongs(_ name: String) -> Bool {
+        let meaningful = words(name).filter { !possessives.contains($0) }
+        guard !meaningful.isEmpty else { return false }
+        return meaningful.allSatisfy { likedWords.contains($0) }
+    }
+
+    static func isAllMusic(_ name: String) -> Bool {
+        let all = words(name)
+        guard !all.isEmpty else { return false }
+        let library: Set<String> = ["bibliotheque", "collection", "library", "everything", "tout", "all"]
+        let meaningful = all.filter { !possessives.contains($0) || $0 == "all" || $0 == "tout" }
+        if meaningful.isEmpty {
+            // "my music", "ma musique", "mes chansons", "toute ma musique"
+            return all.contains { ["music", "musique", "songs", "chansons", "titres", "morceaux"].contains($0) }
+        }
+        return meaningful.allSatisfy { library.contains($0) }
+    }
+
+    enum MixShelf { case madeForYou, rediscover }
+
+    /// "Made for You", "mes mix pour moi", "Redécouvrir"…
+    static func mixShelf(_ name: String) -> MixShelf? {
+        let all = Set(words(name))
+        if !all.isDisjoint(with: ["rediscover", "redecouvrir", "redecouverte", "redecouvre", "redecouvertes"]) {
+            return .rediscover
+        }
+        let madeWords: Set<String> = ["made", "for", "you", "pour", "vous", "toi", "moi", "me", "fait", "faits",
+                                      "concu", "concus", "daily", "jour", "quotidien", "personnalise", "personnalises"]
+        let meaningful = all.subtracting(possessives).subtracting(["mix", "mixes", "mixs"])
+        let mentionsMix = !all.isDisjoint(with: ["mix", "mixes", "mixs"])
+        if meaningful.isEmpty { return mentionsMix ? .madeForYou : nil }
+        if meaningful.isSubset(of: madeWords), all.contains("made") || all.contains("pour") || all.contains("for") || mentionsMix {
+            return .madeForYou
+        }
+        return nil
+    }
+
+    enum Moment { case now, tonight }
+
+    /// "something for now", "quelque chose pour ce soir", "de la musique
+    /// pour maintenant", "music for tonight": a request for whatever fits
+    /// the moment, which the app answers with the listening mode of that
+    /// time (identifiers mode_now / mode_tonight). Every word must be one
+    /// of these, with a time word and a "for"/"something" word among them,
+    /// so a song called "Tonight" or "Now" is still that song.
+    static func moment(_ name: String) -> Moment? {
+        let all = words(name)
+        guard !all.isEmpty else { return nil }
+        let nowWords: Set<String> = ["now", "maintenant", "moment", "today", "aujourd", "hui", "aujourdhui", "сеичас", "сейчас"]
+        let tonightWords: Set<String> = ["tonight", "evening", "night", "soir", "soiree", "nuit", "вечер", "вечером"]
+        let asking: Set<String> = ["for", "pour", "something", "quelque", "chose", "truc", "music", "musique",
+                                   "что", "нибудь", "на", "для", "музыку", "музыка"]
+        let glue: Set<String> = ["a", "de", "la", "du", "des", "some", "play", "joue", "mets", "lance", "ce", "cette", "this",
+                                 "the", "right", "me", "moi", "un", "une", "peu", "songs", "titres", "chansons", "morceaux",
+                                 "in", "dans", "cosmos", "qui", "va", "bien", "fits", "goes", "with", "avec", "le", "en",
+                                 "ecouter", "listen", "to", "сегодня", "включи", "поставь", "-"]
+        guard all.allSatisfy({ nowWords.contains($0) || tonightWords.contains($0) || asking.contains($0) || glue.contains($0) }),
+              all.contains(where: asking.contains) else { return nil }
+        if all.contains(where: tonightWords.contains) { return .tonight }
+        return all.contains(where: nowWords.contains) ? .now : nil
+    }
+
+    /// "this song", "ce morceau", "celui-ci", "ça" — a reference to now playing.
+    static func isCurrentReference(_ subject: String) -> Bool {
+        let meaningful = words(subject).filter {
+            !["this", "that", "the", "current", "song", "track", "one", "playing", "now", "ce", "cette", "cet", "ca",
+              "celui", "ci", "celle", "la", "le", "morceau", "titre", "chanson", "en", "cours", "actuel", "actuelle",
+              "qui", "joue", "it", "music", "musique", "what", "s", "i", "m", "listening", "to", "j", "ecoute"].contains($0)
+        }
+        return meaningful.isEmpty
+    }
+
+    /// Splits "radio Shiro Sagisu", "a mix like Cruel Angel's Thesis",
+    /// "des titres comme ce morceau" into the radio subject, or nil when the
+    /// request isn't a radio/similar request.
+    static func radioSubject(_ name: String) -> String? {
+        let normalized = " " + SiriText.normalize(name) + " "
+        let markers = [
+            " radio ", " station ", " similar to ", " similar ", " more like ", " like ", " based on ",
+            " inspired by ", " in the style of ", " sounds like ", " mix of ", " mix like ", " mix from ",
+            " comme ", " similaire a ", " similaires a ", " similaire ", " similaires ", " dans le style de ",
+            " dans le genre de ", " base sur ", " basee sur ", " inspire de ", " inspiree de ", " a partir de ",
+            " qui ressemble a ", " qui ressemblent a ", " du meme genre que ", " proche de ", " mix de ", " mix a partir de ",
+            " похожее на ", " похожие на ", " радио "
+        ]
+        guard let marker = markers.first(where: { normalized.contains($0) }) else { return nil }
+        var subject = normalized.replacingOccurrences(of: marker, with: " ")
+        for other in markers { subject = subject.replacingOccurrences(of: other, with: " ") }
+        let filler: Set<String> = ["play", "a", "an", "some", "me", "start", "songs", "music", "tracks", "mix", "the",
+                                   "joue", "mets", "lance", "moi", "un", "une", "des", "de", "du", "titres", "morceaux",
+                                   "chansons", "musique", "mix", "la", "le", "les", "plus", "more", "in", "on", "dans",
+                                   "sur", "cosmos", "similar"]
+        // Trim filler only at the edges: "Fly Me to the Moon" keeps its words.
+        var words = subject.split(separator: " ").map(String.init)
+        while let first = words.first, filler.contains(first) { words.removeFirst() }
+        while let last = words.last, filler.contains(last) { words.removeLast() }
+        return words.joined(separator: " ")
+    }
+
+    static var prefersFrench: Bool {
+        (Locale.preferredLanguages.first ?? "en").hasPrefix("fr")
+    }
+}
+
+// MARK: - On-device model tie-breaker (last resort, hard deadline)
+
 #if canImport(FoundationModels)
 @available(iOS 26.0, *)
-@MainActor
 private enum SiriLanguageModelSongMatcher {
+    static var isAvailable: Bool {
+        if case .available = SystemLanguageModel.default.availability { return true }
+        return false
+    }
+
     static func bestMatch(
         query: String,
         artistName: String?,
-        albumName: String?,
         candidates: [RankedSimpleTrack]
     ) async -> SimpleTrack? {
-        guard case .available = SystemLanguageModel.default.availability,
-              !candidates.isEmpty else { return nil }
-
-        let shortlist = Array(candidates.prefix(20))
+        guard isAvailable, !candidates.isEmpty else { return nil }
+        let shortlist = Array(candidates.prefix(8))
         let catalog = shortlist.enumerated().map { index, candidate in
-            let track = candidate.track
-            return "\(index): title=\(track.title) | artist=\(track.artistName ?? "unknown") | album=\(track.albumTitle ?? "unknown")"
+            "\(index): \(candidate.track.title) — \(candidate.track.artistName ?? "?")"
         }.joined(separator: "\n")
 
         let prompt = """
-        A person asked Siri to play a song from their private Cosmos library.
-        Spoken words can be misspelled or transcribed phonetically. Select the
-        one catalog entry that most likely means the requested song. Consider
-        title, artist, album, soundtrack/franchise names, abbreviations and
-        transcription mistakes. Never invent a song. If no entry is a
-        plausible match, answer NONE. Otherwise answer only its numeric index.
-
-        Requested title: \(query)
-        Artist hint: \(artistName ?? "none")
-        Album hint: \(albumName ?? "none")
-
-        Catalog:
+        Spoken request (may be misheard): \(query)\(artistName.map { " by \($0)" } ?? "")
+        Which numbered song is meant? Answer only the number, or NONE.
         \(catalog)
         """
-
         let session = LanguageModelSession()
-        guard let response = try? await session.respond(to: prompt) else { return nil }
+        let options = GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 4)
+        guard let response = try? await session.respond(to: prompt, options: options) else { return nil }
         let answer = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if answer.uppercased().contains("NONE") { return nil }
-        let index = answer
-            .split(whereSeparator: { !$0.isNumber })
-            .compactMap { Int($0) }
-            .first
-        guard let index, shortlist.indices.contains(index) else { return nil }
+        guard let index = answer.split(whereSeparator: { !$0.isNumber }).compactMap({ Int($0) }).first,
+              shortlist.indices.contains(index) else { return nil }
         SiriDiag.log("EXT LLM matched query=\(query) index=\(index) title=\(shortlist[index].track.title)")
         return shortlist[index].track
     }
 }
 #endif
 
-class IntentHandler: INExtension, INPlayMediaIntentHandling, INAddMediaIntentHandling {
+/// Resolves a continuation exactly once — whichever of work/deadline wins.
+private final class OnceBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+    init(_ continuation: CheckedContinuation<T, Never>) { self.continuation = continuation }
+    func resume(_ value: T) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
+    }
+}
 
-    private let database = ExtensionDatabaseAccess.shared
-
-    override func handler(for intent: INIntent) -> Any {
-        switch intent {
-        case is INPlayMediaIntent:
-            return self
-        default:
-            return self
+/// Returns `operation`'s value, or nil once `seconds` have passed. The
+/// operation is cancelled but not awaited, so a slow model can't hold Siri.
+private func withHardDeadline<T: Sendable>(
+    _ seconds: Double,
+    _ operation: @escaping @Sendable () async -> T?
+) async -> T? {
+    guard seconds > 0.05 else { return nil }
+    return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+        let box = OnceBox(continuation)
+        let work = Task.detached(priority: .userInitiated) {
+            box.resume(await operation())
+        }
+        Task.detached {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            box.resume(nil)
+            work.cancel()
         }
     }
+}
 
-    // MARK: - INPlayMediaIntentHandling
+// MARK: - Intent handler
+
+class IntentHandler: INExtension, INPlayMediaIntentHandling, INAddMediaIntentHandling {
+
+    /// Total wall-clock budget for one resolve, model included.
+    static let resolveBudget: Double = 2.5
+
+    override func handler(for intent: INIntent) -> Any {
+        // Start loading the library snapshot while Siri is still setting up
+        // the request; resolve waits on the same lock instead of starting
+        // from scratch. A no-op when the cached snapshot is current.
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = SiriLibraryCache.shared.snapshot()
+        }
+        return self
+    }
+
+    // MARK: INPlayMediaIntentHandling
 
     func resolveMediaItems(for intent: INPlayMediaIntent, with completion: @escaping ([INPlayMediaMediaItemResolutionResult]) -> Void) {
         // NOTE: Siri still routes by-name media requests here even when the
-        // assistant-schema App Intents are registered (verified on iOS 27.0
-        // beta, 2026-07-15) and does NOT fall back to the schema path if we
-        // return .unsupported — so this extension keeps serving all OS
-        // versions. Schema intents handle context-based and open-ended
-        // requests in parallel.
+        // assistant-schema App Intents are registered (verified on iOS 27.0)
+        // and does NOT fall back to the schema path on .unsupported.
         guard let mediaSearch = intent.mediaSearch else {
-            print("❌ No media search in intent")
-            completion([INPlayMediaMediaItemResolutionResult.unsupported()])
+            // "Play" with nothing else: keep listening / the whole library.
+            completion([.success(with: Self.item("music_all", Self.text("My Music", "Ma musique"), .music))])
             return
         }
+        let started = Date()
+        SiriDiag.log("EXT resolveMediaItems type=\(mediaSearch.mediaType.rawValue) name=\(mediaSearch.mediaName ?? "nil") artist=\(mediaSearch.artistName ?? "nil") album=\(mediaSearch.albumName ?? "nil") reference=\(mediaSearch.reference.rawValue) genres=\(mediaSearch.genreNames ?? []) moods=\(mediaSearch.moodNames ?? []) shuffled=\(intent.playShuffled.map { "\($0)" } ?? "nil") queue=\(intent.playbackQueueLocation.rawValue)")
 
-        print("🎤 resolveMediaItems called with search: type=\(mediaSearch.mediaType), name='\(mediaSearch.mediaName ?? "nil")'")
-        SiriDiag.log("EXT resolveMediaItems type=\(mediaSearch.mediaType.rawValue) name=\(mediaSearch.mediaName ?? "nil") artist=\(mediaSearch.artistName ?? "nil") album=\(mediaSearch.albumName ?? "nil") reference=\(mediaSearch.reference.rawValue)")
-
-        Task { @MainActor in
-            let mediaItems = await resolveActualMediaItems(from: mediaSearch)
-            print("🎤 resolveActualMediaItems returned \(mediaItems.count) items")
-
-            SiriDiag.log("EXT resolved \(mediaItems.count) items: \(mediaItems.map { $0.identifier ?? "nil" }.joined(separator: ","))")
-            if mediaItems.isEmpty {
+        let request = SiriRequest(search: mediaSearch, started: started)
+        Task.detached(priority: .userInitiated) {
+            let items = await request.resolve()
+            SiriDiag.log("EXT resolved \(items.count) items in \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(items.prefix(5).map { $0.identifier ?? "nil" }.joined(separator: ","))")
+            if items.isEmpty {
                 // A successful sentinel lets handling return a normal Siri
-                // failure response. Returning .unsupported makes Siri offer
-                // to "continue in Cosmos", even though opening the app cannot
-                // repair a genuinely missing library item.
-                let missing = INMediaItem(
-                    identifier: "cosmos_not_found",
-                    title: "I couldn't find that song in Cosmos",
-                    type: .song,
-                    artwork: nil,
-                    artist: nil
-                )
-                completion([INPlayMediaMediaItemResolutionResult.success(with: missing)])
-                return
+                // failure. Returning .unsupported makes Siri offer to
+                // "continue in Cosmos", which can't fix a missing item.
+                completion([.success(with: Self.item(
+                    "cosmos_not_found",
+                    Self.text("I couldn't find that in Cosmos", "Je n'ai pas trouvé ça dans Cosmos"),
+                    .song
+                ))])
+            } else {
+                completion(INPlayMediaMediaItemResolutionResult.successes(with: items))
             }
-            print("✅ Returning \(mediaItems.count) media items as successes")
-            completion(INPlayMediaMediaItemResolutionResult.successes(with: mediaItems))
         }
     }
 
-    // MARK: - INAddMediaIntentHandling ("add this song to favorites / to <playlist>")
+    func handle(intent: INPlayMediaIntent, completion: @escaping (INPlayMediaIntentResponse) -> Void) {
+        SiriDiag.log("EXT handle -> handleInApp items=\(intent.mediaItems?.prefix(5).compactMap { $0.identifier }.joined(separator: ",") ?? "none")")
+        if intent.mediaItems?.contains(where: { $0.identifier == "cosmos_not_found" }) == true {
+            completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            return
+        }
+        completion(INPlayMediaIntentResponse(code: .handleInApp, userActivity: createUserActivity(from: intent)))
+    }
+
+    // MARK: INAddMediaIntentHandling ("add this song to favorites / to <playlist>")
 
     func resolveMediaItems(for intent: INAddMediaIntent, with completion: @escaping ([INAddMediaMediaItemResolutionResult]) -> Void) {
         let mediaSearch = intent.mediaSearch
         SiriDiag.log("EXT AddMedia resolve name=\(mediaSearch?.mediaName ?? "nil") reference=\(mediaSearch?.reference.rawValue ?? -1)")
-
-        // A named song: match it in the library.
-        if let name = mediaSearch?.mediaName, mediaSearch?.reference != .currentlyPlaying {
-            let tracks = database.searchTracks(query: name)
-            if let track = tracks.first {
-                completion([INAddMediaMediaItemResolutionResult.success(with: INMediaItem(
-                    identifier: track.stableId,
-                    title: track.title,
-                    type: .song,
-                    artwork: nil,
-                    artist: nil
-                ))])
+        let name = mediaSearch?.mediaName
+        let isCurrent = mediaSearch?.reference == .currentlyPlaying || name.map(SiriPhrase.isCurrentReference) ?? true
+        Task.detached(priority: .userInitiated) {
+            if let name, !isCurrent,
+               let track = ExtensionDatabaseAccess.shared.searchTracks(query: name, artistName: mediaSearch?.artistName).first {
+                completion([.success(with: INMediaItem(identifier: track.stableId, title: track.title, type: .song, artwork: nil, artist: track.artistName))])
                 return
             }
+            // Default: the currently playing song (the app resolves it).
+            completion([.success(with: INMediaItem(identifier: "current_track", title: Self.text("Current Song", "Morceau en cours"), type: .song, artwork: nil, artist: nil))])
         }
-
-        // Default: the currently playing song (the app resolves it).
-        completion([INAddMediaMediaItemResolutionResult.success(with: INMediaItem(
-            identifier: "current_track",
-            title: "Current Song",
-            type: .song,
-            artwork: nil,
-            artist: nil
-        ))])
     }
 
     func handle(intent: INAddMediaIntent, completion: @escaping (INAddMediaIntentResponse) -> Void) {
@@ -502,370 +472,299 @@ class IntentHandler: INExtension, INPlayMediaIntentHandling, INAddMediaIntentHan
         completion(INAddMediaIntentResponse(code: .handleInApp, userActivity: nil))
     }
 
-    func handle(intent: INPlayMediaIntent, completion: @escaping (INPlayMediaIntentResponse) -> Void) {
-        SiriDiag.log("EXT handle -> handleInApp items=\(intent.mediaItems?.compactMap { $0.identifier }.joined(separator: ",") ?? "none")")
-        if intent.mediaItems?.contains(where: { $0.identifier == "cosmos_not_found" }) == true {
-            completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
-            return
-        }
-        // Return handleInApp to launch the main app and handle playback there
-        completion(INPlayMediaIntentResponse(code: .handleInApp, userActivity: createUserActivity(from: intent)))
+    // MARK: Helpers
+
+    static func text(_ english: String, _ french: String) -> String {
+        SiriPhrase.prefersFrench ? french : english
     }
 
-    // MARK: - Private Methods
-
-    @MainActor
-    private func smartSongMatches(from mediaSearch: INMediaSearch, query: String) async -> [SimpleTrack] {
-        let ranked = database.rankedTrackCandidates(
-            query: query,
-            artistName: mediaSearch.artistName,
-            albumName: mediaSearch.albumName
-        )
-        let bestScore = ranked.first?.score ?? 0
-        let cutoff = max(0.58, bestScore - 0.10)
-        let deterministic = ranked.prefix(5).filter { $0.score >= cutoff }.map(\.track)
-
-        // Exact or near-exact unique matches do not need model latency.
-        if bestScore >= 0.94, deterministic.count == 1 {
-            return deterministic
-        }
-
-#if canImport(FoundationModels)
-        if #available(iOS 26.0, *),
-           let modelMatch = await SiriLanguageModelSongMatcher.bestMatch(
-               query: query,
-               artistName: mediaSearch.artistName,
-               albumName: mediaSearch.albumName,
-               candidates: ranked
-           ) {
-            return [modelMatch]
-        }
-#endif
-
-        return deterministic
-    }
-
-    @MainActor
-    private func resolveActualMediaItems(from mediaSearch: INMediaSearch) async -> [INMediaItem] {
-        print("🎤 Resolving media for type: \(mediaSearch.mediaType), name: '\(mediaSearch.mediaName ?? "nil")', reference: \(mediaSearch.reference)")
-
-        // Log all search parameters for debugging
-        if let artistName = mediaSearch.artistName {
-            print("🎤 Artist name: '\(artistName)'")
-        }
-        if let albumName = mediaSearch.albumName {
-            print("🎤 Album name: '\(albumName)'")
-        }
-
-        // Enhanced debugging for playlists
-        if mediaSearch.mediaType == .playlist {
-            print("🎤 PLAYLIST DEBUG - mediaName: '\(mediaSearch.mediaName ?? "nil")', reference: \(mediaSearch.reference)")
-            if let mediaName = mediaSearch.mediaName {
-                print("🎤 PLAYLIST DEBUG - mediaName lowercased: '\(mediaName.lowercased())'")
-            }
-        }
-
-        // Check if this is a favorites request regardless of media type
-        if let mediaName = mediaSearch.mediaName {
-            let lowercased = mediaName.lowercased()
-            print("🔍 Checking if '\(mediaName)' is a favorites request...")
-
-            let englishFavoriteKeywords = [
-                "favorite", "favourite", "liked", "love", "loved",
-                "liked songs", "favorite songs", "favourite songs",
-                "my liked songs", "my favorite songs", "my favourite songs",
-                "my loved songs", "loved songs"
-            ]
-            // French keywords
-            let frenchFavoriteKeywords = [
-                "préféré", "prefere", "favori", "favoris", "aimé", "aime", "coup de coeur",
-                "chansons préférées", "mes chansons préférées", "chansons aimées",
-                "mes chansons aimées", "musique préférée", "ma musique préférée"
-            ]
-
-            let isFavorites = englishFavoriteKeywords.contains { lowercased.contains($0) } ||
-                             frenchFavoriteKeywords.contains { lowercased.contains($0) }
-
-            if isFavorites {
-                print("🎵 FAVORITES DETECTED: '\(mediaName)'")
-                let favoriteIds = database.getFavorites()
-                print("🎵 Found \(favoriteIds.count) favorite track IDs: \(favoriteIds)")
-
-                if !favoriteIds.isEmpty {
-                    let tracks = database.getTracksByStableIds(favoriteIds)
-                    print("🎵 Retrieved \(tracks.count) favorite tracks from database")
-                    return tracks.map { track in
-                        INMediaItem(
-                            identifier: track.stableId,
-                            title: track.title,
-                            type: .song,
-                            artwork: nil,
-                            artist: nil
-                        )
-                    }
-                } else {
-                    print("🎵 No favorites in database - returning empty to avoid playing all music")
-                    return [INMediaItem(
-                        identifier: "no_favorites",
-                        title: "No Favorites",
-                        type: .song,
-                        artwork: nil,
-                        artist: nil
-                    )]
-                }
-            }
-
-            // For "my songs" or "my music", return special identifier to play all music
-            // English variations
-            let englishMusicKeywords = ["my songs", "my music", "all my songs", "all my music"]
-            // French variations
-            let frenchMusicKeywords = ["ma musique", "mes chansons", "toute ma musique", "toutes mes chansons", "ma bibliothèque", "ma collection"]
-
-            let isAllMusic = englishMusicKeywords.contains(lowercased) || frenchMusicKeywords.contains(lowercased)
-
-            if isAllMusic {
-                print("🎵 MY SONGS/MUSIC DETECTED: '\(mediaName)' - will play all music")
-                return [INMediaItem(
-                    identifier: "music_all",
-                    title: "My Music",
-                    type: .music,
-                    artwork: nil
-                )]
-            }
-        }
-
-        // Also check for .my reference without media name - should play all music, not favorites
-        if mediaSearch.reference == .my && mediaSearch.mediaName == nil {
-            print("🎵 MY REFERENCE DETECTED without media name - will play all music")
-            return [INMediaItem(
-                identifier: "music_all",
-                title: "My Music",
-                type: .music,
-                artwork: nil
-            )]
-        }
-
-        switch mediaSearch.mediaType {
-        case .song:
-            if let songName = mediaSearch.mediaName {
-                let tracks = await smartSongMatches(from: mediaSearch, query: songName)
-                print("🎵 Found \(tracks.count) tracks for '\(songName)'")
-                return tracks.map { track in
-                    INMediaItem(
-                        identifier: track.stableId,
-                        title: track.title,
-                        type: .song,
-                        artwork: nil,
-                        artist: track.artistName
-                    )
-                }
-            } else if mediaSearch.reference == .my {
-                // "Play my songs" - should play all music
-                print("🎵 Playing my songs - will play all music")
-                return [INMediaItem(
-                    identifier: "music_all",
-                    title: "My Music",
-                    type: .music,
-                    artwork: nil
-                )]
-            } else {
-                return []
-            }
-
-        case .album:
-            if let albumName = mediaSearch.mediaName {
-                // The app database knows albums; resolve there.
-                return [INMediaItem(
-                    identifier: "search_album_\(albumName)",
-                    title: albumName,
-                    type: .album,
-                    artwork: nil
-                )]
-            }
-            return [INMediaItem(
-                identifier: "music_all",
-                title: "My Music",
-                type: .music,
-                artwork: nil
-            )]
-
-        case .artist:
-            if let artistName = mediaSearch.mediaName ?? mediaSearch.artistName {
-                // The app database knows artists; resolve there.
-                return [INMediaItem(
-                    identifier: "search_artist_\(artistName)",
-                    title: artistName,
-                    type: .artist,
-                    artwork: nil
-                )]
-            }
-            return [INMediaItem(
-                identifier: "music_all",
-                title: "My Music",
-                type: .music,
-                artwork: nil
-            )]
-
-        case .playlist:
-            if let playlistName = mediaSearch.mediaName {
-                // Handle French playlist keywords that might be passed as playlist names
-                let lowercased = playlistName.lowercased()
-                let frenchPlaylistKeywords = ["ma playlist", "ma liste de lecture", "mes playlists", "liste de lecture"]
-
-                // Check if this is a generic French playlist request
-                if frenchPlaylistKeywords.contains(lowercased) {
-                    print("📋 French 'my playlist' detected: '\(playlistName)'")
-                    let playlists = database.searchPlaylists(query: "")
-                    print("📋 Found \(playlists.count) playlists for French 'my playlist'")
-                    if !playlists.isEmpty {
-                        return [INMediaItem(
-                            identifier: "playlist_\(playlists[0].id ?? 0)",
-                            title: playlists[0].title,
-                            type: .playlist,
-                            artwork: nil
-                        )]
-                    }
-                    // Return generic "my playlist" item
-                    return [INMediaItem(
-                        identifier: "my_playlist",
-                        title: "Ma Playlist",
-                        type: .playlist,
-                        artwork: nil
-                    )]
-                } else {
-                    // Regular playlist name search
-                    let playlists = database.searchPlaylists(query: playlistName)
-                    print("📋 Found \(playlists.count) playlists for '\(playlistName)'")
-                    if !playlists.isEmpty {
-                        return playlists.map { playlist in
-                            INMediaItem(
-                                identifier: "playlist_\(playlist.id ?? 0)",
-                                title: playlist.title,
-                                type: .playlist,
-                                artwork: nil
-                            )
-                        }
-                    }
-
-                    // If no exact matches, return a search item
-                    return [INMediaItem(
-                        identifier: "search_playlist_\(playlistName)",
-                        title: playlistName,
-                        type: .playlist,
-                        artwork: nil
-                    )]
-                }
-            } else if mediaSearch.reference == .my {
-                let playlists = database.searchPlaylists(query: "")
-                print("📋 Found \(playlists.count) playlists for 'my playlist'")
-                if !playlists.isEmpty {
-                    return [INMediaItem(
-                        identifier: "playlist_\(playlists[0].id ?? 0)",
-                        title: playlists[0].title,
-                        type: .playlist,
-                        artwork: nil
-                    )]
-                }
-
-                // Return generic "my playlist" item
-                return [INMediaItem(
-                    identifier: "my_playlist",
-                    title: "My Playlist",
-                    type: .playlist,
-                    artwork: nil
-                )]
-            }
-            // Fallback for playlists - never return empty
-            return [INMediaItem(
-                identifier: "search_playlist_unknown",
-                title: "Playlist",
-                type: .playlist,
-                artwork: nil
-            )]
-
-        case .music:
-            print("🎵 Resolving 'play my music'")
-            return [INMediaItem(
-                identifier: "music_all",
-                title: "My Music",
-                type: .music,
-                artwork: nil
-            )]
-
-        default:
-            // iOS 27 Siri routinely sends mediaType == .unknown with only a
-            // spoken name — resolve by name across every kind instead of
-            // falling back to the whole library.
-            if let name = mediaSearch.mediaName ?? mediaSearch.artistName {
-                SiriDiag.log("EXT unknown-type name search: \(name)")
-                let tracks = await smartSongMatches(from: mediaSearch, query: name)
-                if !tracks.isEmpty {
-                    print("🎵 Unknown-type: matched \(tracks.count) tracks for '\(name)'")
-                    return tracks.map { track in
-                        INMediaItem(
-                            identifier: track.stableId,
-                            title: track.title,
-                            type: .song,
-                            artwork: nil,
-                            artist: track.artistName
-                        )
-                    }
-                }
-                let playlists = database.searchPlaylists(query: name)
-                if let playlist = playlists.first {
-                    print("📋 Unknown-type: matched playlist '\(playlist.title)' for '\(name)'")
-                    return [INMediaItem(
-                        identifier: "playlist_\(playlist.id ?? 0)",
-                        title: playlist.title,
-                        type: .playlist,
-                        artwork: nil
-                    )]
-                }
-                // Do not manufacture a successful item for a failed lookup.
-                // That forces Siri to launch the app and say "continue in
-                // Cosmos" even though there is no matching library content.
-                return []
-            }
-            print("❌ Unsupported media type with no name: \(mediaSearch.mediaType)")
-            return [INMediaItem(
-                identifier: "music_all",
-                title: "Music",
-                type: .music,
-                artwork: nil
-            )]
-        }
+    static func item(_ identifier: String, _ title: String, _ type: INMediaItemType, artist: String? = nil) -> INMediaItem {
+        INMediaItem(identifier: identifier, title: title, type: type, artwork: nil, artist: artist)
     }
 
     private func createUserActivity(from intent: INPlayMediaIntent) -> NSUserActivity {
         let activity = NSUserActivity(activityType: "com.cosmos.music.play")
-
         if let mediaSearch = intent.mediaSearch {
             var userInfo: [String: Any] = [:]
-
             userInfo["mediaType"] = mediaSearch.mediaType.rawValue
-
-            if let mediaName = mediaSearch.mediaName {
-                userInfo["mediaName"] = mediaName
-            }
-
-            if let artistName = mediaSearch.artistName {
-                userInfo["artistName"] = artistName
-            }
-
-            if let albumName = mediaSearch.albumName {
-                userInfo["albumName"] = albumName
-            }
-
+            if let mediaName = mediaSearch.mediaName { userInfo["mediaName"] = mediaName }
+            if let artistName = mediaSearch.artistName { userInfo["artistName"] = artistName }
+            if let albumName = mediaSearch.albumName { userInfo["albumName"] = albumName }
             userInfo["reference"] = mediaSearch.reference.rawValue
-
             if let mediaItems = intent.mediaItems {
-                let identifiers = mediaItems.compactMap { $0.identifier }
-                userInfo["mediaIdentifiers"] = identifiers
+                userInfo["mediaIdentifiers"] = mediaItems.compactMap { $0.identifier }
             }
-
             activity.userInfo = userInfo
         }
-
         return activity
+    }
+}
+
+// MARK: - One request's resolution
+
+private struct SiriRequest: @unchecked Sendable {
+    let search: INMediaSearch
+    let started: Date
+
+    private typealias Handler = IntentHandler
+
+    private func remaining() -> Double {
+        Handler.resolveBudget - Date().timeIntervalSince(started)
+    }
+
+    /// Strips "… on Cosmos" / "… dans Cosmos" that Siri sometimes leaves in.
+    private static func cleaned(_ raw: String?) -> String? {
+        guard var name = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+        for suffix in [" on cosmos", " in cosmos", " dans cosmos", " sur cosmos", " avec cosmos", " from cosmos", " de cosmos", " cosmos"] {
+            if name.lowercased().hasSuffix(suffix) { name = String(name.dropLast(suffix.count)) }
+        }
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
+    func resolve() async -> [INMediaItem] {
+        let name = Self.cleaned(search.mediaName)
+        let artistHint = Self.cleaned(search.artistName)
+        let type = search.mediaType
+
+        // 1. "Play more like this" / "play this artist".
+        if search.reference == .currentlyPlaying {
+            if type == .artist {
+                return [Handler.item("artist_current", Handler.text("This artist", "Cet artiste"), .artist)]
+            }
+            return [Handler.item("radio_current", Handler.text("Songs like this one", "Titres similaires"), .station)]
+        }
+
+        // 2. No name at all.
+        guard let name else {
+            if let artistHint {
+                return resolveArtist(artistHint, fallbackToName: true)
+            }
+            let moods = (search.moodNames ?? []) + (search.genreNames ?? [])
+            if !moods.isEmpty {
+                let text = moods.joined(separator: " ")
+                return [Handler.item("generate_\(text)", text, .music)]
+            }
+            if type == .playlist {
+                // "Play my playlist" → the most recently played one.
+                let snapshot = SiriLibraryCache.shared.snapshot()
+                if let playlist = snapshot.playlists.first {
+                    return [Handler.item("playlist_\(playlist.id)", playlist.name, .playlist)]
+                }
+            }
+            return [Handler.item("music_all", Handler.text("My Music", "Ma musique"), .music)]
+        }
+
+        let snapshot = SiriLibraryCache.shared.snapshot()
+        let ranker = SiriRanker(snapshot: snapshot)
+        let key = SiriKey(name)
+
+        // 3. Exact names win over keyword guesses ("Love", "Radio Gaga").
+        if let mix = ranker.bestMix(key), mix.score >= 0.97 {
+            return [Handler.item("mix_\(mix.record.id)", mix.record.title, .playlist)]
+        }
+        if let playlist = ranker.bestNamed(key, in: snapshot.playlists), playlist.score >= 0.97 {
+            return [Handler.item("playlist_\(playlist.row.id)", playlist.row.name, .playlist)]
+        }
+        let exactTrack = snapshot.tracks.first { $0.title.text == key.text }
+
+        // 4. Keyword requests.
+        if exactTrack == nil {
+            switch SiriPhrase.moment(name) {
+            case .now?:
+                return [Handler.item("mode_now", Handler.text("Something for now", "Quelque chose pour maintenant"), .music)]
+            case .tonight?:
+                return [Handler.item("mode_tonight", Handler.text("Something for tonight", "Quelque chose pour ce soir"), .music)]
+            case nil:
+                break
+            }
+            if SiriPhrase.isLikedSongs(name) {
+                return [Handler.item("liked_songs", Handler.text("Liked Songs", "Titres likés"), .playlist)]
+            }
+            if SiriPhrase.isAllMusic(name) {
+                return [Handler.item("music_all", Handler.text("My Music", "Ma musique"), .music)]
+            }
+            if let shelf = SiriPhrase.mixShelf(name) {
+                if let mix = ranker.bestMix(key), mix.score >= 0.85 {
+                    return [Handler.item("mix_\(mix.record.id)", mix.record.title, .playlist)]
+                }
+                switch shelf {
+                case .madeForYou:
+                    return [Handler.item("mixkind_madeForYou", Handler.text("Made for You", "Pour vous"), .playlist)]
+                case .rediscover:
+                    return [Handler.item("mixkind_rediscover", Handler.text("Rediscover", "Redécouvrir"), .playlist)]
+                }
+            }
+            let isStation = [.musicStation, .radioStation, .station, .algorithmicRadioStation].contains(type)
+            if let subject = SiriPhrase.radioSubject(name) ?? (isStation ? name : nil) {
+                if let radio = await resolveRadio(subject: subject, artistHint: artistHint, ranker: ranker) {
+                    return radio
+                }
+            }
+        }
+
+        // 5. Typed requests.
+        switch type {
+        case .song:
+            let songs = await songMatches(name, artistHint: artistHint, ranker: ranker)
+            if !songs.isEmpty { return songs }
+            return await resolveUntyped(name, artistHint: artistHint, ranker: ranker, snapshot: snapshot)
+
+        case .album:
+            if let album = ranker.bestNamed(key, in: snapshot.albums), album.score >= 0.75 {
+                return [Handler.item("album_\(album.row.id)", album.row.name, .album)]
+            }
+            return await resolveUntyped(name, artistHint: artistHint, ranker: ranker, snapshot: snapshot)
+
+        case .artist:
+            let artists = resolveArtist(name, fallbackToName: false)
+            if !artists.isEmpty { return artists }
+            return await resolveUntyped(name, artistHint: artistHint, ranker: ranker, snapshot: snapshot)
+
+        case .playlist:
+            if let mix = ranker.bestMix(key), mix.score >= 0.85 {
+                return [Handler.item("mix_\(mix.record.id)", mix.record.title, .playlist)]
+            }
+            if let playlist = ranker.bestNamed(key, in: snapshot.playlists), playlist.score >= 0.7 {
+                return [Handler.item("playlist_\(playlist.row.id)", playlist.row.name, .playlist)]
+            }
+            let generic = ["ma playlist", "ma liste de lecture", "mes playlists", "liste de lecture", "my playlist", "playlist"]
+            if generic.contains(key.text), let playlist = snapshot.playlists.first {
+                return [Handler.item("playlist_\(playlist.id)", playlist.name, .playlist)]
+            }
+            return await resolveUntyped(name, artistHint: artistHint, ranker: ranker, snapshot: snapshot)
+
+        case .music:
+            // "Play some <name> music": a library match, else a mood mix.
+            let found = await resolveUntyped(name, artistHint: artistHint, ranker: ranker, snapshot: snapshot)
+            return found.isEmpty ? [Handler.item("generate_\(name)", name, .music)] : found
+
+        case .genre:
+            return [Handler.item("generate_\(name)", name, .music)]
+
+        default:
+            return await resolveUntyped(name, artistHint: artistHint, ranker: ranker, snapshot: snapshot)
+        }
+    }
+
+    private func resolveArtist(_ spoken: String, fallbackToName: Bool) -> [INMediaItem] {
+        let ranker = SiriRanker(snapshot: SiriLibraryCache.shared.snapshot())
+        if let best = ranker.bestArtist(SiriKey(spoken)), best.score >= 0.7 {
+            // The app re-matches the spoken name fuzzily, all spellings together.
+            return [Handler.item("search_artist_\(spoken)", best.name, .artist)]
+        }
+        return fallbackToName ? [Handler.item("search_artist_\(spoken)", spoken, .artist)] : []
+    }
+
+    private func resolveRadio(subject: String, artistHint: String?, ranker: SiriRanker) async -> [INMediaItem]? {
+        if SiriPhrase.isCurrentReference(subject) {
+            return [Handler.item("radio_current", Handler.text("Songs like this one", "Titres similaires"), .station)]
+        }
+        let key = SiriKey(subject)
+        let artist = ranker.bestArtist(key)
+        let songs = ranker.rankTracks(query: key, artist: artistHint.map(SiriKey.init), album: nil, limit: 3)
+        let songScore = songs.first?.score ?? 0
+        if let artist, artist.score >= 0.8, artist.score >= songScore - 0.02 {
+            return [Handler.item("radio_artist_\(subject)", artist.name, .station)]
+        }
+        if let song = songs.first, songScore >= SiriRanker.songThreshold {
+            return [Handler.item("radio_song_\(song.track.stableId)", song.track.title, .station, artist: song.track.artistName)]
+        }
+        if let artist, artist.score >= 0.7 {
+            return [Handler.item("radio_artist_\(subject)", artist.name, .station)]
+        }
+        return nil
+    }
+
+    /// Untyped requests (iOS 27 Siri sends most by-name requests as
+    /// mediaType .unknown): pick the kind whose best match is strongest.
+    private func resolveUntyped(_ name: String, artistHint: String?, ranker: SiriRanker, snapshot: SiriLibrarySnapshot) async -> [INMediaItem] {
+        let key = SiriKey(name)
+        let ranked = ranker.rankTracks(query: key, artist: artistHint.map(SiriKey.init), album: nil)
+        let songScore = ranked.first?.score ?? 0
+        let artist = ranker.bestArtist(key)
+        let artistScore = artist?.score ?? 0
+        let album = ranker.bestNamed(key, in: snapshot.albums)
+        let playlist = ranker.bestNamed(key, in: snapshot.playlists)
+        let mix = ranker.bestMix(key)
+        SiriDiag.log("EXT untyped '\(name)' song=\(String(format: "%.2f", songScore)) artist=\(String(format: "%.2f", artistScore)) album=\(String(format: "%.2f", album?.score ?? 0)) playlist=\(String(format: "%.2f", playlist?.score ?? 0)) mix=\(String(format: "%.2f", mix?.score ?? 0))")
+
+        // An exact playlist/mix/album name is what was asked for.
+        if let playlist, playlist.score >= 0.97 {
+            return [Handler.item("playlist_\(playlist.row.id)", playlist.row.name, .playlist)]
+        }
+        if let mix, mix.score >= 0.97 {
+            return [Handler.item("mix_\(mix.record.id)", mix.record.title, .playlist)]
+        }
+        // An artist's name, even misheard ("Shiva Sagisu"), is an artist
+        // request unless a song title matches clearly better.
+        if let artist, artistScore >= 0.8, artistScore >= songScore - 0.02 {
+            return [Handler.item("search_artist_\(name)", artist.name, .artist)]
+        }
+        if let album, album.score >= 0.97, album.score >= songScore {
+            return [Handler.item("album_\(album.row.id)", album.row.name, .album)]
+        }
+        let songs = await songMatches(name, artistHint: artistHint, ranker: ranker, preRanked: ranked)
+        if !songs.isEmpty { return songs }
+        if let playlist, playlist.score >= 0.75 {
+            return [Handler.item("playlist_\(playlist.row.id)", playlist.row.name, .playlist)]
+        }
+        if let mix, mix.score >= 0.8 {
+            return [Handler.item("mix_\(mix.record.id)", mix.record.title, .playlist)]
+        }
+        if let album, album.score >= 0.75 {
+            return [Handler.item("album_\(album.row.id)", album.row.name, .album)]
+        }
+        if let artist, artistScore >= 0.7 {
+            return [Handler.item("search_artist_\(name)", artist.name, .artist)]
+        }
+        // Nothing in the library carries this name: treat the words as a
+        // description ("something calm", "du piano") and build a mix from
+        // them, rather than answering that nothing was found.
+        if SiriKey(name).text.count >= 3 {
+            SiriDiag.log("EXT untyped '\(name)' matched nothing; building a mix from the words")
+            return [Handler.item("generate_\(name)", name, .music)]
+        }
+        return []
+    }
+
+    /// Deterministic song ranking; the on-device model only breaks a real
+    /// tie, within what's left of the request's budget.
+    private func songMatches(
+        _ query: String,
+        artistHint: String?,
+        ranker: SiriRanker,
+        preRanked: [RankedSimpleTrack]? = nil
+    ) async -> [INMediaItem] {
+        let ranked = preRanked ?? ranker.rankTracks(query: SiriKey(query), artist: artistHint.map(SiriKey.init), album: nil)
+        let best = ranked.first?.score ?? 0
+        let cutoff = max(SiriRanker.songThreshold, best - 0.10)
+        var deterministic = ranked.prefix(5).filter { $0.score >= cutoff }.map(\.track)
+
+        let second = ranked.dropFirst().first { $0.track.title != ranked.first?.track.title }?.score ?? 0
+        let confident = best >= SiriRanker.confidentScore && best - second >= 0.05
+        let plausible = ranked.filter { $0.score >= 0.5 }
+
+        if !confident, plausible.count > 1 {
+#if canImport(FoundationModels)
+            if #available(iOS 26.0, *), SiriLanguageModelSongMatcher.isAvailable {
+                let budget = min(remaining(), 2.0)
+                let shortlist = Array(plausible.prefix(8))
+                let modelStart = Date()
+                let pick = await withHardDeadline(budget) {
+                    await SiriLanguageModelSongMatcher.bestMatch(query: query, artistName: artistHint, candidates: shortlist)
+                }
+                SiriDiag.log("EXT model step \(pick == nil ? "no answer" : "answered") in \(String(format: "%.2f", Date().timeIntervalSince(modelStart)))s (budget \(String(format: "%.2f", budget))s)")
+                if let pick {
+                    deterministic.removeAll { $0.stableId == pick.stableId }
+                    deterministic.insert(pick, at: 0)
+                }
+            }
+#endif
+        }
+
+        return deterministic.map { track in
+            Handler.item(track.stableId, track.title, .song, artist: track.artistName)
+        }
     }
 }

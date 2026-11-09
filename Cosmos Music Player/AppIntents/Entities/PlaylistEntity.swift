@@ -79,18 +79,30 @@ struct PlaylistQuery {
 @available(iOS 27.0, *)
 extension PlaylistQuery: EntityQuery {
     func entities(for identifiers: [PlaylistEntity.ID]) async throws -> [PlaylistEntity] {
-        try await store.playlistEntities(for: identifiers)
+        do {
+            return try await store.playlistEntities(for: identifiers)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "PlaylistQuery.entities")
+        }
     }
 
     func suggestedEntities() async throws -> [PlaylistEntity] {
-        try await store.allPlaylistEntities()
+        do {
+            return try await store.allPlaylistEntities()
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "PlaylistQuery.suggestedEntities")
+        }
     }
 }
 
 @available(iOS 27.0, *)
 extension PlaylistQuery: EntityStringQuery {
     func entities(matching string: String) async throws -> [PlaylistEntity] {
-        try await store.playlistEntities(matching: string)
+        do {
+            return try await store.playlistEntities(matching: string)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "PlaylistQuery.entities")
+        }
     }
 }
 

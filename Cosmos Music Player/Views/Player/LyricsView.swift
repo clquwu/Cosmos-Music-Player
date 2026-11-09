@@ -7,6 +7,36 @@
 
 import SwiftUI
 import UIKit
+import QuartzCore
+
+// MARK: - Clock
+
+/// The song position the lyrics should show at a given host instant.
+///
+/// The player's published position moves four times a second and reports
+/// what the engine has *rendered*, not what is being heard. Lines therefore
+/// changed up to a quarter-second late, word sweeps stepped, and on Bluetooth
+/// or AirPlay everything ran early by the route's latency. This extrapolates
+/// from the engine's anchor every frame and subtracts the output delay; the
+/// user's per-song offset goes on top.
+struct LyricsClock: Equatable {
+    var anchor: PlaybackAnchor
+    var outputDelay: TimeInterval
+    /// Positive shows the lyrics earlier; see `Lyrics.userOffset`.
+    var userOffset: TimeInterval
+    var duration: TimeInterval
+
+    var isRunning: Bool { anchor.rate > 0 }
+
+    func unclampedTime(at host: CFTimeInterval) -> TimeInterval {
+        anchor.heardTime(at: host, outputDelay: outputDelay) + userOffset
+    }
+
+    func time(at host: CFTimeInterval = CACurrentMediaTime()) -> TimeInterval {
+        let time = max(unclampedTime(at: host), 0)
+        return duration > 0 ? min(time, duration) : time
+    }
+}
 
 // MARK: - Row model
 
@@ -355,6 +385,37 @@ private enum LyricRowBuilder {
     }
 }
 
+// MARK: - Embedding
+
+private struct LyricsFadeToTransparentKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Set when the lyrics sit over something other than their own black
+    /// background, so their edges fade out rather than to black.
+    var lyricsFadeToTransparent: Bool {
+        get { self[LyricsFadeToTransparentKey.self] }
+        set { self[LyricsFadeToTransparentKey.self] = newValue }
+    }
+}
+
+/// Opaque in the middle, clear at the top and bottom edges.
+private struct LyricsFadeMask: View {
+    let top: CGFloat
+    let bottom: CGFloat
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                .frame(height: top)
+            Color.black
+            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: bottom)
+        }
+    }
+}
+
 // MARK: - Lyrics View
 
 struct LyricsView: View {
@@ -371,29 +432,58 @@ struct LyricsView: View {
     var loadAlternatives: (() async -> [LyricsManager.LyricsCandidate])? = nil
     /// Adopts one of them.
     var onSelectAlternative: ((Int) -> Void)? = nil
+    /// Shown inside the player rather than as its own screen: no background
+    /// or title bar of its own, and edges that fade to transparent so the
+    /// player's colour shows through instead of black bands.
+    var isEmbedded: Bool = false
 
     @State private var settings = DeleteSettings.load()
     @State private var showVersionPicker = false
+    /// This song's timing correction; see `Lyrics.userOffset`. Read from the
+    /// lyrics manager rather than from `lyrics`, because the player keeps its
+    /// own copy of the lyrics and that copy never sees later adjustments.
+    @State private var userOffset: TimeInterval = 0
+    @State private var showTimingControls = false
+    /// The playback anchor. The player already re-renders this view on every
+    /// position tick; the anchor itself only changes on play/pause, seeks and
+    /// drift corrections.
+    @ObservedObject private var progress = PlayerEngine.shared.progress
     @Environment(\.dismiss) var dismiss
 
     @ScaledMetric(relativeTo: .body) private var plainFontSize: CGFloat = 21
 
-    private var accent: Color { settings.backgroundColorChoice.color }
+    @Environment(\.playerAccent) private var playerAccent
+
+    /// Inside the player, the player's own colour - the cover's, or the
+    /// theme's when the backdrop uses it; elsewhere the theme colour.
+    private var accent: Color { playerAccent ?? settings.backgroundColorChoice.color }
+    private var fadeToTransparent: Bool { isEmbedded }
 
     var body: some View {
         ZStack {
-            backgroundLayers
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                header
+            if isEmbedded {
                 content
-                    // The lyrics run to the physical bottom of the screen, not
-                    // to the safe-area line. Respecting it left the scroll view
-                    // - and so the fade that softens its edge - stopping short
-                    // above the home indicator, which read as a black band
-                    // ending in mid-air with live text below it.
-                    .ignoresSafeArea(edges: .bottom)
+                    .environment(\.lyricsFadeToTransparent, true)
+                    .overlay(alignment: .topTrailing) {
+                        if copyableText != nil || loadAlternatives != nil {
+                            actionsMenu
+                                .padding(.top, Design.Spacing.s)
+                        }
+                    }
+            } else {
+                backgroundLayers
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    header
+                    content
+                        // The lyrics run to the physical bottom of the screen, not
+                        // to the safe-area line. Respecting it left the scroll view
+                        // - and so the fade that softens its edge - stopping short
+                        // above the home indicator, which read as a black band
+                        // ending in mid-air with live text below it.
+                        .ignoresSafeArea(edges: .bottom)
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -415,6 +505,77 @@ struct LyricsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
             settings = DeleteSettings.load()
         }
+        // Keyed on the lyrics' shape too, so adopting another lrclib version
+        // (which starts with no offset of its own) reloads it.
+        .task(id: offsetTaskKey) {
+            guard let trackId else {
+                userOffset = 0
+                return
+            }
+            userOffset = await LyricsManager.shared.userOffset(for: trackId) ?? 0
+        }
+    }
+
+    // MARK: - Timing
+
+    /// These lyrics are always the current track's.
+    private var trackId: String? { PlayerEngine.shared.currentTrack?.stableId }
+
+    private var offsetTaskKey: String {
+        let shape = lyrics.map { "\($0.source.rawValue)-\($0.syncedLyrics.count)-\($0.plainLyrics.count)" } ?? "none"
+        return "\(trackId ?? "")|\(shape)"
+    }
+
+    private var clock: LyricsClock {
+        LyricsClock(
+            anchor: progress.anchor,
+            outputDelay: progress.outputDelay,
+            userOffset: userOffset,
+            duration: PlayerEngine.shared.duration
+        )
+    }
+
+    private var hasSyncedLyrics: Bool {
+        guard let lyrics, !isLoading, !lyrics.isInstrumental else { return false }
+        return !lyrics.syncedLyrics.isEmpty
+    }
+
+    /// Far beyond any real misalignment; only stops a runaway calibration.
+    private static let maximumOffset: TimeInterval = 30
+
+    private func setUserOffset(_ value: TimeInterval) {
+        let clamped = min(max(value, -Self.maximumOffset), Self.maximumOffset)
+        let rounded = (clamped * 100).rounded() / 100
+        guard rounded != userOffset else { return }
+        userOffset = rounded
+
+        guard let trackId else { return }
+        Task { await LyricsManager.shared.setUserOffset(rounded, for: trackId) }
+    }
+
+    /// Shifts the lyrics so the line nearest to now - the highlighted one, or
+    /// the one about to be - starts at `host`, the instant the user tapped.
+    /// Only those two are considered: the user is reacting to what they hear,
+    /// and a line further away means they tapped on a gap, not a start.
+    private func calibrate(at host: CFTimeInterval) {
+        guard let lyrics else { return }
+        let starts = lyrics.syncedLyrics
+            .filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+            .compactMap(\.timestamp)
+        guard !starts.isEmpty else { return }
+
+        let now = clock.unclampedTime(at: host)
+        var candidates: [TimeInterval] = []
+        if let current = starts.lastIndex(where: { $0 <= now }) {
+            candidates.append(starts[current])
+            if current + 1 < starts.count { candidates.append(starts[current + 1]) }
+        } else {
+            candidates.append(starts[0])
+        }
+
+        guard let target = candidates.min(by: { abs($0 - now) < abs($1 - now) }) else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        setUserOffset(userOffset + (target - now))
     }
 
     // MARK: - Background
@@ -500,7 +661,7 @@ struct LyricsView: View {
                 if let subtitle = headerSubtitle {
                     Text(subtitle)
                         .font(.footnote)
-                        .foregroundColor(.white.opacity(0.55))
+                        .foregroundColor(.white.opacity(PlayerPalette.secondaryTextOpacity))
                         .lineLimit(1)
                 }
             }
@@ -509,26 +670,7 @@ struct LyricsView: View {
             Spacer(minLength: 8)
 
             if copyableText != nil || loadAlternatives != nil {
-                Menu {
-                    if copyableText != nil {
-                        Button {
-                            copyLyrics()
-                        } label: {
-                            Label(Localized.lyricsCopy, systemImage: "doc.on.doc")
-                        }
-                    }
-
-                    if loadAlternatives != nil {
-                        Button {
-                            showVersionPicker = true
-                        } label: {
-                            Label(Localized.lyricsChooseVersion, systemImage: "text.line.first.and.arrowtriangle.forward")
-                        }
-                    }
-                } label: {
-                    headerCircle(systemImage: "ellipsis")
-                }
-                .accessibilityLabel(Localized.lyricsMoreActions)
+                actionsMenu
             }
 
             Button {
@@ -565,6 +707,41 @@ struct LyricsView: View {
                 }
             }
         )
+    }
+
+    private var actionsMenu: some View {
+        Menu {
+            if copyableText != nil {
+                Button {
+                    copyLyrics()
+                } label: {
+                    Label(Localized.lyricsCopy, systemImage: "doc.on.doc")
+                }
+            }
+
+            if loadAlternatives != nil {
+                Button {
+                    showVersionPicker = true
+                } label: {
+                    Label(Localized.lyricsChooseVersion, systemImage: "text.line.first.and.arrowtriangle.forward")
+                }
+            }
+
+            if hasSyncedLyrics {
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        showTimingControls.toggle()
+                    }
+                } label: {
+                    Label(Localized.lyricsAdjustTiming, systemImage: "timer")
+                }
+            }
+        } label: {
+            headerCircle(systemImage: "ellipsis")
+                .frame(width: Design.Size.minTouch, height: Design.Size.minTouch)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(Localized.lyricsMoreActions)
     }
 
     private func headerCircle(systemImage: String) -> some View {
@@ -611,9 +788,34 @@ struct LyricsView: View {
                 SyncedLyricsScroller(
                     lines: lyrics.syncedLyrics,
                     currentTime: currentTime,
+                    clock: clock,
                     accent: accent,
-                    onSeek: onSeek
+                    bottomClearance: showTimingControls ? LyricsTimingPanel.reservedHeight : 0,
+                    // A tapped line should light up the moment its audio is
+                    // heard, so the seek lands where the corrected clock - not
+                    // the file's raw timestamp - says that line begins.
+                    onSeek: onSeek.map { seek -> (TimeInterval) -> Void in
+                        { [userOffset] time in seek(max(0, time - userOffset)) }
+                    }
                 )
+                .overlay(alignment: .bottom) {
+                    if showTimingControls {
+                        LyricsTimingPanel(
+                            offset: userOffset,
+                            accent: accent,
+                            canCalibrate: clock.isRunning,
+                            onAdjust: { delta in setUserOffset(userOffset + delta) },
+                            onCalibrate: { host in calibrate(at: host) },
+                            onReset: { setUserOffset(0) },
+                            onDone: {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                    showTimingControls = false
+                                }
+                            }
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
             } else if !lyrics.plainLyrics.isEmpty {
                 plainLyricsView(lyrics.plainLyrics)
             } else {
@@ -668,9 +870,18 @@ struct LyricsView: View {
                 .padding(.bottom, 130)
             }
             .scrollIndicators(.hidden)
+            .mask {
+                if fadeToTransparent {
+                    LyricsFadeMask(top: 60, bottom: 90)
+                } else {
+                    Color.black
+                }
+            }
 
-            edgeFades(top: 90, bottom: 150)
-                .allowsHitTesting(false)
+            if !fadeToTransparent {
+                edgeFades(top: 90, bottom: 150)
+                    .allowsHitTesting(false)
+            }
         }
     }
 
@@ -733,8 +944,13 @@ struct LyricsView: View {
 
 private struct SyncedLyricsScroller: View {
     let lines: [LyricsLine]
+    /// The player's 4Hz position. Only the browse-resume countdown uses it;
+    /// everything drawn in time with the music reads `clock`.
     let currentTime: TimeInterval
+    let clock: LyricsClock
     let accent: Color
+    /// Room kept free at the bottom for the timing panel.
+    var bottomClearance: CGFloat = 0
     let onSeek: ((TimeInterval) -> Void)?
 
     /// How long after the user stops scrolling before the view takes the
@@ -743,6 +959,7 @@ private struct SyncedLyricsScroller: View {
     private static let resumeDelay: TimeInterval = 4
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.lyricsFadeToTransparent) private var fadeToTransparent
 
     @ScaledMetric(relativeTo: .title2) private var activeFontSize: CGFloat = 28
     @ScaledMetric(relativeTo: .body) private var nearFontSize: CGFloat = 21
@@ -764,8 +981,29 @@ private struct SyncedLyricsScroller: View {
     @State private var isTouching = false
     @State private var lastInteraction = Date.distantPast
 
-    private var activeIndex: Int? {
-        LyricRowBuilder.activeIndex(in: rows, at: currentTime)
+    /// The row being sung, kept current every frame by `activeRowTracker`
+    /// rather than recomputed from the 4Hz position, which held each new line
+    /// back by up to a quarter of a second.
+    @State private var activeIndex: Int?
+
+    /// How often the clock is checked for the next line: twenty times a
+    /// second places a line change within 50 ms of the voice. Lines light up
+    /// whole now - the word-by-word sweep redrew the text every frame and
+    /// made this the heaviest screen in the app.
+    private static let frameInterval: TimeInterval = 1.0 / 20
+
+    /// Publishes row changes the frame they happen. Paused with playback, when
+    /// a seek arrives as a new anchor and re-evaluates it anyway.
+    private var activeRowTracker: some View {
+        TimelineView(.animation(minimumInterval: Self.frameInterval, paused: !clock.isRunning)) { _ in
+            let index = LyricRowBuilder.activeIndex(in: rows, at: clock.time())
+            Color.clear
+                .onChange(of: index, initial: true) { _, newValue in
+                    activeIndex = newValue
+                }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     var body: some View {
@@ -791,9 +1029,18 @@ private struct SyncedLyricsScroller: View {
                     .onScrollPhaseChange { _, phase in
                         handle(phase)
                     }
+                    .mask {
+                        if fadeToTransparent {
+                            LyricsFadeMask(top: 100, bottom: 120)
+                        } else {
+                            Color.black
+                        }
+                    }
 
-                    edgeFades
-                        .allowsHitTesting(false)
+                    if !fadeToTransparent {
+                        edgeFades
+                            .allowsHitTesting(false)
+                    }
 
                     if isBrowsing {
                         resumeButton(proxy: proxy)
@@ -802,13 +1049,15 @@ private struct SyncedLyricsScroller: View {
                             // its parent ignores it - so this clearance is a
                             // constant. 40pt clears the indicator and merely
                             // sits a little high on devices without one.
-                            .padding(.bottom, 40)
+                            .padding(.bottom, 40 + bottomClearance)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
-                .onChange(of: activeIndex) { _, newValue in
+                .background(activeRowTracker)
+                .onChange(of: activeIndex) { oldValue, newValue in
                     guard !isBrowsing, !isTouching else { return }
-                    scroll(toRowAt: newValue, proxy: proxy, animated: true)
+                    // The first placement is a jump, not a glide down from the top.
+                    scroll(toRowAt: newValue, proxy: proxy, animated: oldValue != nil)
                 }
                 .onChange(of: currentTime) { _, _ in
                     // The playback tick doubles as the resume clock: no timer to
@@ -852,126 +1101,38 @@ private struct SyncedLyricsScroller: View {
         Group {
             switch row.kind {
             case .line(let text):
-                LyricLineText(
-                    text: text,
-                    font: .system(
+                // Phrase by phrase: the sung line is lit as a whole, with a
+                // soft glow in the player's colour; nothing redraws while it
+                // is sung.
+                Text(text)
+                    .font(.system(
                         size: fontSize(isActive: isActive, distance: distance),
                         weight: weight(isActive: isActive, distance: distance)
-                    ),
-                    sweep: isActive ? lineSweep(row) : nil,
-                    accent: accent,
-                    reduceMotion: reduceMotion
-                )
+                    ))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .shadow(color: isActive ? accent.opacity(0.45) : .clear, radius: 12)
             case .gap:
-                LyricsBreakIndicator(
-                    progress: breakProgress(row),
-                    isActive: isActive,
-                    accent: accent
-                )
+                // The dots of an instrumental break still fill in time, but
+                // slowly - a few redraws a second, only while it is the one
+                // playing.
+                TimelineView(.animation(minimumInterval: 1.0 / 8, paused: !(isActive && clock.isRunning))) { _ in
+                    LyricsBreakIndicator(
+                        progress: breakProgress(row, at: clock.time()),
+                        isActive: isActive,
+                        accent: accent
+                    )
+                }
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 30)
-        .padding(.vertical, isActive ? 20 : 13)
+        .padding(.vertical, isActive ? 18 : 12)
         .contentShape(Rectangle())
-        .scaleEffect(isActive ? 1.0 : 0.96, anchor: .center)
-        // Depth of field. The distant lines were previously only faded, which
-        // reads as "dim text"; softening them as well is what makes the sung
-        // line sit in front of the others rather than merely brighter than them.
-        .blur(radius: blurRadius(distance: distance, isActive: isActive))
         .opacity(lineOpacity(distance: distance, isActive: isActive))
         .animation(rowAnimation, value: isActive)
         .animation(rowAnimation, value: distance)
-    }
-
-    /// How far through the active line's words we are, 0...1.
-    ///
-    /// Measured against `sweepEnd` - when the phrase is expected to finish
-    /// being sung - rather than against when the next line starts. Those are
-    /// only the same thing when one line runs straight into the next; the rest
-    /// of the time the difference is a breath, and sweeping across it made the
-    /// fill visibly trail the voice. Past that point the line simply holds full.
-    private func lineSweep(_ row: LyricRow) -> Double {
-        if let words = row.words, words.count > 1 {
-            return wordSweep(words, fallbackEnd: row.sweepEnd)
-        }
-
-        return estimatedSweep(row)
-    }
-
-    /// The sweep for a line with no word timings.
-    ///
-    /// Time is spent per **syllable** and the front is drawn per **character**,
-    /// which are not the same distribution and were previously conflated. A
-    /// purely linear front crosses "through" - one syllable, seven glyphs - at
-    /// the same speed it crosses "I remember", and the result reads as a
-    /// mechanical wipe rather than as singing. Allocating the line's duration
-    /// by syllable and then converting that position into a glyph position lets
-    /// the front dwell on long words and skip across short ones, which is the
-    /// rhythm the words themselves imply.
-    private func estimatedSweep(_ row: LyricRow) -> Double {
-        guard row.sweepEnd > row.start else { return 1 }
-        let elapsed = min(max((currentTime - row.start) / (row.sweepEnd - row.start), 0), 1)
-
-        let totalSyllables = row.units.reduce(0) { $0 + $1.syllables }
-        let totalCharacters = row.units.reduce(0) { $0 + $1.characters }
-        // Nothing to distribute across: fall back to the plain linear front.
-        guard totalSyllables > 0, totalCharacters > 0 else { return elapsed }
-
-        let target = totalSyllables * elapsed
-        var syllables: Double = 0
-        var characters: Double = 0
-
-        for unit in row.units {
-            if syllables + unit.syllables <= target {
-                syllables += unit.syllables
-                characters += unit.characters
-                continue
-            }
-
-            if unit.syllables > 0 {
-                let fraction = (target - syllables) / unit.syllables
-                characters += unit.characters * min(max(fraction, 0), 1)
-            }
-            break
-        }
-
-        return min(max(characters / totalCharacters, 0), 1)
-    }
-
-    /// Exact sweep from Enhanced LRC word timings.
-    ///
-    /// Returns a *character* fraction, not a time fraction, because that is
-    /// what the renderer spends against typographic width: the front has to
-    /// reach the end of a word exactly when the next word starts, and words are
-    /// not equal length. Time alone would put it in the middle of "tomorrow"
-    /// while the singer is already on the next word.
-    private func wordSweep(_ words: [LyricsWord], fallbackEnd: TimeInterval) -> Double {
-        let lengths = words.map { Double($0.text.count) }
-        let total = lengths.reduce(0, +)
-        guard total > 0, let first = words.first else { return 1 }
-        guard currentTime > first.timestamp else { return 0 }
-
-        var consumed: Double = 0
-
-        for index in words.indices {
-            let start = words[index].timestamp
-            // A trailing empty-text entry is the line's closing marker, so the
-            // last real word ends exactly where the format says it does.
-            let end = index + 1 < words.count ? words[index + 1].timestamp : fallbackEnd
-
-            if currentTime >= end {
-                consumed += lengths[index]
-                continue
-            }
-
-            if currentTime > start, end > start {
-                consumed += lengths[index] * ((currentTime - start) / (end - start))
-            }
-            break
-        }
-
-        return min(max(consumed / total, 0), 1)
     }
 
     private func accessibilityLabel(for row: LyricRow) -> String {
@@ -981,7 +1142,7 @@ private struct SyncedLyricsScroller: View {
         }
     }
 
-    private func breakProgress(_ row: LyricRow) -> Double {
+    private func breakProgress(_ row: LyricRow, at currentTime: TimeInterval) -> Double {
         guard row.end.isFinite, row.end > row.start else { return 0 }
         return min(max((currentTime - row.start) / (row.end - row.start), 0), 1)
     }
@@ -989,9 +1150,7 @@ private struct SyncedLyricsScroller: View {
     // MARK: Styling
 
     private var rowAnimation: Animation {
-        reduceMotion
-            ? .easeInOut(duration: 0.2)
-            : .interpolatingSpring(mass: 0.5, stiffness: 200, damping: 20, initialVelocity: 0)
+        .easeInOut(duration: reduceMotion ? 0.15 : 0.3)
     }
 
     private var scrollAnimation: Animation {
@@ -1023,20 +1182,6 @@ private struct SyncedLyricsScroller: View {
         case 3: return 0.24
         case 4: return 0.15
         default: return 0.10
-        }
-    }
-
-    /// Blur is capped and stops entirely past the visible window: it costs an
-    /// offscreen pass per row, and rows this far out are both nearly
-    /// transparent and, in practice, already scrolled off.
-    private func blurRadius(distance: Int, isActive: Bool) -> CGFloat {
-        guard !isActive, !reduceMotion else { return 0 }
-        switch distance {
-        case 1: return 0.4
-        case 2: return 1.2
-        case 3: return 2.0
-        case 4: return 2.6
-        default: return 0
         }
     }
 
@@ -1167,119 +1312,6 @@ private struct SyncedLyricsScroller: View {
     }
 }
 
-/// One lyric line, with the sung part lifted out of the rest of it.
-///
-/// LRC gives a start time per line and nothing finer, so there is no real word
-/// timing to draw. Sweeping a brightness front across the line over its own
-/// duration is the honest approximation: it is derived entirely from where the
-/// line starts and where the next one does, and it turns the active line from
-/// something that is merely brighter into something visibly being sung now.
-private struct LyricLineText: View {
-    let text: String
-    let font: Font
-    /// 0...1 through the line, or nil when this line is not the active one.
-    let sweep: Double?
-    let accent: Color
-    let reduceMotion: Bool
-
-    var body: some View {
-        Text(text)
-            .font(font)
-            .foregroundColor(.white)
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: false, vertical: true)
-            // Applied even when the line is inactive, rather than branching on
-            // `sweep`: an if/else here would give the two states different view
-            // identities, so a line would be rebuilt at the moment it became
-            // active - visibly, mid-animation. The renderer takes a nil glow as
-            // "draw this normally" and costs a single pass in that case.
-            .textRenderer(
-                LyricSweepRenderer(
-                    progress: sweep ?? 1,
-                    glow: sweep == nil ? nil : accent
-                )
-            )
-            .animation(reduceMotion ? nil : .linear(duration: 0.25), value: sweep)
-    }
-}
-
-/// Sweeps the brightness front across a laid-out line in reading order.
-///
-/// A mask over the whole text block cannot do this. Once a lyric wraps, the
-/// block is two stacked lines, and a single left-to-right band lights the right
-/// half of both at the same moment - the end of the phrase brightening before
-/// its middle. `TextRenderer` hands us the actual laid-out lines, so the sweep
-/// can be spent along one line before it starts on the next, which is the order
-/// the words are sung in.
-///
-/// `Animatable` on `progress` is what lets the front glide between the player's
-/// quarter-second position updates instead of stepping four times a second.
-private struct LyricSweepRenderer: TextRenderer, Animatable {
-    var progress: Double
-    /// nil for a line that is not being sung: draw it plainly.
-    var glow: Color?
-    /// How dark the not-yet-sung remainder sits behind the front.
-    var dimOpacity: Double = 0.32
-
-    var animatableData: Double {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
-        let lines = Array(layout)
-        guard !lines.isEmpty else { return }
-
-        guard let glow else {
-            for line in lines { context.draw(line) }
-            return
-        }
-
-        // Progress is spent against total typographic width, so a long first
-        // line takes proportionally longer to fill than a short second one -
-        // which is what makes it track the singing rather than the line count.
-        // Deliberately the rect's width, the same measure the clip below is
-        // built from. `typographicBounds.width` can disagree with it over
-        // trailing whitespace, and a spend measured against one while clipping
-        // against the other drifts a little further out of step on every line.
-        let widths = lines.map(\.typographicBounds.rect.width)
-        let total = widths.reduce(0, +)
-        guard total > 0 else {
-            for line in lines { context.draw(line) }
-            return
-        }
-
-        let target = total * min(max(progress, 0), 1)
-        var consumed: CGFloat = 0
-
-        for (index, line) in lines.enumerated() {
-            let width = widths[index]
-            let bounds = line.typographicBounds.rect
-
-            var unsung = context
-            unsung.opacity = dimOpacity
-            unsung.draw(line)
-
-            let filled = min(max(target - consumed, 0), width)
-            consumed += width
-            guard filled > 0 else { continue }
-
-            var sung = context
-            // Generous vertical bleed: the clip only ever needs to cut
-            // horizontally, and ascenders, descenders and the glow all reach
-            // outside the typographic rect.
-            sung.clip(to: Path(CGRect(
-                x: bounds.minX,
-                y: bounds.minY - bounds.height,
-                width: filled,
-                height: bounds.height * 3
-            )))
-            sung.addFilter(.shadow(color: glow.opacity(0.5), radius: 12))
-            sung.draw(line)
-        }
-    }
-}
-
 /// Three dots that fill across an instrumental break, so a long interlude
 /// reads as progress rather than a stalled screen.
 private struct LyricsBreakIndicator: View {
@@ -1303,7 +1335,6 @@ private struct LyricsBreakIndicator: View {
                     .shadow(color: accent.opacity(isActive ? 0.5 * fill : 0), radius: 12)
             }
         }
-        .animation(.linear(duration: 0.25), value: progress)
         .frame(height: 26)
     }
 }
@@ -1313,6 +1344,199 @@ private struct LyricRowButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Timing Panel
+
+/// Nudges this song's lyrics earlier or later, or lines them up with a tap.
+///
+/// Shown as a value the user reads in "later is positive" terms - the natural
+/// reading of "+0.3 s" next to a Later button - while `Lyrics.userOffset`
+/// keeps the LRC convention (positive = earlier). `offset` here is the stored
+/// value; only the readout flips its sign.
+private struct LyricsTimingPanel: View {
+    /// What the scroller keeps clear beneath its resume button.
+    static let reservedHeight: CGFloat = 160
+
+    let offset: TimeInterval
+    let accent: Color
+    let canCalibrate: Bool
+    /// Receives a change to the stored offset.
+    let onAdjust: (TimeInterval) -> Void
+    /// Receives the host time the finger went down.
+    let onCalibrate: (CFTimeInterval) -> Void
+    let onReset: () -> Void
+    let onDone: () -> Void
+
+    /// Touch-down, not the button's touch-up action: the user taps on the
+    /// beat they hear, and the lift comes a tenth of a second or so later.
+    @State private var pressBeganAt: CFTimeInterval?
+
+    /// Positive = lyrics shown later.
+    private var delay: TimeInterval { -offset }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text(Localized.lyricsTimingEarlier)
+                Spacer()
+                Text(Localized.lyricsTimingLater)
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundColor(.white.opacity(PlayerPalette.secondaryTextOpacity))
+            .padding(.horizontal, 6)
+            .accessibilityHidden(true)
+
+            HStack(spacing: 4) {
+                stepButton(delayChange: -0.5)
+                stepButton(delayChange: -0.1)
+                readout
+                    .frame(maxWidth: .infinity)
+                stepButton(delayChange: 0.1)
+                stepButton(delayChange: 0.5)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    onCalibrate(pressBeganAt ?? CACurrentMediaTime())
+                    pressBeganAt = nil
+                } label: {
+                    Label(Localized.lyricsTimingTapLine, systemImage: "hand.tap")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity, minHeight: Design.Size.minTouch)
+                        .background(
+                            Capsule()
+                                .fill(accent.opacity(0.35))
+                                .overlay(Capsule().stroke(accent.opacity(0.6), lineWidth: 1))
+                        )
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(PressTimestampButtonStyle { pressBeganAt = $0 })
+                .disabled(!canCalibrate)
+                .opacity(canCalibrate ? 1 : 0.5)
+                .accessibilityHint(Localized.lyricsTimingTapLineHint)
+
+                iconButton(systemImage: "arrow.counterclockwise", label: Localized.lyricsTimingReset, action: onReset)
+                    .disabled(offset == 0)
+                    .opacity(offset == 0 ? 0.5 : 1)
+
+                iconButton(systemImage: "checkmark", label: Localized.done, action: onDone)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 24)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+    }
+
+    private var readout: some View {
+        VStack(spacing: 1) {
+            Text(Localized.lyricsTimingTitle)
+                .font(.caption2)
+                .foregroundColor(.white.opacity(PlayerPalette.secondaryTextOpacity))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(readoutText)
+                .font(.system(size: 17, weight: .semibold))
+                .monospacedDigit()
+                .foregroundColor(.white)
+                .lineLimit(1)
+        }
+        .frame(minHeight: Design.Size.minTouch)
+        // One adjustable element for VoiceOver: swipe up for later, down for
+        // earlier, in the same 0.1 s steps as the small buttons.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Localized.lyricsTimingTitle)
+        .accessibilityValue(spokenValue)
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: onAdjust(-0.1)
+            case .decrement: onAdjust(0.1)
+            @unknown default: break
+            }
+        }
+    }
+
+    private var readoutText: String {
+        let shown = abs(delay) < 0.05 ? 0 : delay
+        return Measurement(value: shown, unit: UnitDuration.seconds).formatted(
+            .measurement(
+                width: .narrow,
+                numberFormatStyle: .number
+                    .precision(.fractionLength(1))
+                    .sign(strategy: .always(includingZero: false))
+            )
+        )
+    }
+
+    private var spokenValue: String {
+        guard abs(delay) >= 0.05 else { return Localized.lyricsTimingInSync }
+        let magnitude = abs(delay).formatted(.number.precision(.fractionLength(1)))
+        return String(
+            format: delay > 0 ? Localized.lyricsTimingValueLaterFormat : Localized.lyricsTimingValueEarlierFormat,
+            magnitude
+        )
+    }
+
+    /// - Parameter delayChange: in readout terms; positive moves the lyrics later.
+    private func stepButton(delayChange: TimeInterval) -> some View {
+        let magnitude = abs(delayChange).formatted(.number.precision(.fractionLength(1)))
+        let title = (delayChange < 0 ? "\u{2212}" : "+") + magnitude
+
+        return Button {
+            onAdjust(-delayChange)
+        } label: {
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .monospacedDigit()
+                .foregroundColor(.white)
+                .frame(width: Design.Size.minTouch, height: Design.Size.minTouch)
+                .background(Circle().fill(Color.white.opacity(0.12)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(LyricRowButtonStyle())
+        .accessibilityLabel(String(
+            format: delayChange < 0 ? Localized.lyricsTimingEarlierByFormat : Localized.lyricsTimingLaterByFormat,
+            magnitude
+        ))
+    }
+
+    private func iconButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: Design.Size.minTouch, height: Design.Size.minTouch)
+                .background(Circle().fill(Color.white.opacity(0.12)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(LyricRowButtonStyle())
+        .accessibilityLabel(label)
+    }
+}
+
+/// Reports the instant a press begins, for the tap-to-calibrate button.
+private struct PressTimestampButtonStyle: ButtonStyle {
+    let onPressBegan: (CFTimeInterval) -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { _, isPressed in
+                if isPressed { onPressBegan(CACurrentMediaTime()) }
+            }
     }
 }
 
@@ -1334,10 +1558,19 @@ private struct LyricsStatusCard: View {
     var action: (() -> Void)? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
+        // The tallest version that fits. The top half of iPhone Duo propped
+        // up like a laptop leaves the lyrics about 320 points, and the full
+        // card spilled over the player's close button and the status bar.
+        ViewThatFits(in: .vertical) {
+            card(isCompact: false)
+            card(isCompact: true)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
-            VStack(spacing: 32) {
+    private func card(isCompact: Bool) -> some View {
+        VStack(spacing: isCompact ? 16 : 32) {
+            if !isCompact {
                 ZStack {
                     // Large outer glow
                     Circle()
@@ -1391,74 +1624,72 @@ private struct LyricsStatusCard: View {
                     }
                 }
                 .accessibilityHidden(true)
+            }
 
-                VStack(spacing: 12) {
-                    Text(title)
-                        .font(.title)
-                        .fontWeight(.bold)
+            VStack(spacing: 12) {
+                Text(title)
+                    .font(.title)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+
+                Text(message)
+                    .font(.callout)
+                    .foregroundColor(.white.opacity(PlayerPalette.secondaryTextOpacity))
+                    .multilineTextAlignment(.center)
+            }
+
+            if let actionTitle, let action {
+                Button(action: action) {
+                    Text(actionTitle)
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.white)
-
-                    Text(message)
-                        .font(.callout)
-                        .foregroundColor(.white.opacity(0.6))
-                        .multilineTextAlignment(.center)
-                }
-
-                if let actionTitle, let action {
-                    Button(action: action) {
-                        Text(actionTitle)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 22)
-                            .padding(.vertical, 12)
-                            .background(
-                                Capsule()
-                                    .fill(.ultraThinMaterial)
-                                    .overlay(Capsule().stroke(accent.opacity(0.55), lineWidth: 1))
-                            )
-                    }
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 12)
+                        .background(
+                            Capsule()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Capsule().stroke(accent.opacity(0.55), lineWidth: 1))
+                        )
                 }
             }
-            .padding(44)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 28)
-                        .fill(.ultraThinMaterial)
-
-                    RoundedRectangle(cornerRadius: 28)
-                        .stroke(
-                            LinearGradient(
-                                gradient: Gradient(colors: [
-                                    accent.opacity(0.3),
-                                    Color.white.opacity(0.15),
-                                    accent.opacity(0.2)
-                                ]),
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-
-                    RoundedRectangle(cornerRadius: 28)
-                        .fill(
-                            LinearGradient(
-                                gradient: Gradient(colors: [
-                                    accent.opacity(0.05),
-                                    Color.clear,
-                                    accent.opacity(0.08)
-                                ]),
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-                .shadow(color: accent.opacity(0.2), radius: 35, x: 0, y: 15)
-            )
-            .padding(.horizontal, 40)
-            .accessibilityElement(children: .combine)
-
-            Spacer()
         }
+        .padding(isCompact ? 24 : 44)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 28)
+                    .fill(.ultraThinMaterial)
+
+                RoundedRectangle(cornerRadius: 28)
+                    .stroke(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                accent.opacity(0.3),
+                                Color.white.opacity(0.15),
+                                accent.opacity(0.2)
+                            ]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+
+                RoundedRectangle(cornerRadius: 28)
+                    .fill(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                accent.opacity(0.05),
+                                Color.clear,
+                                accent.opacity(0.08)
+                            ]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+            .shadow(color: accent.opacity(0.2), radius: 35, x: 0, y: 15)
+        )
+        .padding(.horizontal, 40)
+        .accessibilityElement(children: .combine)
     }
 }
 

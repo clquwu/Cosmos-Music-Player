@@ -108,6 +108,37 @@ class DatabaseManager: @unchecked Sendable {
         return relocatedURL
     }
 
+    /// The file for a stored track path, followed into the current app
+    /// container when the stored one no longer exists.
+    ///
+    /// iOS can move the app's data container - after an update, a restore,
+    /// or any reinstall on a simulator - and stored paths still name the old
+    /// one, so every song in the app's own Documents folder failed with "file
+    /// not found" until the next cleanup pass repaired the rows. That pass
+    /// still rewrites the database; this only makes playback work meanwhile.
+    /// Paths outside the app's Documents (iCloud, bookmarked files) are
+    /// returned unchanged.
+    static func localFileURL(forStoredPath path: String) -> URL {
+        // A song in a linked music folder is opened by path, but only under
+        // the folder's security scope. Every reader - playback, artwork,
+        // lyrics, analysis - comes through here, so this is the one place
+        // that has to make sure the scope is open, including on the first
+        // read after a relaunch.
+        LinkedFolderStore.shared.ensureAccess(forPath: path)
+        let url = URL(fileURLWithPath: path)
+        guard !FileManager.default.fileExists(atPath: url.path),
+              let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let relocatedURL = DatabaseManager.relocatedApplicationDocumentsURL(
+                  forStoredPath: path,
+                  currentDocumentsURL: documentsURL
+              ),
+              FileManager.default.fileExists(atPath: relocatedURL.path) else {
+            return url
+        }
+        print("📍 Using relocated local file: \(relocatedURL.lastPathComponent)")
+        return relocatedURL
+    }
+
     private static func relativePath(_ path: String, inside rootPath: String) -> String? {
         let normalizedPath = standardizedPath(path)
         let normalizedRoot = standardizedPath(rootPath)
@@ -156,7 +187,9 @@ class DatabaseManager: @unchecked Sendable {
     }
 
     private init() {
-        setupDatabaseWithRetry()
+        Perf.measure("Database open") {
+            setupDatabaseWithRetry()
+        }
     }
 
     private enum InitializationError: LocalizedError {
@@ -256,27 +289,52 @@ class DatabaseManager: @unchecked Sendable {
 
         dbWriter = try DatabasePool(path: databaseURL.path, configuration: configuration)
         databaseInitializationFailureDescription = nil
-        try createTables()
-        try migrateDatabaseIfNeeded()
+
+        // The startup migrations below write to the app-group database. Ask
+        // for time to finish them, so a launch that iOS backgrounds straight
+        // away is not suspended - and killed with 0xdead10cc - mid-transaction.
+        // First access happens on the main thread at launch, which is where
+        // every crash report caught it; off-main callers simply go without.
+        let migrationTask: UIBackgroundTaskIdentifier = Thread.isMainThread
+            ? MainActor.assumeIsolated { UIApplication.shared.beginBackgroundTask(withName: "DatabaseMigrations") }
+            : .invalid
+        defer {
+            if migrationTask != .invalid {
+                MainActor.assumeIsolated { UIApplication.shared.endBackgroundTask(migrationTask) }
+            }
+        }
+
+        let migrationSignpost = Perf.begin("Database startup migrations")
+        defer { Perf.end("Database startup migrations", migrationSignpost) }
+
+        // After the startup migrations below (a main-queue hop, so they are
+        // never interrupted): suspend the new database if the app is
+        // already meant to be suspended.
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { DatabaseSuspensionCoordinator.shared.databaseDidOpen() }
+        }
+
+        try Perf.measure("DB createTables") { try createTables() }
+        try Perf.measure("DB migrateIfNeeded") { try migrateDatabaseIfNeeded() }
 
         // Split combined multi-artist rows ("A; B") left by the old parser
         // (issue #16), then heal libraries where deleted tracks left empty
         // artists/albums behind (issue #74). Both are idempotent and cheap,
         // and run every launch.
         do {
-            try migrateSplitCombinedArtistNames()
+            try Perf.measure("DB split combined artists") { try migrateSplitCombinedArtistNames() }
         } catch {
             print("⚠️ Combined artist split migration failed (non-fatal): \(error)")
         }
         // After artists are split, merge albums that the old per-track-artist
         // keying broke apart (issue #81)
         do {
-            try migrateMergeSplitAlbums()
+            try Perf.measure("DB merge split albums") { try migrateMergeSplitAlbums() }
         } catch {
             print("⚠️ Split album merge migration failed (non-fatal): \(error)")
         }
         do {
-            try cleanupOrphanedLibraryEntries()
+            try Perf.measure("DB orphan cleanup") { try cleanupOrphanedLibraryEntries() }
         } catch {
             print("⚠️ Orphaned library cleanup failed (non-fatal): \(error)")
         }
@@ -413,7 +471,16 @@ class DatabaseManager: @unchecked Sendable {
                     replaygain_album_gain REAL,
                     replaygain_track_peak REAL,
                     replaygain_album_peak REAL,
-                    has_embedded_art INTEGER DEFAULT 0
+                    has_embedded_art INTEGER DEFAULT 0,
+                    genre TEXT COLLATE NOCASE,
+                    bpm INTEGER,
+                    year INTEGER,
+                    tag_refresh_pending INTEGER NOT NULL DEFAULT 0,
+                    analyzed_energy REAL,
+                    analyzed_brightness REAL,
+                    analyzed_tempo REAL,
+                    analyzed_at INTEGER,
+                    artwork_path TEXT
                 )
             """)
 
@@ -480,6 +547,9 @@ class DatabaseManager: @unchecked Sendable {
             // Per-import lookups: path duplicate check and stale-duplicate prefilter
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_path ON track(path)")
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_dup_check ON track(artist_id, duration_ms, file_size)")
+            // Created by the genre migration below rather than here: on an
+            // existing database this statement runs before that migration has
+            // added the column, and would fail.
 
             // EQ Tables
             try db.execute(sql: """
@@ -581,6 +651,101 @@ class DatabaseManager: @unchecked Sendable {
                 print("ℹ️ Database migration: modification_date column already exists")
             }
 
+            // Genre, BPM and year: additive and nullable, like
+            // modification_date above. genre is NOCASE so "rock" and "Rock"
+            // group together, matching how artist and album titles compare.
+            //
+            // Rows that predate these columns cannot be told apart from
+            // genuinely untagged ones by their NULLs alone, so they are
+            // flagged with tag_refresh_pending instead. The indexer re-parses
+            // a flagged row once - through the same in-place refresh a changed
+            // file gets, so stable IDs, favorites and playlists are untouched -
+            // and upsertTrack clears the flag. The flag is set only in the
+            // transaction that adds the column, so this runs once per database;
+            // fresh databases get the column from CREATE TABLE with every row
+            // at 0. Not mapped onto Track: nothing outside the scan needs it,
+            // and GRDB's update leaves unmapped columns alone.
+            let existingTrackColumns = Set(try db.columns(in: "track").map(\.name))
+            for (column, definition) in [("genre", "TEXT COLLATE NOCASE"), ("bpm", "INTEGER"), ("year", "INTEGER")]
+            where !existingTrackColumns.contains(column) {
+                try db.execute(sql: "ALTER TABLE track ADD COLUMN \(column) \(definition)")
+                print("✅ Database: Added \(column) column to track table")
+            }
+            if !existingTrackColumns.contains("tag_refresh_pending") {
+                try db.execute(sql: "ALTER TABLE track ADD COLUMN tag_refresh_pending INTEGER NOT NULL DEFAULT 0")
+                try db.execute(sql: "UPDATE track SET tag_refresh_pending = 1")
+                print("✅ Database: Flagged \(db.changesCount) existing track(s) for a one-time genre/BPM/year refresh")
+            }
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_track_genre ON track(genre)")
+
+            // On-device audio analysis (`AudioAnalyzer`): additive and
+            // nullable like the columns above. NULL analyzed_at means "not
+            // listened to yet", which is every existing row - exactly what
+            // the background analysis should pick up, so no flag is needed.
+            for (column, definition) in [("analyzed_energy", "REAL"), ("analyzed_brightness", "REAL"),
+                                         ("analyzed_tempo", "REAL"), ("analyzed_at", "INTEGER")]
+            where !existingTrackColumns.contains(column) {
+                try db.execute(sql: "ALTER TABLE track ADD COLUMN \(column) \(definition)")
+                print("✅ Database: Added \(column) column to track table")
+            }
+
+            // Folder artwork (cover.jpg next to the files): additive and
+            // nullable. NULL is "no folder cover known", which every existing
+            // row is until the next scan's folder-artwork pass looks.
+            if !existingTrackColumns.contains("artwork_path") {
+                try db.execute(sql: "ALTER TABLE track ADD COLUMN artwork_path TEXT")
+                print("✅ Database: Added artwork_path column to track table")
+            }
+
+            // Albums split per track artist (issue #118): M4A album artists
+            // and the Compilation flag were never read, so a compilation or
+            // an album with guest artists became one album per artist. Their
+            // files are unchanged, so nothing would re-read them; flag the
+            // songs of every album whose title another album shares for the
+            // same one-time tag refresh as the genre backfill above. The
+            // re-parse moves them onto one album and the scan's orphan
+            // cleanup drops the emptied ones. Once per database, recorded in
+            // one_time_migration.
+            try db.execute(sql: "CREATE TABLE IF NOT EXISTS one_time_migration (name TEXT PRIMARY KEY)")
+            let albumRegroupDone = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM one_time_migration WHERE name = 'album-artist-regroup')"
+            ) ?? false
+            if !albumRegroupDone {
+                try db.execute(sql: """
+                    UPDATE track SET tag_refresh_pending = 1
+                    WHERE album_id IN (
+                        SELECT id FROM album WHERE title IN (
+                            SELECT title FROM album GROUP BY title HAVING COUNT(*) > 1
+                        )
+                    )
+                """)
+                print("✅ Database: Flagged \(db.changesCount) track(s) of split albums for a one-time regroup")
+                try db.execute(sql: "INSERT OR IGNORE INTO one_time_migration (name) VALUES ('album-artist-regroup')")
+            }
+
+            // ReplayGain in MP3 (ID3 TXXX) and M4A/AAC (iTunes freeform)
+            // tags was never read - only FLAC and the SFB formats had it -
+            // so volume levelling left those songs alone. Their files are
+            // unchanged, so flag the rows that have no gain at all for the
+            // same one-time tag refresh. Songs that genuinely carry no
+            // ReplayGain are re-read once and stay as they are. Once per
+            // database, recorded in one_time_migration.
+            let replayGainBackfillDone = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM one_time_migration WHERE name = 'mp3-m4a-replaygain')"
+            ) ?? false
+            if !replayGainBackfillDone {
+                try db.execute(sql: """
+                    UPDATE track SET tag_refresh_pending = 1
+                    WHERE replaygain_track_gain IS NULL
+                      AND replaygain_album_gain IS NULL
+                      AND (path LIKE '%.mp3' OR path LIKE '%.m4a' OR path LIKE '%.aac')
+                """)
+                print("✅ Database: Flagged \(db.changesCount) MP3/AAC track(s) for a one-time ReplayGain read")
+                try db.execute(sql: "INSERT OR IGNORE INTO one_time_migration (name) VALUES ('mp3-m4a-replaygain')")
+            }
+
             // Migration: Add custom_cover_image_path column to playlist table
             do {
                 try db.execute(sql: "ALTER TABLE playlist ADD COLUMN custom_cover_image_path TEXT")
@@ -647,139 +812,169 @@ class DatabaseManager: @unchecked Sendable {
                 print("⚠️ Database migration: album_artist_link table setup failed: \(error)")
             }
 
+            // Both walks below are one-time: gated on user_version, which the
+            // identity walk stamps once it has converged.
+            let identityMigrationVersion = 1
+            let storedIdentityVersion = (try? Int.fetchOne(db, sql: "PRAGMA user_version")) ?? 0
+
             // Migration: remove true duplicates that point at the exact same file path.
             // Do not deduplicate by filename; different album folders may legally contain same-named files.
-            do {
-                let allTracks = try Track.fetchAll(db)
-                let groupedByPath = Dictionary(grouping: allTracks, by: { track in
-                    URL(fileURLWithPath: track.path).standardizedFileURL.path
-                })
+            //
+            // Once per database, with the identity walk: this too decoded the
+            // whole track table and standardized every path inside the launch
+            // write transaction on the main thread, on every launch. New rows
+            // are written with canonical paths and the identity walk merges
+            // spelling duplicates, so after that walk there is nothing for it.
+            if storedIdentityVersion < identityMigrationVersion {
+                do {
+                    let allTracks = try Track.fetchAll(db)
+                    let groupedByPath = Dictionary(grouping: allTracks, by: { track in
+                        URL(fileURLWithPath: track.path).standardizedFileURL.path
+                    })
 
-                for (path, duplicates) in groupedByPath where duplicates.count > 1 {
-                    let sorted = duplicates.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
-                    let keep = sorted.first!
+                    for (path, duplicates) in groupedByPath where duplicates.count > 1 {
+                        let sorted = duplicates.sorted { ($0.id ?? 0) > ($1.id ?? 0) }
+                        let keep = sorted.first!
 
-                    for duplicate in sorted.dropFirst() {
-                        try db.execute(
-                            sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
-                            arguments: [keep.stableId, duplicate.stableId]
-                        )
-                        try db.execute(
-                            sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
-                            arguments: [keep.stableId, duplicate.stableId]
-                        )
-                        try db.execute(
-                            sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
-                            arguments: [keep.stableId, duplicate.stableId]
-                        )
-                        try db.execute(sql: "DELETE FROM favorite WHERE track_stable_id = ?", arguments: [duplicate.stableId])
-                        try db.execute(sql: "DELETE FROM playlist_item WHERE track_stable_id = ?", arguments: [duplicate.stableId])
-                        try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [duplicate.stableId])
-                        try Track.filter(Column("id") == duplicate.id).deleteAll(db)
+                        for duplicate in sorted.dropFirst() {
+                            try db.execute(
+                                sql: "UPDATE OR IGNORE favorite SET track_stable_id = ? WHERE track_stable_id = ?",
+                                arguments: [keep.stableId, duplicate.stableId]
+                            )
+                            try db.execute(
+                                sql: "UPDATE playlist_item SET track_stable_id = ? WHERE track_stable_id = ?",
+                                arguments: [keep.stableId, duplicate.stableId]
+                            )
+                            try db.execute(
+                                sql: "UPDATE OR IGNORE track_artist SET track_stable_id = ? WHERE track_stable_id = ?",
+                                arguments: [keep.stableId, duplicate.stableId]
+                            )
+                            try db.execute(sql: "DELETE FROM favorite WHERE track_stable_id = ?", arguments: [duplicate.stableId])
+                            try db.execute(sql: "DELETE FROM playlist_item WHERE track_stable_id = ?", arguments: [duplicate.stableId])
+                            try db.execute(sql: "DELETE FROM track_artist WHERE track_stable_id = ?", arguments: [duplicate.stableId])
+                            try Track.filter(Column("id") == duplicate.id).deleteAll(db)
+                        }
+
+                        print("✅ Database: Removed \(duplicates.count - 1) duplicate track row(s) for path: \(path)")
                     }
-
-                    print("✅ Database: Removed \(duplicates.count - 1) duplicate track row(s) for path: \(path)")
+                } catch {
+                    print("⚠️ Database migration: Path duplicate cleanup failed: \(error)")
                 }
-            } catch {
-                print("⚠️ Database migration: Path duplicate cleanup failed: \(error)")
             }
 
             // Migration: filename-based stable IDs collapse same-named songs in different albums.
             // Use normalized full paths so files in different folders remain distinct even with identical filenames.
-            do {
-                let tracks = try Track.fetchAll(db)
-                var updatedCount = 0
-                var mergedDuplicateCount = 0
+            //
+            // Runs once per database. It used to walk every track on every
+            // launch - a full-table fetch plus a filesystem-consulting
+            // standardizedFileURL and a SHA256 per row, inside one write
+            // transaction on the main thread. On large libraries that took
+            // seconds, and a launch that iOS suspended mid-walk (CarPlay, Siri,
+            // background audio, or the user leaving straight away) was killed
+            // with 0xdead10cc for holding the lock - every 1.2.5 crash report.
+            // saveTrack and the indexer already write canonical paths and
+            // path-based IDs, so once the walk has converged there is nothing
+            // left for it to find.
+            if storedIdentityVersion < identityMigrationVersion {
+                do {
+                    let tracks = try Track.fetchAll(db)
+                    var updatedCount = 0
+                    var mergedDuplicateCount = 0
 
-                var normalizedPathCount = 0
+                    var normalizedPathCount = 0
 
-                for track in tracks {
-                    // Normalise the stored spelling while we are already
-                    // walking every row. getTrack(byPath:) can only use the
-                    // index on track.path for spellings that match exactly, so
-                    // it used to fall back to loading the entire table and
-                    // standardizing each row in Swift - once per newly-seen
-                    // file, which made every scan quadratic in library size.
-                    // Storing the standardized spelling makes that fallback
-                    // unnecessary.
-                    let standardizedPath = Self.standardizedPath(track.path)
-                    if standardizedPath != track.path {
-                        let alreadyTaken = try Bool.fetchOne(
-                            db,
-                            sql: "SELECT EXISTS(SELECT 1 FROM track WHERE path = ? AND id IS NOT ?)",
-                            arguments: [standardizedPath, track.id]
-                        ) ?? false
-
-                        // Another row already holds the normalised spelling -
-                        // the same file recorded twice. Leave this one for the
-                        // duplicate cleanup rather than creating a collision.
-                        if !alreadyTaken {
-                            try db.execute(
-                                sql: "UPDATE track SET path = ? WHERE id = ?",
+                    for track in tracks {
+                        // Normalise the stored spelling while we are already
+                        // walking every row. getTrack(byPath:) can only use the
+                        // index on track.path for spellings that match exactly, so
+                        // it used to fall back to loading the entire table and
+                        // standardizing each row in Swift - once per newly-seen
+                        // file, which made every scan quadratic in library size.
+                        // Storing the standardized spelling makes that fallback
+                        // unnecessary.
+                        let standardizedPath = Self.standardizedPath(track.path)
+                        if standardizedPath != track.path {
+                            let alreadyTaken = try Bool.fetchOne(
+                                db,
+                                sql: "SELECT EXISTS(SELECT 1 FROM track WHERE path = ? AND id IS NOT ?)",
                                 arguments: [standardizedPath, track.id]
-                            )
-                            normalizedPathCount += 1
+                            ) ?? false
+
+                            // Another row already holds the normalised spelling -
+                            // the same file recorded twice. Leave this one for the
+                            // duplicate cleanup rather than creating a collision.
+                            if !alreadyTaken {
+                                try db.execute(
+                                    sql: "UPDATE track SET path = ? WHERE id = ?",
+                                    arguments: [standardizedPath, track.id]
+                                )
+                                normalizedPathCount += 1
+                            }
                         }
-                    }
 
-                    // Safe to recompute from the stored path: canonicalPath is
-                    // a pure function of the string, so this walk converges
-                    // instead of re-keying the row again on the next launch.
-                    let newStableId = Self.generatePathStableId(forPath: track.path)
+                        // Safe to recompute from the stored path: canonicalPath is
+                        // a pure function of the string, so this walk converges
+                        // instead of re-keying the row again on the next launch.
+                        let newStableId = Self.generatePathStableId(forPath: track.path)
 
-                    guard track.stableId != newStableId else {
-                        continue
-                    }
+                        guard track.stableId != newStableId else {
+                            continue
+                        }
 
-                    // Another row may already hold the canonical ID: the same
-                    // file recorded twice, once under each spelling of
-                    // /private/var. The duplicate sweep above cannot see that
-                    // pair - it matches on exact path equality, and the two
-                    // spellings are not equal as strings. Blindly updating
-                    // would violate the UNIQUE index on stable_id and abort the
-                    // rest of this migration, so fold this row into the
-                    // survivor instead and keep going.
-                    let collidingId = try Int64.fetchOne(
-                        db,
-                        sql: "SELECT id FROM track WHERE stable_id = ? AND id IS NOT ?",
-                        arguments: [newStableId, track.id]
-                    )
+                        // Another row may already hold the canonical ID: the same
+                        // file recorded twice, once under each spelling of
+                        // /private/var. The duplicate sweep above cannot see that
+                        // pair - it matches on exact path equality, and the two
+                        // spellings are not equal as strings. Blindly updating
+                        // would violate the UNIQUE index on stable_id and abort the
+                        // rest of this migration, so fold this row into the
+                        // survivor instead and keep going.
+                        let collidingId = try Int64.fetchOne(
+                            db,
+                            sql: "SELECT id FROM track WHERE stable_id = ? AND id IS NOT ?",
+                            arguments: [newStableId, track.id]
+                        )
 
-                    if collidingId != nil {
+                        if collidingId != nil {
+                            try self.mergeTrackReferences(db: db, from: track.stableId, to: newStableId)
+                            try db.execute(sql: "DELETE FROM track WHERE id = ?", arguments: [track.id])
+                            stableIdRemapping[track.stableId] = newStableId
+                            mergedDuplicateCount += 1
+                            continue
+                        }
+
+                        try db.execute(
+                            sql: "UPDATE track SET stable_id = ? WHERE id = ?",
+                            arguments: [newStableId, track.id]
+                        )
+
                         try self.mergeTrackReferences(db: db, from: track.stableId, to: newStableId)
-                        try db.execute(sql: "DELETE FROM track WHERE id = ?", arguments: [track.id])
+
                         stableIdRemapping[track.stableId] = newStableId
-                        mergedDuplicateCount += 1
-                        continue
+                        updatedCount += 1
                     }
 
-                    try db.execute(
-                        sql: "UPDATE track SET stable_id = ? WHERE id = ?",
-                        arguments: [newStableId, track.id]
-                    )
+                    if normalizedPathCount > 0 {
+                        print("✅ Database: Normalised \(normalizedPathCount) stored track path(s)")
+                    }
 
-                    try self.mergeTrackReferences(db: db, from: track.stableId, to: newStableId)
+                    if mergedDuplicateCount > 0 {
+                        print("✅ Database: Merged \(mergedDuplicateCount) row(s) duplicated across path spellings")
+                    }
 
-                    stableIdRemapping[track.stableId] = newStableId
-                    updatedCount += 1
+                    if updatedCount > 0 {
+                        print("✅ Database: Migrated \(updatedCount) stable IDs from filename-based to path-based")
+                    } else {
+                        print("ℹ️ Database: Stable IDs already path-based")
+                    }
+
+                    // Same transaction as the walk, so the marker only lands if
+                    // the walk's own writes do.
+                    try db.execute(sql: "PRAGMA user_version = \(identityMigrationVersion)")
+                } catch {
+                    print("⚠️ Database migration: Path-based stable ID migration failed: \(error)")
+                    // Don't throw - allow app to continue and re-index will handle it
                 }
-
-                if normalizedPathCount > 0 {
-                    print("✅ Database: Normalised \(normalizedPathCount) stored track path(s)")
-                }
-
-                if mergedDuplicateCount > 0 {
-                    print("✅ Database: Merged \(mergedDuplicateCount) row(s) duplicated across path spellings")
-                }
-
-                if updatedCount > 0 {
-                    print("✅ Database: Migrated \(updatedCount) stable IDs from filename-based to path-based")
-                } else {
-                    print("ℹ️ Database: Stable IDs already path-based")
-                }
-            } catch {
-                print("⚠️ Database migration: Path-based stable ID migration failed: \(error)")
-                // Don't throw - allow app to continue and re-index will handle it
             }
 
             // Add UNIQUE constraint to stable_id to prevent duplicates
@@ -879,6 +1074,16 @@ class DatabaseManager: @unchecked Sendable {
             .filter(Column("stable_id") == trackToSave.stableId)
             .fetchOne(db) {
             trackToSave.id = existing.id
+            // A parse knows nothing of the audio analysis. The file is the
+            // same file when its modification date is, so what was heard in
+            // it still holds; a changed file loses it and is analysed again.
+            if trackToSave.analyzedAt == nil, existing.analyzedAt != nil,
+               existing.modificationDate == trackToSave.modificationDate {
+                trackToSave.analyzedEnergy = existing.analyzedEnergy
+                trackToSave.analyzedBrightness = existing.analyzedBrightness
+                trackToSave.analyzedTempo = existing.analyzedTempo
+                trackToSave.analyzedAt = existing.analyzedAt
+            }
         }
 
         // Safety check: Remove any duplicates with the same path but different stable_id
@@ -917,6 +1122,14 @@ class DatabaseManager: @unchecked Sendable {
         }
 
         try trackToSave.save(db)
+
+        // Every row written here comes from a fresh parse, so it now carries
+        // genre/BPM/year and no longer needs the one-time tag refresh. Same
+        // transaction as the save, so the flag only clears if the row lands.
+        try db.execute(
+            sql: "UPDATE track SET tag_refresh_pending = 0 WHERE stable_id = ? AND tag_refresh_pending != 0",
+            arguments: [trackToSave.stableId]
+        )
 
         try cleanupStaleUnplayableDuplicates(db: db, matching: trackToSave)
     }
@@ -978,6 +1191,43 @@ class DatabaseManager: @unchecked Sendable {
             return false
         }
         return true
+    }
+
+    /// `isPathConfirmedMissing` for a caller that knows which roots it just
+    /// enumerated (or was told about by iCloud) completely.
+    ///
+    /// The immediate-parent rule left every track of a deleted album folder in
+    /// the library for ever: the folder went with its files, so the absence was
+    /// never "confirmed". Inside a root that is itself readable, the nearest
+    /// surviving ancestor is the same evidence one level up - it was enumerated
+    /// and the folder is not in it. Outside those roots nothing is inferred.
+    func isPathConfirmedMissing(_ path: String, within roots: [URL]) -> Bool {
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: path) else { return false }
+
+        let fileURL = URL(fileURLWithPath: path)
+        // An evicted file on older iOS is a hidden `.name.icloud` stub next to
+        // where the file used to be. That is a download away, not deleted.
+        let placeholder = fileURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(fileURL.lastPathComponent).icloud")
+        guard !fileManager.fileExists(atPath: placeholder.path) else { return false }
+
+        let rootPaths = roots.map { Self.standardizedPath($0.path) }
+        func isInsideRoot(_ candidate: String) -> Bool {
+            rootPaths.contains { candidate == $0 || candidate.hasPrefix($0 + "/") }
+        }
+
+        var ancestor = fileURL.deletingLastPathComponent()
+        while isInsideRoot(Self.standardizedPath(ancestor.path)) {
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: ancestor.path, isDirectory: &isDirectory) {
+                return isDirectory.boolValue && fileManager.isReadableFile(atPath: ancestor.path)
+            }
+            let next = ancestor.deletingLastPathComponent()
+            guard next.path != ancestor.path else { break }
+            ancestor = next
+        }
+        return false
     }
 
     private func isStrictStaleDuplicate(_ stale: Track, of keeper: Track) -> Bool {
@@ -1274,14 +1524,101 @@ class DatabaseManager: @unchecked Sendable {
     }
 
     func getAllTracks() throws -> [Track] {
-        return try read { db in
-            return try Track.order(Column("id").desc).fetchAll(db)
+        try Perf.measure("DB getAllTracks") {
+            try read { db in
+                try Track.order(Column("id").desc).fetchAll(db)
+            }
+        }
+    }
+
+    /// Rows added since the newest one the caller already has, newest
+    /// first like getAllTracks. A scan in progress only ever adds rows (its
+    /// updates and removals are applied by the full reload when it ends), so
+    /// this is all the library list needs while one runs.
+    func getTracks(newerThan id: Int64) throws -> [Track] {
+        try Perf.measure("DB getTracks(newerThan:)") {
+            try read { db in
+                try Track.filter(Column("id") > id).order(Column("id").desc).fetchAll(db)
+            }
         }
     }
 
     func getTrack(byStableId stableId: String) throws -> Track? {
         return try read { db in
             return try Track.filter(Column("stable_id") == stableId).fetchOne(db)
+        }
+    }
+
+    /// Whether the row predates the genre/BPM/year columns and has not been
+    /// re-parsed since. See the migration that adds `tag_refresh_pending`.
+    ///
+    /// The indexer asks this for every unchanged file on every scan, and once
+    /// the backfill is done the answer is always false - so one "is anything
+    /// still pending?" check is cached and the per-row lookup only runs while
+    /// some row is. Nothing sets the flag again outside the migration; the
+    /// cache still expires so a database reopened or replaced is re-checked.
+    func trackNeedsTagRefresh(stableId: String) throws -> Bool {
+        guard try anyTrackNeedsTagRefresh() else { return false }
+
+        return try read { db in
+            try Bool.fetchOne(
+                db,
+                sql: "SELECT tag_refresh_pending FROM track WHERE stable_id = ?",
+                arguments: [stableId]
+            ) ?? false
+        }
+    }
+
+    /// Cached "is any row still waiting for the tag refresh?" - see
+    /// `trackNeedsTagRefresh`.
+    func anyTrackNeedsTagRefresh() throws -> Bool {
+        let now = Date()
+        tagRefreshStateLock.lock()
+        let state = tagRefreshState
+        tagRefreshStateLock.unlock()
+        let anyPending: Bool
+        if let state, now.timeIntervalSince(state.checkedAt) < (state.anyPending ? 60 : 600) {
+            anyPending = state.anyPending
+        } else {
+            anyPending = try read { db in
+                try Bool.fetchOne(
+                    db,
+                    sql: "SELECT EXISTS(SELECT 1 FROM track WHERE tag_refresh_pending != 0)"
+                ) ?? false
+            }
+            tagRefreshStateLock.lock()
+            tagRefreshState = (anyPending, now)
+            tagRefreshStateLock.unlock()
+        }
+        return anyPending
+    }
+
+    /// Number of tracks whose stored path is `rootPath` or lies under it.
+    /// A COUNT on the database instead of decoding every row to filter in
+    /// Swift. Stored paths are canonical (see `standardizedPath`), so the
+    /// root is canonicalised the same way; `substr` rather than LIKE keeps
+    /// the match exact - case-sensitive, and `%`/`_` in folder names are
+    /// not wildcards.
+    func countTracks(underPath rootPath: String) throws -> Int {
+        let root = Self.canonicalPath(rootPath)
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return try read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM track WHERE path = ? OR substr(path, 1, length(?)) = ?",
+                arguments: [root, prefix, prefix]
+            ) ?? 0
+        }
+    }
+
+    /// Drops the one-time genre/BPM/year refresh for a row whose file could
+    /// not be re-parsed; the row keeps its existing metadata.
+    func clearTagRefreshPending(stableId: String) throws {
+        try write { db in
+            try db.execute(
+                sql: "UPDATE track SET tag_refresh_pending = 0 WHERE stable_id = ?",
+                arguments: [stableId]
+            )
         }
     }
 
@@ -1482,17 +1819,50 @@ class DatabaseManager: @unchecked Sendable {
 
     func getAlbumsByArtistId(_ artistId: Int64) throws -> [Album] {
         return try read { db in
+            // A UNION of two indexed lookups, not `LEFT JOIN ... WHERE
+            // album.artist_id = ? OR link.artist_id = ?`: an OR across both
+            // tables cannot use either index, so that form read every album
+            // for every call - and the Spotlight index and Siri ask once per
+            // artist, which made this the largest main-thread cost a few
+            // seconds after each launch on a big library. Same rows.
             return try Album.fetchAll(
                 db,
                 sql: """
-                    SELECT DISTINCT album.*
+                    SELECT album.*
                     FROM album
-                    LEFT JOIN album_artist_link ON album_artist_link.album_id = album.id
-                    WHERE album.artist_id = ? OR album_artist_link.artist_id = ?
+                    WHERE album.id IN (
+                        SELECT id FROM album WHERE artist_id = ?
+                        UNION
+                        SELECT album_id FROM album_artist_link WHERE artist_id = ?
+                    )
                     ORDER BY album.title
                 """,
                 arguments: [artistId, artistId]
             )
+        }
+    }
+
+    /// `getAlbumsByArtistId` for every artist at once, keyed by artist id -
+    /// one query instead of one per artist. Each list is ordered by title,
+    /// like the single-artist call.
+    func getAlbumsByArtist() throws -> [Int64: [Album]] {
+        return try read { db in
+            let rows = try Row.fetchCursor(db, sql: """
+                SELECT album.*, owner.artist_id AS owner_artist_id
+                FROM (
+                    SELECT id AS album_id, artist_id FROM album WHERE artist_id IS NOT NULL
+                    UNION
+                    SELECT album_id, artist_id FROM album_artist_link
+                ) AS owner
+                JOIN album ON album.id = owner.album_id
+                ORDER BY owner.artist_id, album.title
+            """)
+            var result: [Int64: [Album]] = [:]
+            while let row = try rows.next() {
+                let artistId: Int64 = row["owner_artist_id"]
+                result[artistId, default: []].append(try Album(row: row))
+            }
+            return result
         }
     }
 
@@ -1547,6 +1917,10 @@ class DatabaseManager: @unchecked Sendable {
     // joined names so scrolling doesn't hit the database per visible row
     private let artistDisplayNameCacheLock = NSLock()
     private var artistDisplayNameCache: [String: String] = [:]
+
+    /// See `trackNeedsTagRefresh`.
+    private let tagRefreshStateLock = NSLock()
+    private var tagRefreshState: (anyPending: Bool, checkedAt: Date)?
 
     func invalidateArtistDisplayNameCache() {
         artistDisplayNameCacheLock.lock()
@@ -1751,13 +2125,23 @@ class DatabaseManager: @unchecked Sendable {
 
     func getTracksByArtistId(_ artistId: Int64) throws -> [Track] {
         return try read { db in
+            // Two indexed lookups joined by UNION - see getAlbumsByArtistId.
+            // The OR form scanned the whole track table (and its joined
+            // credits) on every artist page, artist search result and
+            // artist mix. Same rows, same order.
             return try Track.fetchAll(
                 db,
                 sql: """
-                    SELECT DISTINCT track.*
+                    SELECT track.*
                     FROM track
-                    LEFT JOIN track_artist ON track_artist.track_stable_id = track.stable_id
-                    WHERE track.artist_id = ? OR track_artist.artist_id = ?
+                    WHERE track.id IN (
+                        SELECT id FROM track WHERE artist_id = ?
+                        UNION
+                        SELECT track.id
+                        FROM track_artist
+                        JOIN track ON track.stable_id = track_artist.track_stable_id
+                        WHERE track_artist.artist_id = ?
+                    )
                     ORDER BY track.title
                 """,
                 arguments: [artistId, artistId]
@@ -1768,6 +2152,8 @@ class DatabaseManager: @unchecked Sendable {
     // MARK: - Search operations
 
     private func rankedTrackSearch(in db: Database, query: String, limit: Int?) throws -> [Track] {
+        let signpost = Perf.begin("DB track search")
+        defer { Perf.end("DB track search", signpost) }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             var request = Track.order(Column("title"))
@@ -1783,8 +2169,29 @@ class DatabaseManager: @unchecked Sendable {
 
         // Siri transcription and spelling errors rarely survive a SQL LIKE.
         // Rank the full library only after the cheap literal lookup misses.
-        let ranked = try Track.fetchAll(db).map { track in
-            (track: track, score: trimmed.cosmosSearchSimilarity(to: track.title))
+        //
+        // Only ids and titles are read for the ranking, the query is
+        // normalized once, and a title too long or too short to reach the
+        // threshold skips the edit distance. Every row used to be decoded
+        // and the query re-normalized per title: a search that matched no
+        // title - any artist-name search in the Search tab - took seconds
+        // on a 20,000-song library. Same matches, same order: the scan
+        // order is kept for the (stable) sort below.
+        let fuzzyQuery = CosmosFuzzyQuery(trimmed)
+        var scored: [(id: Int64, score: Double)] = []
+        for row in try Row.fetchAll(db, sql: "SELECT id, title FROM track") {
+            let title: String = row["title"]
+            if let score = fuzzyQuery.similarity(to: title, minimum: 0.58) {
+                scored.append((row["id"], score))
+            }
+        }
+        let tracksById: [Int64: Track] = try {
+            guard !scored.isEmpty else { return [:] }
+            let fetched = try Track.filter(scored.map(\.id).contains(Column("id"))).fetchAll(db)
+            return Dictionary(fetched.compactMap { track in track.id.map { ($0, track) } }, uniquingKeysWith: { first, _ in first })
+        }()
+        let ranked = scored.compactMap { entry in
+            tracksById[entry.id].map { (track: $0, score: entry.score) }
         }
         .filter { $0.score >= 0.58 }
         .sorted {
@@ -1875,7 +2282,10 @@ class DatabaseManager: @unchecked Sendable {
         let favorites = try read { db in
             return try Favorite.fetchAll(db).map { $0.trackStableId }
         }
-        print("🗃️ Database: Retrieved \(favorites.count) favorites - \(favorites)")
+        // The count only: the ids themselves made a 200 KB string for 3,000
+        // likes, built on the main thread each time Home, Library or Liked
+        // Songs asked how many there are.
+        print("🗃️ Database: Retrieved \(favorites.count) favorites")
         return favorites
     }
 
@@ -2252,9 +2662,55 @@ class DatabaseManager: @unchecked Sendable {
             }
     }
 
+    /// The slug a playlist titled `title` is stored under. Slugs are UNIQUE,
+    /// so titles differing only in case (or a space for a dash) are the same
+    /// playlist as far as the database goes.
+    static func playlistSlug(for title: String) -> String {
+        title.lowercased().replacingOccurrences(of: " ", with: "-")
+    }
+
+    /// The listener's playlist already titled `title` (any case), which a
+    /// new one of that name joins rather than duplicates. Matched on the
+    /// title, not the slug: a renamed playlist keeps its original slug (it
+    /// is the iCloud state's identity), so "Rock" renamed "Jazz" still holds
+    /// "rock" - matching that sent songs for a new "Rock" into "Jazz". Folder
+    /// playlists mirror their folder and are never joined.
+    func playlist(matchingTitle title: String) throws -> Playlist? {
+        let wanted = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return try read { db in
+            try Playlist
+                .filter(Column("is_folder_synced") == false)
+                .fetchAll(db)
+                .first { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == wanted }
+        }
+    }
+
+    /// `title`, or "title 2", "title 3"... when a playlist already has it -
+    /// for playlists named by the app (a saved mix), never meant to merge
+    /// into one the listener made.
+    func availablePlaylistTitle(_ title: String) throws -> String {
+        var candidate = title
+        var suffix = 2
+        while try playlist(matchingTitle: candidate) != nil {
+            candidate = "\(title) \(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+
     func createPlaylist(title: String) throws -> Playlist {
         return try write { db in
-            let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
+            // Only the slug may be taken (a renamed playlist, a folder of the
+            // same name): the UNIQUE key gets a suffix, as folder playlists'
+            // do, rather than failing the creation.
+            let generatedSlug = Self.playlistSlug(for: title)
+            let baseSlug = generatedSlug.isEmpty ? "playlist" : generatedSlug
+            var slug = baseSlug
+            var suffix = 2
+            while try Playlist.filter(Column("slug") == slug).fetchOne(db) != nil {
+                slug = "\(baseSlug)-\(suffix)"
+                suffix += 1
+            }
             let now = Int64(Date().timeIntervalSince1970)
             let playlist = Playlist(
                 id: nil,
@@ -2463,6 +2919,64 @@ class DatabaseManager: @unchecked Sendable {
                 .filter(Column("playlist_id") == playlistId)
                 .order(Column("position"))
                 .fetchAll(db)
+        }
+    }
+
+    /// Each playlist's songs in playlist order, for many playlists in one
+    /// query - what `getPlaylistItems` followed by
+    /// `getTracksByStableIdsPreservingOrder` gives for one, without two
+    /// queries per playlist (Library, Home and the playlist grid each did
+    /// that for every playlist they show). Items whose song is gone are
+    /// left out and a song listed twice appears twice, as there.
+    func getTracksForPlaylists(_ playlistIds: [Int64]) throws -> [Int64: [Track]] {
+        guard !playlistIds.isEmpty else { return [:] }
+        return try read { db in
+            var result: [Int64: [Track]] = [:]
+            // Chunked: SQLite caps the number of bound parameters.
+            for start in stride(from: 0, to: playlistIds.count, by: 500) {
+                let chunk = Array(playlistIds[start..<min(start + 500, playlistIds.count)])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                // A cursor, decoded row by row as Track.fetchAll does: fetchAll
+                // would first copy every row - thirty columns each - and made
+                // this slower than the per-playlist queries it replaces.
+                let rows = try Row.fetchCursor(
+                    db,
+                    sql: """
+                        SELECT track.*, playlist_item.playlist_id AS item_playlist_id
+                        FROM playlist_item
+                        JOIN track ON track.stable_id = playlist_item.track_stable_id
+                        WHERE playlist_item.playlist_id IN (\(placeholders))
+                        ORDER BY playlist_item.playlist_id, playlist_item.position
+                    """,
+                    arguments: StatementArguments(chunk)
+                )
+                while let row = try rows.next() {
+                    let playlistId: Int64 = row["item_playlist_id"]
+                    result[playlistId, default: []].append(try Track(row: row))
+                }
+            }
+            return result
+        }
+    }
+
+    /// Per playlist: how many items it has, and the total length of the
+    /// songs still in the library - what a playlist entity shows - in one
+    /// grouped query rather than loading every playlist's songs.
+    func getPlaylistItemStats() throws -> [Int64: (itemCount: Int, durationMs: Int)] {
+        return try read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT playlist_item.playlist_id AS playlist_id,
+                       COUNT(*) AS item_count,
+                       COALESCE(SUM(track.duration_ms), 0) AS duration_ms
+                FROM playlist_item
+                LEFT JOIN track ON track.stable_id = playlist_item.track_stable_id
+                GROUP BY playlist_item.playlist_id
+            """)
+            var result: [Int64: (itemCount: Int, durationMs: Int)] = [:]
+            for row in rows {
+                result[row["playlist_id"]] = (row["item_count"], row["duration_ms"])
+            }
+            return result
         }
     }
 
@@ -2688,9 +3202,13 @@ private extension String {
             options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
             locale: .current
         )
-        let searchable = folded.unicodeScalars
-            .map { CharacterSet.alphanumerics.contains($0) ? String($0) : " " }
-            .joined()
+        // One scalar view, not a String per scalar joined afterwards: this
+        // runs on every title in the library during a fuzzy search.
+        var scalars = String.UnicodeScalarView()
+        for scalar in folded.unicodeScalars {
+            scalars.append(CharacterSet.alphanumerics.contains(scalar) ? scalar : " ")
+        }
+        let searchable = String(scalars)
         return searchable
             .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
@@ -2698,17 +3216,43 @@ private extension String {
     }
 
     func cosmosSearchSimilarity(to other: String) -> Double {
-        let left = Array(cosmosSearchNormalized)
-        let right = Array(other.cosmosSearchNormalized)
-        guard !left.isEmpty, !right.isEmpty else { return 0 }
-        let leftString = String(left)
-        let rightString = String(right)
+        CosmosFuzzyQuery(self).similarity(to: other, minimum: nil) ?? 0
+    }
+}
+
+/// A query normalized once and compared with many titles - see
+/// `rankedTrackSearch`. `similarity` is exactly `cosmosSearchSimilarity`.
+private struct CosmosFuzzyQuery {
+    let characters: [Character]
+    let string: String
+
+    init(_ query: String) {
+        string = query.cosmosSearchNormalized
+        characters = Array(string)
+    }
+
+    /// The similarity of the query to `other`, 0...1; nil when `minimum` is
+    /// given and the title cannot reach it. The edit distance is at least
+    /// the difference in length, so a title whose length alone rules it
+    /// out is never compared character by character.
+    func similarity(to other: String, minimum: Double?) -> Double? {
+        let rightString = other.cosmosSearchNormalized
+        let left = characters
+        let right = Array(rightString)
+        guard !left.isEmpty, !right.isEmpty else { return minimum == nil ? 0 : nil }
+        let leftString = string
         if leftString == rightString { return 1 }
         if rightString.contains(leftString) { return 0.95 }
 
+        let longest = Double(max(left.count, right.count))
+        if let minimum, 1 - Double(abs(left.count - right.count)) / longest < minimum { return nil }
+
+        // Two rows reused for the whole table rather than two arrays
+        // allocated per character of the query.
         var previous = Array(0...right.count)
+        var current = Array(repeating: 0, count: right.count + 1)
         for (leftIndex, leftCharacter) in left.enumerated() {
-            var current = [leftIndex + 1] + Array(repeating: 0, count: right.count)
+            current[0] = leftIndex + 1
             for (rightIndex, rightCharacter) in right.enumerated() {
                 current[rightIndex + 1] = Swift.min(
                     current[rightIndex] + 1,
@@ -2716,9 +3260,11 @@ private extension String {
                     previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
                 )
             }
-            previous = current
+            swap(&previous, &current)
         }
-        return 1 - Double(previous[right.count]) / Double(max(left.count, right.count))
+        let score = 1 - Double(previous[right.count]) / longest
+        if let minimum, score < minimum { return nil }
+        return score
     }
 }
 
@@ -2743,11 +3289,21 @@ final class DatabaseSuspensionCoordinator {
     private var observers: [NSObjectProtocol] = []
     private var isInBackground = false
     private var isPlaybackActivityActive = false
+    /// Requests (Siri, shortcuts) that need the database awake while they
+    /// run. A count, separate from playback: playback state updates set the
+    /// flag above freely, and with one shared flag they switched it off in
+    /// the middle of a request, whose next write then failed.
+    private var holds = 0
     private var isSuspended = false
 
     private init() {}
 
-    func start() {
+    /// `assumingIdlePlayback`: for a launch that stayed in the background.
+    /// Keeps what PlayerEngine has reported so far instead of reading it -
+    /// which would build the player for a background task that never plays
+    /// (PlayerEngine reports every change through setPlaybackActivityActive,
+    /// started or not).
+    func start(assumingIdlePlayback: Bool = false) {
         guard observers.isEmpty else { return }
 
         let backgroundObserver = NotificationCenter.default.addObserver(
@@ -2782,8 +3338,24 @@ final class DatabaseSuspensionCoordinator {
         }
         observers.append(foregroundObserver)
 
-        isPlaybackActivityActive = PlayerEngine.shared.keepsDatabaseActive
+        // A CarPlay-only or other background launch starts here without ever
+        // posting didEnterBackground, so assuming the foreground left the
+        // database unsuspended until a full foreground/background cycle.
+        isInBackground = UIApplication.shared.applicationState == .background
+        if !assumingIdlePlayback {
+            isPlaybackActivityActive = PlayerEngine.shared.keepsDatabaseActive
+        }
         apply()
+    }
+
+    /// GRDB only suspends databases that exist when the notification is
+    /// posted. A launch straight into the background suspends before the
+    /// database is opened, which then stayed live - holding its app-group
+    /// file lock through the suspension that follows (0xdead10cc).
+    func databaseDidOpen() {
+        guard isSuspended else { return }
+        NotificationCenter.default.post(name: Database.suspendNotification, object: nil)
+        print("🛑 Database suspended on opening (backgrounded, not playing)")
     }
 
     /// Called directly from PlayerEngine's activity properties. This must be
@@ -2796,8 +3368,19 @@ final class DatabaseSuspensionCoordinator {
         apply()
     }
 
+    /// Keeps the database awake until the matching `endHold()`.
+    func beginHold() {
+        holds += 1
+        apply()
+    }
+
+    func endHold() {
+        holds = max(0, holds - 1)
+        apply()
+    }
+
     private func apply() {
-        let shouldSuspend = isInBackground && !isPlaybackActivityActive
+        let shouldSuspend = isInBackground && !isPlaybackActivityActive && holds == 0
         guard shouldSuspend != isSuspended else { return }
         isSuspended = shouldSuspend
 

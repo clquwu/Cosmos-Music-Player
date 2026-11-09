@@ -20,26 +20,19 @@ extension View {
     }
 }
 
+/// The Library tab: the home screen the app has always opened on. The rows,
+/// their order and which ones show are still the user's Home Screen setting;
+/// what changed is the chrome around them (a system large title and toolbar
+/// instead of a hand-built header) and a Recently Added shelf underneath.
 struct LibraryView: View {
     let tracks: [Track]
-    @Binding var showTutorial: Bool
-    @Binding var showPlaylistManagement: Bool
     @Binding var showSettings: Bool
     let onRefresh: () async -> (before: Int, after: Int)
     let onManualSync: (() async -> (before: Int, after: Int))?
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var libraryIndexer = LibraryIndexer.shared
-    @State private var artistToNavigate: Artist?
-    @State private var artistAllTracks: [Track] = []
-    @State private var albumToNavigate: Album?
-    @State private var albumAllTracks: [Track] = []
-    @State private var searchArtistToNavigate: Artist?
-    @State private var searchArtistTracks: [Track] = []
-    @State private var searchAlbumToNavigate: Album?
-    @State private var searchAlbumTracks: [Track] = []
-    @State private var searchPlaylistToNavigate: Playlist?
-    @State private var playlistToNavigate: Playlist?
-    @State private var showSearch = false
+    @ObservedObject private var theme = ThemeStore.shared
+    @ObservedObject private var router = AppRouter.shared
     @State private var settings = DeleteSettings.load()
     @State private var isRefreshing = false
     @State private var showSyncToast = false
@@ -49,6 +42,65 @@ struct LibraryView: View {
     @State private var newTracksFoundCount = 0
     @State private var syncCompleted = false
     @State private var showMusicPicker = false
+    @State private var showFolderPicker = false
+    @State private var folderOutcome: LinkedFolderImporter.Outcome?
+    @State private var filter: LibraryFilter = .all
+    @AppStorage("cosmos.library.gridLayout.v2") private var usesGridOnPhone = false
+    /// iPad and the open Duo start with covers, several to a row: the user
+    /// found the one-column list too small there. Remembered apart from the
+    /// phone's choice, which stays a list by default.
+    @AppStorage("cosmos.library.gridLayout.wide") private var usesGridWide = true
+    @State private var gridWidth: CGFloat = 0
+    /// Before release-year sorting there was only this switch; it still
+    /// decides the order until the listener picks one in the new menu.
+    @AppStorage("cosmos.library.sortAlphabetical") private var sortsAlphabetically = false
+    @AppStorage("cosmos.library.sort") private var sortRaw = ""
+    @State private var likedCount = 0
+    @State private var playlistItems: [PlaylistEntry] = []
+    @State private var albumItems: [AlbumEntry] = []
+    @State private var artistItems: [ArtistEntry] = []
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    enum LibraryFilter: Hashable {
+        case all, playlists, albums, artists
+    }
+
+    enum LibrarySort: String {
+        case recents, nameAZ
+        /// Albums only; playlists and artists keep the recent order.
+        case releaseOldest, releaseNewest
+
+        var isByRelease: Bool { self == .releaseOldest || self == .releaseNewest }
+    }
+
+    private var sort: LibrarySort {
+        LibrarySort(rawValue: sortRaw) ?? (sortsAlphabetically ? .nameAZ : .recents)
+    }
+
+    /// Release year means something only where albums are listed.
+    private var offersReleaseSort: Bool { filter == .all || filter == .albums }
+
+    struct PlaylistEntry: Identifiable {
+        let playlist: Playlist
+        let tracks: [Track]
+        var id: Int64 { playlist.id ?? -1 }
+    }
+
+    struct AlbumEntry: Identifiable {
+        let album: Album
+        let artworkTrack: Track?
+        let artistName: String?
+        /// The newest song's id: albums sort by when they arrived.
+        let addedOrder: Int64
+        var id: Int64 { album.id ?? -1 }
+    }
+
+    struct ArtistEntry: Identifiable {
+        let artist: Artist
+        let artworkTrack: Track?
+        let songCount: Int
+        var id: Int64 { artist.id ?? -1 }
+    }
 
     // Helper function to show sync feedback
     private func showSyncFeedback(trackCountBefore: Int, trackCountAfter: Int) {
@@ -91,9 +143,19 @@ struct LibraryView: View {
             }
         }
 
+        presentToast()
+
+        // Reset tracking variables
+        newTracksFoundCount = 0
+        syncCompleted = false
+    }
+
+    private func presentToast() {
         withAnimation(.easeInOut(duration: 0.2)) {
             showSyncToast = true
         }
+        // VoiceOver users would otherwise never learn the outcome.
+        UIAccessibility.post(notification: .announcement, argument: syncToastMessage)
 
         // Auto-hide toast after 3 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
@@ -101,10 +163,6 @@ struct LibraryView: View {
                 showSyncToast = false
             }
         }
-
-        // Reset tracking variables
-        newTracksFoundCount = 0
-        syncCompleted = false
     }
 
     private func importMusicFiles(_ urls: [URL]) {
@@ -167,11 +225,7 @@ struct LibraryView: View {
                     syncToastIcon = "plus.circle.fill"
                     syncToastColor = .green
                     if skippedCount == 0 {
-                        if addedCount == 1 {
-                            syncToastMessage = Localized.importedSongCount(addedCount)
-                        } else {
-                            syncToastMessage = Localized.importedSongCount(addedCount)
-                        }
+                        syncToastMessage = Localized.importedSongCount(addedCount)
                     } else if addedCount == 0 {
                         syncToastIcon = "info.circle.fill"
                         syncToastColor = .blue
@@ -180,22 +234,29 @@ struct LibraryView: View {
                         syncToastMessage = Localized.importSummary(imported: addedCount, skipped: skippedCount)
                     }
 
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showSyncToast = true
-                    }
-
-                    // Auto-hide toast after 3 seconds
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            showSyncToast = false
-                        }
-                    }
+                    presentToast()
                 }
             }
 
             // Trigger library refresh to update UI
             if addedCount > 0, let onManualSync = onManualSync {
                 _ = await onManualSync()
+            }
+        }
+    }
+
+    /// Links a folder from Files. Success is a toast, like an import; a
+    /// refusal or a no-op is an alert saying why.
+    private func linkFolder(_ url: URL) {
+        Task {
+            let outcome = await LinkedFolderImporter.link(url)
+            if case .added = outcome {
+                syncToastIcon = "folder.fill.badge.plus"
+                syncToastColor = .green
+                syncToastMessage = outcome.message
+                presentToast()
+            } else {
+                folderOutcome = outcome
             }
         }
     }
@@ -212,451 +273,810 @@ struct LibraryView: View {
         }
     }
 
-    @ViewBuilder
-    private func homeSectionView(for sectionId: HomeSectionId) -> some View {
-        switch sectionId {
-        case .allSongs:
-            NavigationLink {
-                AllSongsScreen(tracks: tracks)
-            } label: {
-                LibrarySectionRowView(
-                    title: Localized.allSongs,
-                    subtitle: Localized.songsCountOnly(tracks.count),
-                    icon: "music.note",
-                    color: settings.backgroundColorChoice.color
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-
-        case .likedSongs:
-            NavigationLink {
-                LikedSongsScreen(allTracks: tracks)
-            } label: {
-                LibrarySectionRowView(
-                    title: Localized.likedSongs,
-                    subtitle: Localized.yourFavorites,
-                    icon: "heart.fill",
-                    color: .red
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-
-        case .playlists:
-            NavigationLink {
-                PlaylistsScreen()
-            } label: {
-                LibrarySectionRowView(
-                    title: Localized.playlists,
-                    subtitle: Localized.yourPlaylists,
-                    icon: "music.note.list",
-                    color: .green
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-
-        case .artists:
-            NavigationLink {
-                ArtistsScreen(allTracks: tracks)
-            } label: {
-                LibrarySectionRowView(
-                    title: Localized.artists,
-                    subtitle: Localized.browseByArtist,
-                    icon: "person.2.fill",
-                    color: .purple
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-
-        case .albums:
-            NavigationLink {
-                AlbumsScreen(allTracks: tracks)
-            } label: {
-                LibrarySectionRowView(
-                    title: Localized.albums,
-                    subtitle: Localized.browseByAlbum,
-                    icon: "opticaldisc.fill",
-                    color: .orange
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-
-        case .addSongs:
-            Button(action: {
-                showMusicPicker = true
-            }) {
-                LibrarySectionRowView(
-                    title: Localized.addSongs,
-                    subtitle: Localized.importMusicFiles,
-                    icon: "plus.circle.fill",
-                    color: .blue
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-        }
+    private func isVisible(_ section: HomeSectionId) -> Bool {
+        settings.homeSections.contains { $0.id == section && $0.isVisible }
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                ScreenSpecificBackgroundView(screen: .library)
+        ScrollView {
+            VStack(alignment: .leading, spacing: Design.Spacing.l) {
+                if libraryIndexer.isIndexing && !libraryIndexer.currentlyProcessing.isEmpty {
+                    processingBanner
+                        .pagePadding()
+                }
 
-                VStack(spacing: 0) {
+                if tracks.isEmpty {
+                    // Nothing to filter yet: no picker, and the welcome in the
+                    // middle of the page as on Home, rather than floating
+                    // under an empty picker near the top.
+                    emptyLibrary
+                        .containerRelativeFrame(.vertical, alignment: .center)
+                } else {
+                    filterPicker
+                        .pagePadding()
 
-                    // Compact processing status at the top of library
-                    if libraryIndexer.isIndexing && !libraryIndexer.currentlyProcessing.isEmpty {
-                        HStack(spacing: 8) {
+                    collection
+                        .pagePadding()
+                }
+            }
+            .padding(.top, Design.Spacing.xs)
+            .padding(.bottom, Design.Spacing.xl)
+        }
+        .debugScrollToBottom()
+        .background(ScreenSpecificBackgroundView(screen: .library))
+        .cosmosTabHeader(Localized.libraryTab)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                viewMenu
+
+                if onManualSync != nil {
+                    Button {
+                        startManualSync()
+                    } label: {
+                        if isRefreshing {
                             ProgressView()
-                                .scaleEffect(0.6)
-                                .frame(width: 12, height: 12)
-
-                            Text("\(Localized.processing): \(libraryIndexer.currentlyProcessing)")
-                                .font(.caption2)
-                                .foregroundColor(settings.backgroundColorChoice.color)
-                                .lineLimit(1)
-
-                            Spacer()
+                        } else {
+                            Label(Localized.syncLibrary, systemImage: "arrow.clockwise")
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .background(settings.backgroundColorChoice.color.opacity(0.05))
                     }
-
-                    // Large section rows
-                    ScrollView {
-                        VStack(spacing: 16) {
-                            // Library title with icons that scrolls with content
-                            HStack(alignment: .center) {
-                                HStack(spacing: 10) {
-                                    Image("AppLogo")
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(width: 32, height: 32)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                    Text(Localized.library)
-                                        .responsiveLibraryTitleFont()
-                                        .foregroundColor(.primary)
-                                }
-
-                                Spacer()
-
-                                HStack(spacing: 20) {
-                                    // Sync button (if available)
-                                    if let onManualSync = onManualSync {
-                                        Button(action: {
-                                            guard !isRefreshing else { return }
-
-                                            // Provide immediate haptic feedback
-                                            let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                                            impactFeedback.impactOccurred()
-
-                                            withAnimation(.easeInOut(duration: 0.1)) {
-                                                isRefreshing = true
-                                            }
-
-                                            Task {
-                                                // Wait for any ongoing indexing to complete first
-                                                while libraryIndexer.isIndexing {
-                                                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                                                }
-
-                                                let result = await onManualSync()
-
-                                                await MainActor.run {
-                                                    isRefreshing = false
-                                                    showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
-                                                }
-                                            }
-                                        }) {
-                                            ZStack {
-                                                if isRefreshing {
-                                                    ProgressView()
-                                                        .scaleEffect(0.8)
-                                                        .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
-                                                } else {
-                                                    Image(systemName: "arrow.clockwise")
-                                                        .font(.system(size: 26, weight: .medium))
-                                                        .foregroundColor(settings.backgroundColorChoice.color)
-                                                }
-                                            }
-                                            .padding(.bottom, 4)
-                                            .scaleEffect(isRefreshing ? 0.9 : 1.0)
-                                            .animation(.easeInOut(duration: 0.2), value: isRefreshing)
-                                        }
-                                        .disabled(isRefreshing)
-                                    }
-
-                                    // Search button (center)
-                                    Button(action: {
-                                        showSearch = true
-                                    }) {
-                                        Image(systemName: "magnifyingglass")
-                                            .font(.system(size: 26, weight: .medium))
-                                            .foregroundColor(settings.backgroundColorChoice.color)
-                                    }
-
-                                    // Settings button
-                                    Button(action: {
-                                        showSettings = true
-                                    }) {
-                                        Image(systemName: "gearshape")
-                                            .font(.system(size: 26, weight: .medium))
-                                            .foregroundColor(settings.backgroundColorChoice.color)
-                                    }
-                                }
-                            }
-                            .padding(.leading, 4)
-                            .padding(.trailing, 4)
-                            ForEach(settings.homeSections.filter(\.isVisible)) { section in
-                                homeSectionView(for: section.id)
-                            }
-                        }
-                        .padding(16)
-                        .padding(.bottom, 100) // Add padding for mini player
-                    }
-                }
-                .navigationTitle("")
-                .navigationBarTitleDisplayMode(.large)
-                .refreshable {
-                    // Prevent multiple concurrent refreshes
-                    guard !isRefreshing else { return }
-
-                    // Provide haptic feedback for pull-to-refresh
-                    let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                    impactFeedback.impactOccurred()
-
-                    // Wait for any ongoing indexing to complete before starting sync
-                    while libraryIndexer.isIndexing {
-                        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                    }
-
-                    // For pull-to-refresh, use manual sync if available, otherwise just refresh
-                    let result = if let onManualSync = onManualSync {
-                        await onManualSync() // Full sync + refresh
-                    } else {
-                        await onRefresh()    // Just refresh
-                    }
-
-                    // Show feedback after sync/refresh is complete
-                    await MainActor.run {
-                        showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
-                    }
+                    .disabled(isRefreshing)
                 }
 
-                // Hidden NavigationLink for programmatic navigation from player
-                NavigationLink(
-                    destination: artistToNavigate.map { artist in
-                        ArtistDetailScreenWrapper(artistName: artist.name, allTracks: artistAllTracks)
-                    },
-                    isActive: Binding(
-                        get: { artistToNavigate != nil },
-                        set: { if !$0 { artistToNavigate = nil } }
-                    )
-                ) {
-                    EmptyView()
+                Menu {
+                    addMenuItems
+                } label: {
+                    Label(Localized.addMusic, systemImage: "plus")
                 }
-                .hidden()
 
-                // Hidden NavigationLink for album navigation from player
-                NavigationLink(
-                    destination: albumToNavigate.map { album in
-                        AlbumDetailScreen(album: album, allTracks: albumAllTracks)
-                    },
-                    isActive: Binding(
-                        get: { albumToNavigate != nil },
-                        set: { if !$0 { albumToNavigate = nil } }
-                    )
-                ) {
-                    EmptyView()
-                }
-                .hidden()
-
-            }
-            .navigationDestination(isPresented: Binding(
-                get: { searchArtistToNavigate != nil },
-                set: { if !$0 { searchArtistToNavigate = nil } }
-            )) {
-                if let artist = searchArtistToNavigate {
-
-                    ArtistDetailScreen(artist: artist, allTracks: searchArtistTracks)
+                Button {
+                    showSettings = true
+                } label: {
+                    Label(Localized.settings, systemImage: "gearshape")
                 }
             }
-            .navigationDestination(isPresented: Binding(
-                get: { searchAlbumToNavigate != nil },
-                set: { if !$0 { searchAlbumToNavigate = nil } }
-            )) {
-                if let album = searchAlbumToNavigate {
-                    AlbumDetailScreen(album: album, allTracks: searchAlbumTracks)
-                }
+            .cosmosPlainBackground()
+        }
+        .refreshable {
+            // Prevent multiple concurrent refreshes
+            guard !isRefreshing else { return }
+
+            // Provide haptic feedback for pull-to-refresh
+            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+            impactFeedback.impactOccurred()
+
+            // Wait for any ongoing indexing to complete before starting sync
+            while libraryIndexer.isIndexing {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
             }
-            .navigationDestination(isPresented: Binding(
-                get: { searchPlaylistToNavigate != nil },
-                set: { if !$0 { searchPlaylistToNavigate = nil } }
-            )) {
-                if let playlist = searchPlaylistToNavigate {
-                    PlaylistDetailScreen(playlist: playlist)
-                }
+
+            // For pull-to-refresh, use manual sync if available, otherwise just refresh
+            let result = if let onManualSync = onManualSync {
+                await onManualSync() // Full sync + refresh
+            } else {
+                await onRefresh()    // Just refresh
             }
-            .navigationDestination(isPresented: Binding(
-                get: { playlistToNavigate != nil },
-                set: { if !$0 { playlistToNavigate = nil } }
-            )) {
-                if let playlist = playlistToNavigate {
-                    PlaylistDetailScreen(playlist: playlist)
-                }
+
+            // Show feedback after sync/refresh is complete
+            await MainActor.run {
+                showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
             }
         }
-        .background(.clear)
-        .toolbarBackground(.clear, for: .navigationBar)
-        .toolbarBackground(.clear, for: .automatic)
-        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
-            settings = DeleteSettings.load()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToArtistFromPlayer"))) { notification in
-            if let userInfo = notification.userInfo,
-               let artist = userInfo["artist"] as? Artist,
-               let allTracks = userInfo["allTracks"] as? [Track] {
-                artistToNavigate = artist
-                artistAllTracks = allTracks
+        .overlay(alignment: .bottom) {
+            if showSyncToast {
+                syncToast
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToAlbumFromPlayer"))) { notification in
-            if let userInfo = notification.userInfo,
-               let album = userInfo["album"] as? Album,
-               let allTracks = userInfo["allTracks"] as? [Track] {
-                albumToNavigate = album
-                albumAllTracks = allTracks
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToPlaylist"))) { notification in
-            if let userInfo = notification.userInfo,
-               let playlistId = userInfo["playlistId"] as? Int64 {
-                do {
-                    let playlists = try appCoordinator.databaseManager.getAllPlaylists()
-                    if let playlist = playlists.first(where: { $0.id == playlistId }) {
-                        playlistToNavigate = playlist
-                        print("✅ LibraryView: Navigating to playlist \(playlist.title)")
-                    }
-                } catch {
-                    print("❌ LibraryView: Failed to find playlist: \(error)")
-                }
-            }
-        }
-        .overlay(
-            // Sync result toast notification
-            Group {
-                if showSyncToast {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Image(systemName: syncToastIcon)
-                                .foregroundColor(syncToastColor)
-                                .font(.system(size: 16, weight: .medium))
-                            Text(syncToastMessage)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(.primary)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(.regularMaterial)
-                                .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 6)
-                        )
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 120) // Space above mini player
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
-            }
-                .animation(.easeInOut(duration: 0.3), value: showSyncToast)
-        )
-        .sheet(isPresented: $showSearch) {
-            SearchView(
-                allTracks: tracks,
-                onNavigateToArtist: { artist, tracks in
-                    searchArtistToNavigate = artist
-                    searchArtistTracks = tracks
-                },
-                onNavigateToAlbum: { album, tracks in
-                    searchAlbumToNavigate = album
-                    searchAlbumTracks = tracks
-                },
-                onNavigateToPlaylist: { playlist in
-                    searchPlaylistToNavigate = playlist
-                }
-            )
-            .accentColor(settings.backgroundColorChoice.color)
-        }
+        .animation(.easeInOut(duration: 0.3), value: showSyncToast)
+        .animation(.snappy(duration: 0.3), value: filter)
+        .animation(.snappy(duration: 0.3), value: usesGrid)
         .sheet(isPresented: $showMusicPicker) {
             MusicFilePicker { urls in
                 importMusicFiles(urls)
             }
         }
-    }
-}
-
-struct LibrarySectionRowView: View {
-    let title: String
-    let subtitle: String
-    let icon: String
-    let color: Color
-    @State private var settings = DeleteSettings.load()
-
-    var body: some View {
-        HStack(spacing: 16) {
-            // Icon
-            if settings.minimalistIcons {
-                Image(systemName: icon)
-                    .font(.system(size: 24, weight: .medium))
-                    .foregroundColor(.primary)
-                    .frame(width: 60, height: 60)
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(color.opacity(0.2))
-                        .frame(width: 60, height: 60)
-
-                    Image(systemName: icon)
-                        .font(.system(size: 24, weight: .medium))
-                        .foregroundColor(color)
-                }
+        .sheet(isPresented: $showFolderPicker) {
+            MusicFolderPicker { url in
+                linkFolder(url)
             }
-
-            // Text content
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .responsiveSectionTitleFont()
-                    .foregroundColor(.primary)
-
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            // Chevron
-            Image(systemName: "chevron.right")
-                .font(.body)
-                .foregroundColor(.secondary)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .background(
-            // Glassy background that reflects gradient
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.ultraThinMaterial)
-                .opacity(0.8)
-        )
-        .cornerRadius(12)
-        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
+        .linkedFolderAlert($folderOutcome)
+        .onChange(of: router.importRequest) { _, _ in
+            showMusicPicker = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
-            settings = DeleteSettings.load()
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            loadLibrary()
         }
+        .task(id: TrackSearchIndex.identity(for: tracks)) {
+            loadLibrary()
+        }
+        .onChange(of: sortRaw) { _, _ in
+            loadLibrary()
+        }
+    }
+
+    // MARK: Pieces
+
+    private var processingBanner: some View {
+        HStack(spacing: Design.Spacing.s) {
+            ProgressView()
+                .controlSize(.small)
+
+            Text("\(Localized.processing): \(libraryIndexer.currentlyProcessing)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Design.Spacing.m)
+        .padding(.vertical, Design.Spacing.s)
+        .background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: Design.Radius.thumbnail, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// What the library shows, as the system's segmented control.
+    private var filterPicker: some View {
+        Picker(Localized.libraryTab, selection: $filter) {
+            Text(Localized.all).tag(LibraryFilter.all)
+            if isVisible(.playlists) {
+                Text(Localized.playlists).tag(LibraryFilter.playlists)
+            }
+            if isVisible(.albums) {
+                Text(Localized.albums).tag(LibraryFilter.albums)
+            }
+            if isVisible(.artists) {
+                Text(Localized.artists).tag(LibraryFilter.artists)
+            }
+        }
+        .pickerStyle(.segmented)
+        // The page's full width on iPad too, lined up with the rows under
+        // it: capped at 520 points it sat as a small box against the left
+        // edge.
+        .sensoryFeedback(.selection, trigger: filter)
+    }
+
+    /// Sort, layout and sync, in one toolbar menu.
+    private var viewMenu: some View {
+        Menu {
+            Picker(selection: Binding(
+                get: { offersReleaseSort || !sort.isByRelease ? sort : .recents },
+                set: { sortRaw = $0.rawValue }
+            )) {
+                Label(Localized.recents, systemImage: "clock").tag(LibrarySort.recents)
+                Label(Localized.sortNameAZ, systemImage: "textformat").tag(LibrarySort.nameAZ)
+                if offersReleaseSort {
+                    Label(Localized.sortReleaseOldest, systemImage: "calendar").tag(LibrarySort.releaseOldest)
+                    Label(Localized.sortReleaseNewest, systemImage: "calendar").tag(LibrarySort.releaseNewest)
+                }
+            } label: {
+                Text(Localized.sortBy)
+            }
+            .pickerStyle(.inline)
+
+            Picker(selection: Binding(
+                get: { usesGrid },
+                set: { if isRegular { usesGridWide = $0 } else { usesGridOnPhone = $0 } }
+            )) {
+                Label(Localized.listView, systemImage: "list.bullet").tag(false)
+                Label(Localized.gridView, systemImage: "square.grid.2x2").tag(true)
+            } label: {
+                EmptyView()
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Label(Localized.sortBy, systemImage: "arrow.up.arrow.down")
+        }
+    }
+
+    /// Add songs, a folder or an M3U playlist: the toolbar's "+" and, on
+    /// the phone, the "Add Music" row at the top of the list.
+    @ViewBuilder
+    private var addMenuItems: some View {
+        Button {
+            showMusicPicker = true
+        } label: {
+            Label(Localized.addSongsFiles, systemImage: "music.note")
+        }
+        Button {
+            showFolderPicker = true
+        } label: {
+            Label(Localized.addFolder, systemImage: "folder.badge.plus")
+        }
+        PlaylistImportMenuButton()
+    }
+
+    // MARK: Collection
+
+    private enum Entry: Identifiable {
+        /// The phone's "Add Music" row. The toolbar's "+" sits among four
+        /// small icons there, and people did not find M3U import or
+        /// folder linking behind it.
+        case add
+        case songs
+        case liked
+        case folders
+        case playlist(PlaylistEntry)
+        case album(AlbumEntry)
+        case artist(ArtistEntry)
+
+        var id: String {
+            switch self {
+            case .add: return "add"
+            case .songs: return "songs"
+            case .liked: return "liked"
+            case .folders: return "folders"
+            case .playlist(let item): return "p\(item.id)"
+            case .album(let item): return "a\(item.id)"
+            case .artist(let item): return "r\(item.id)"
+            }
+        }
+    }
+
+    /// What the current filter shows: everything you collected - Liked Songs
+    /// pinned first, then playlists and albums - or one kind on its own.
+    private var entries: [Entry] {
+        let playlists = playlistItems.map(Entry.playlist)
+        let albums = albumItems.map(Entry.album)
+        let artists = artistItems.map(Entry.artist)
+        // On the phone, first in "All" and "Playlists" - where new music and
+        // imported playlists land.
+        let add: [Entry] = !isRegular && (filter == .all || filter == .playlists) ? [.add] : []
+        return add + filteredEntries(playlists: playlists, albums: albums, artists: artists)
+    }
+
+    private func filteredEntries(playlists: [Entry], albums: [Entry], artists: [Entry]) -> [Entry] {
+        switch filter {
+        case .all:
+            return (isVisible(.allSongs) ? [.songs] : []) + (isVisible(.likedSongs) ? [.liked] : []) + [.folders] + playlists + albums
+        case .playlists:
+            return (isVisible(.likedSongs) ? [.liked] : []) + playlists
+        case .albums:
+            return albums
+        case .artists:
+            return artists
+        }
+    }
+
+    private var emptyLibrary: some View {
+        CosmosEmptyState(
+            systemImage: "square.stack",
+            title: Localized.noSongsFound,
+            message: Localized.welcomeMessage,
+            actionTitle: Localized.addSongs
+        ) {
+            showMusicPicker = true
+        }
+    }
+
+    @ViewBuilder
+    private var collection: some View {
+        if usesGrid {
+            let isLarge = usesLargeGridTiles
+            TileGrid(minimum: isLarge ? 180 : 100, maximum: isLarge ? 260 : 240, spacing: isLarge ? Design.Spacing.l : Design.Spacing.m, rowSpacing: isLarge ? Design.Spacing.xl : Design.Spacing.l) {
+                ForEach(entries) { entry in
+                    gridCell(entry)
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
+        } else {
+            // One column where the list is chosen, as on the phone (two
+            // columns side by side were tried on iPad and turned down).
+            LazyVStack(spacing: Design.Spacing.xs) {
+                ForEach(entries) { entry in
+                    listRow(entry)
+                }
+            }
+        }
+    }
+
+    private var isRegular: Bool { horizontalSizeClass == .regular }
+
+    private var usesGrid: Bool { isRegular ? usesGridWide : usesGridOnPhone }
+
+    /// iPad's bigger tiles, where three of them fit across. A "regular"
+    /// page can be phone-narrow - iPhone Duo's page on one half of the
+    /// fold, 340 points - and there the bigger minimum left one tile per
+    /// row, each as wide as the screen half.
+    private var usesLargeGridTiles: Bool {
+        isRegular && gridWidth >= 180 * 3 + Design.Spacing.l * 2
+    }
+
+    @ViewBuilder
+    private func gridCell(_ entry: Entry) -> some View {
+        switch entry {
+        case .add:
+            Menu {
+                addMenuItems
+            } label: {
+                VStack(alignment: .leading, spacing: Design.Spacing.xs + 2) {
+                    AddMusicCover()
+                    tileText(Localized.addMusic, subtitle: Localized.libraryAddRowSubtitle)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .songs:
+            NavigationLink(value: LibraryRoute.allSongs) {
+                VStack(alignment: .leading, spacing: Design.Spacing.xs + 2) {
+                    SongsCover()
+                    tileText(Localized.songs, subtitle: Localized.songsCountOnly(tracks.count), pinned: true)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .liked:
+            NavigationLink(value: LibraryRoute.likedSongs) {
+                VStack(alignment: .leading, spacing: Design.Spacing.xs + 2) {
+                    LikedSongsCover()
+                        .overlay(alignment: .bottomTrailing) {
+                            if isRegular {
+                                TilePlayButton { QuickPlay.liked(from: tracks) }
+                                    .padding(Design.Spacing.xs)
+                            }
+                        }
+                    tileText(Localized.likedSongs, subtitle: Localized.songsCountOnly(likedCount), pinned: true)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .folders:
+            NavigationLink(value: LibraryRoute.folders) {
+                VStack(alignment: .leading, spacing: Design.Spacing.xs + 2) {
+                    FoldersCover()
+                    tileText(Localized.folders, subtitle: foldersSubtitle, pinned: true)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .playlist(let item):
+            NavigationLink(value: LibraryRoute.playlist(id: item.id)) {
+                VStack(alignment: .leading, spacing: Design.Spacing.xs + 2) {
+                    PlaylistTileCover(playlist: item.playlist, tracks: item.tracks)
+                        .overlay(alignment: .bottomTrailing) {
+                            if isRegular && !item.tracks.isEmpty {
+                                TilePlayButton { QuickPlay.playlist(item.id) }
+                                    .padding(Design.Spacing.xs)
+                            }
+                        }
+                    tileText(item.playlist.title, subtitle: isRegular ? "\(Localized.playlist) · \(Localized.songsCountOnly(item.tracks.count))" : Localized.playlist)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .album(let item):
+            NavigationLink(value: LibraryRoute.album(id: item.id)) {
+                AlbumTileView(album: item.album, artworkTrack: item.artworkTrack, subtitle: item.artistName, onPlay: isRegular ? { QuickPlay.album(item.id) } : nil)
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .artist(let item):
+            NavigationLink(value: LibraryRoute.artist(id: item.artist.id, name: item.artist.name)) {
+                VStack(spacing: Design.Spacing.s) {
+                    ArtistAvatar(name: item.artist.name, artworkTrack: item.artworkTrack)
+                        .aspectRatio(1, contentMode: .fit)
+                    Text(item.artist.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(Localized.songsCountOnly(item.songCount))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
+            .buttonStyle(PressableButtonStyle())
+        }
+    }
+
+    @ViewBuilder
+    private func listRow(_ entry: Entry) -> some View {
+        switch entry {
+        case .add:
+            Menu {
+                addMenuItems
+            } label: {
+                CollectionRow(title: Localized.addMusic, subtitle: Localized.libraryAddRowSubtitle) {
+                    AddMusicCover(cornerRadius: 6)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .songs:
+            NavigationLink(value: LibraryRoute.allSongs) {
+                CollectionRow(title: Localized.songs, subtitle: Localized.songsCountOnly(tracks.count), pinned: true) {
+                    SongsCover(cornerRadius: 6)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .liked:
+            NavigationLink(value: LibraryRoute.likedSongs) {
+                CollectionRow(title: Localized.likedSongs, subtitle: "\(Localized.playlist) · \(Localized.songsCountOnly(likedCount))", pinned: true) {
+                    LikedSongsCover(cornerRadius: 6)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .folders:
+            NavigationLink(value: LibraryRoute.folders) {
+                CollectionRow(title: Localized.folders, subtitle: foldersSubtitle, pinned: true) {
+                    FoldersCover(cornerRadius: 6)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .playlist(let item):
+            NavigationLink(value: LibraryRoute.playlist(id: item.id)) {
+                CollectionRow(title: item.playlist.title, subtitle: "\(Localized.playlist) · \(Localized.songsCountOnly(item.tracks.count))") {
+                    PlaylistTileCover(playlist: item.playlist, tracks: item.tracks, cornerRadius: 6)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .album(let item):
+            NavigationLink(value: LibraryRoute.album(id: item.id)) {
+                CollectionRow(title: item.album.title, subtitle: [Localized.album, item.artistName].compactMap { $0 }.joined(separator: " · ")) {
+                    AlbumThumb(track: item.artworkTrack)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        case .artist(let item):
+            NavigationLink(value: LibraryRoute.artist(id: item.artist.id, name: item.artist.name)) {
+                CollectionRow(title: item.artist.name, subtitle: "\(Localized.artist) · \(Localized.songsCountOnly(item.songCount))") {
+                    ArtistAvatar(name: item.artist.name, artworkTrack: item.artworkTrack)
+                }
+            }
+            .buttonStyle(PressableButtonStyle())
+        }
+    }
+
+    /// Where the songs come from: this device, then each linked folder.
+    private var foldersSubtitle: String {
+        ([Localized.onThisDevice] + LinkedFolderStore.shared.folders.map(\.name)).joined(separator: " · ")
+    }
+
+    private func tileText(_ title: String, subtitle: String, pinned: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                if pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(theme.accent)
+                        .accessibilityHidden(true)
+                }
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func startManualSync() {
+        guard !isRefreshing, let onManualSync else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        isRefreshing = true
+        Task {
+            while libraryIndexer.isIndexing {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            let result = await onManualSync()
+            isRefreshing = false
+            showSyncFeedback(trackCountBefore: result.before, trackCountAfter: result.after)
+        }
+    }
+
+    private var syncToast: some View {
+        HStack(spacing: Design.Spacing.s) {
+            Image(systemName: syncToastIcon)
+                .foregroundStyle(syncToastColor)
+                .font(.body.weight(.medium))
+            Text(syncToastMessage)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, Design.Spacing.l)
+        .padding(.vertical, Design.Spacing.m)
+        .background(.regularMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+        .padding(.bottom, Design.Spacing.xl)
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: Data
+
+    private func loadLibrary() {
+        let signpost = Perf.begin("Library load")
+        defer { Perf.end("Library load", signpost) }
+        let database = appCoordinator.databaseManager
+        likedCount = (try? appCoordinator.getFavorites().count) ?? 0
+
+        // Per album: the newest song (when it arrived), a song with a cover
+        // and the earliest year among its songs.
+        var newest: [Int64: Int64] = [:]
+        var trackYears: [Int64: Int] = [:]
+        var artwork: [Int64: Track] = [:]
+        var artistArtwork: [Int64: Track] = [:]
+        var artistCounts: [Int64: Int] = [:]
+        for track in tracks {
+            if let albumId = track.albumId {
+                newest[albumId] = max(newest[albumId] ?? 0, track.id ?? 0)
+                if let year = track.year {
+                    trackYears[albumId] = min(trackYears[albumId] ?? year, year)
+                }
+                if artwork[albumId] == nil || (!(artwork[albumId]?.hasArtwork ?? false) && track.hasArtwork) {
+                    artwork[albumId] = track
+                }
+            }
+            if let artistId = track.artistId {
+                artistCounts[artistId, default: 0] += 1
+                if artistArtwork[artistId] == nil, track.hasArtwork {
+                    artistArtwork[artistId] = track
+                }
+            }
+        }
+
+        let names = (try? database.getAllArtistNamesById()) ?? [:]
+
+        var albums = ((try? appCoordinator.getAllAlbums()) ?? []).compactMap { album -> AlbumEntry? in
+            guard let id = album.id else { return nil }
+            return AlbumEntry(
+                album: album,
+                artworkTrack: artwork[id],
+                artistName: album.albumArtist ?? album.artistId.flatMap { names[$0] },
+                addedOrder: newest[id] ?? 0
+            )
+        }
+        let allPlaylists = (try? database.getAllPlaylists()) ?? []
+        // Every playlist's songs from one query, not two per playlist.
+        let tracksByPlaylist = (try? database.getTracksForPlaylists(allPlaylists.compactMap(\.id))) ?? [:]
+        var playlists = allPlaylists.compactMap { playlist -> PlaylistEntry? in
+            guard let id = playlist.id else { return nil }
+            return PlaylistEntry(playlist: playlist, tracks: tracksByPlaylist[id] ?? [])
+        }
+        var artists = ((try? database.getBrowsableArtists(mode: settings.artistListMode)) ?? []).compactMap { artist -> ArtistEntry? in
+            guard let id = artist.id else { return nil }
+            return ArtistEntry(artist: artist, artworkTrack: artistArtwork[id], songCount: artistCounts[id] ?? 0)
+        }
+
+        switch sort {
+        case .nameAZ:
+            albums.sort { $0.album.title.localizedCaseInsensitiveCompare($1.album.title) == .orderedAscending }
+            playlists.sort { $0.playlist.title.localizedCaseInsensitiveCompare($1.playlist.title) == .orderedAscending }
+            artists.sort { $0.artist.name.localizedCaseInsensitiveCompare($1.artist.name) == .orderedAscending }
+        case .recents, .releaseOldest, .releaseNewest:
+            // Playlists already come most recently played first.
+            albums.sort { $0.addedOrder > $1.addedOrder }
+            artists.sort { $0.songCount > $1.songCount }
+        }
+        if sort.isByRelease {
+            // The album's own year tag, else its songs' earliest: many files
+            // carry the year per song only. Albums with no year go last; the
+            // same year keeps the recent order above (a stable sort).
+            func year(_ entry: AlbumEntry) -> Int? {
+                if let year = entry.album.year, (1000...9999).contains(year) { return year }
+                return trackYears[entry.id]
+            }
+            let newestFirst = sort == .releaseNewest
+            albums = albums.enumerated().sorted { a, b in
+                switch (year(a.element), year(b.element)) {
+                case let (x?, y?) where x != y: return newestFirst ? x > y : x < y
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: return a.offset < b.offset
+                }
+            }.map(\.element)
+        }
+
+        albumItems = albums
+        playlistItems = playlists
+        artistItems = artists
+    }
+
+}
+
+/// A row of the Library list: 64pt artwork, title, kind and count.
+struct CollectionRow<Artwork: View>: View {
+    let title: String
+    let subtitle: String
+    var pinned = false
+    @ViewBuilder let artwork: () -> Artwork
+    @ObservedObject private var theme = ThemeStore.shared
+
+    var body: some View {
+        HStack(spacing: Design.Spacing.m) {
+            artwork()
+                .frame(width: 64, height: 64)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(theme.accent)
+                            .accessibilityHidden(true)
+                    }
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, Design.Spacing.xs)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// An album's cover for a list row.
+struct AlbumThumb: View {
+    let track: Track?
+    @State private var image: UIImage?
+
+    var body: some View {
+        ArtworkView(image: image, cornerRadius: 6, placeholderSymbol: "opticaldisc")
+            .task(id: track?.stableId) {
+                guard let track else { return }
+                image = await ArtworkManager.shared.getThumbnail(for: track)
+            }
+    }
+}
+
+/// Liked Songs' cover: a heart on a warm gradient, the way music apps mark
+/// the one collection the app makes for you.
+struct LikedSongsCover: View {
+    var cornerRadius: CGFloat = Design.Radius.artwork
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(LinearGradient(colors: [Color(red: 0.93, green: 0.25, blue: 0.40), Color(red: 0.55, green: 0.20, blue: 0.75)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay {
+                GeometryReader { geometry in
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: geometry.size.width * 0.32, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The cover of the phone's "Add Music" row: a plus on a quiet tile, so it
+/// reads as an action rather than one more collection.
+struct AddMusicCover: View {
+    var cornerRadius: CGFloat = Design.Radius.artwork
+    @ObservedObject private var theme = ThemeStore.shared
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(theme.accent.opacity(0.14))
+            .overlay {
+                GeometryReader { geometry in
+                    Image(systemName: "plus")
+                        .font(.system(size: geometry.size.width * 0.36, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The cover of the Songs entry: the accent colour with a note.
+struct SongsCover: View {
+    var cornerRadius: CGFloat = Design.Radius.artwork
+    @ObservedObject private var theme = ThemeStore.shared
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(LinearGradient(colors: [theme.accent, theme.accent.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay {
+                GeometryReader { geometry in
+                    Image(systemName: "music.note")
+                        .font(.system(size: geometry.size.width * 0.32, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The cover of the Folders entry: a folder on the accent colour.
+struct FoldersCover: View {
+    var cornerRadius: CGFloat = Design.Radius.artwork
+    @ObservedObject private var theme = ThemeStore.shared
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(LinearGradient(colors: [theme.accent.opacity(0.75), Color(red: 0.12, green: 0.55, blue: 0.70)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay {
+                GeometryReader { geometry in
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: geometry.size.width * 0.32, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A playlist's cover for the Library grid, loading its own artwork.
+struct PlaylistTileCover: View {
+    let playlist: Playlist
+    let tracks: [Track]
+    var cornerRadius: CGFloat = Design.Radius.artwork
+    @State private var artworks: [UIImage] = []
+    @State private var customCover: UIImage?
+
+    var body: some View {
+        PlaylistCoverView(customCover: customCover, artworks: artworks, trackCount: tracks.count)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .task(id: tracks.first?.stableId) {
+                if let path = playlist.customCoverImagePath, !path.isEmpty,
+                   let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.clq.Cosmos-Music-Player"),
+                   let data = try? Data(contentsOf: container.appendingPathComponent(path)) {
+                    customCover = UIImage(data: data)
+                }
+                var loaded: [UIImage] = []
+                for track in tracks.prefix(4) {
+                    if let image = await ArtworkManager.shared.getThumbnail(for: track, maxPixelSize: 256) {
+                        loaded.append(image)
+                    }
+                }
+                artworks = loaded
+            }
+    }
+}
+
+/// One row of the Library list: accent icon, name, count, chevron.
+struct LibrarySectionRow: View {
+    let title: String
+    let systemImage: String
+    let count: Int?
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: Design.Spacing.l) {
+            Image(systemName: systemImage)
+                .font(.title2)
+                .foregroundStyle(tint)
+                .frame(width: 32)
+                .accessibilityHidden(true)
+
+            Text(title)
+                .font(.title3)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Spacer(minLength: Design.Spacing.s)
+
+            if let count {
+                Text("\(count)")
+                    .font(.body)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, Design.Spacing.l)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -670,7 +1090,9 @@ struct AllSongsScreen: View {
         TrackListView(tracks: tracks, listIdentifier: "all_songs", showsShuffleButton: true)
             .background(ScreenSpecificBackgroundView(screen: .allSongs))
             .navigationTitle(Localized.allSongs)
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
+            // Puts Songs on Home's Start Listening, like an album or playlist.
+            .onAppear { ListeningHistory.shared.recordSource(.allSongs) }
     }
 }
 
@@ -688,7 +1110,7 @@ struct LikedSongsScreen: View {
         )
             .background(ScreenSpecificBackgroundView(screen: .likedSongs))
             .navigationTitle(Localized.likedSongs)
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
             .onAppear {
                 loadLikedTracks()
             }
@@ -698,12 +1120,46 @@ struct LikedSongsScreen: View {
     }
 
     private func loadLikedTracks() {
+        let signpost = Perf.begin("Liked songs load")
+        defer { Perf.end("Liked songs load", signpost) }
         do {
-            let favoriteIds = try appCoordinator.getFavorites()
+            // A set: `contains` on the array compared every song with every
+            // favourite - 60 million string comparisons for 20,000 songs and
+            // 3,000 likes, on the main thread, each time Liked Songs opened.
+            let favoriteIds = Set(try appCoordinator.getFavorites())
             likedTracks = allTracks.filter { favoriteIds.contains($0.stableId) }
         } catch {
             print("Failed to load liked tracks: \(error)")
         }
+    }
+}
+
+/// The last sorted song list and what it was sorted from.
+///
+/// `TrackListView` re-runs its body for things that do not change the order
+/// - selecting a song, bulk mode, the "acted on" flash - and each pass sorted
+/// the whole list again: tens of milliseconds for 20,000 songs by date, far
+/// more by name (a lowercased copy of both titles per comparison). Comparing
+/// the input is cheap when nothing changed: an untouched array compares by
+/// its storage before any element. A class, so remembering a result inside
+/// `body` is not a state change.
+final class TrackSortCache {
+    private var input: [Track] = []
+    private var option: TrackSortOption?
+    private var output: [Track] = []
+
+    func sorted(_ tracks: [Track], by option: TrackSortOption, using sort: ([Track]) -> [Track]) -> [Track] {
+        if option == self.option, tracks == input { return output }
+        input = tracks
+        self.option = option
+        output = sort(tracks)
+        return output
+    }
+
+    func invalidate() {
+        option = nil
+        input = []
+        output = []
     }
 }
 
@@ -756,6 +1212,7 @@ struct TrackListView: View {
     @State private var settings = DeleteSettings.load()
     @StateObject private var search = LibrarySearchState()
     @State private var searchIndex = TrackSearchIndex()
+    @State private var sortCache = TrackSortCache()
 
     init(tracks: [Track], playlist: Playlist? = nil, isEditMode: Bool = false, listIdentifier: String? = nil, isLikedSongsScreen: Bool = false, showsShuffleButton: Bool = false) {
         self.tracks = tracks
@@ -790,7 +1247,10 @@ struct TrackListView: View {
         // Narrow before sorting - the artist sorts below build a cache over
         // whatever survives this, and there is no point resolving names for
         // rows the search has already excluded.
-        sorted(searchIndex.filter(playableTracks, query: search.text))
+        Perf.measure("Song list filter+sort") {
+            let filtered = searchIndex.filter(playableTracks, query: search.text)
+            return sortCache.sorted(filtered, by: sortOption) { sorted($0) }
+        }
     }
 
     /// The same list in the same order, with the search not applied.
@@ -900,40 +1360,36 @@ struct TrackListView: View {
         Button {
             shuffleVisibleTracks()
         } label: {
-            Image(systemName: "shuffle")
-                .font(.title3)
-                .foregroundColor(settings.backgroundColorChoice.color)
-                .padding(4)
-                .contentShape(Rectangle())
+            Label(Localized.shuffle, systemImage: "shuffle")
         }
         .disabled(sortedTracks.isEmpty)
     }
 
     private var sortMenu: some View {
         Menu {
-            ForEach(TrackSortOption.allCases, id: \.self) { option in
-                Button(action: {
+            Picker(selection: Binding(
+                get: { sortOption },
+                set: { option in
                     sortOption = option
                     saveSortPreference()
-                }) {
-                    HStack {
-                        Text(option.localizedString)
-                        if sortOption == option { Image(systemName: "checkmark") }
-                    }
                 }
+            )) {
+                ForEach(TrackSortOption.allCases, id: \.self) { option in
+                    Text(option.localizedString).tag(option)
+                }
+            } label: {
+                EmptyView()
             }
+            .pickerStyle(.inline)
         } label: {
-            Image(systemName: "arrow.up.arrow.down.circle")
-                .font(.title3)
-                .foregroundColor(settings.backgroundColorChoice.color)
-                .padding(4)
-                .contentShape(Rectangle())
+            Label(Localized.sortBy, systemImage: "arrow.up.arrow.down")
         }
     }
 
     private func shuffleVisibleTracks() {
         let shuffled = sortedTracks.shuffled()
         guard let first = shuffled.first else { return }
+        ListeningLog.shared.tagQueue("shuffle", tracks: shuffled)
         Task {
             await appCoordinator.playTrack(first, queue: shuffled)
         }
@@ -971,12 +1427,13 @@ struct TrackListView: View {
         // Since PlayerEngine is not observed in this view, this Toolbar will not rebuild on every frame.
         .toolbar {
             if isBulkMode {
-                ToolbarItem(placement: .navigationBarLeading) {
+                // Plain, as in TrackBulkActionsModifier.
+                ToolbarItem(placement: .topBarLeading) {
                     Button(Localized.cancel) { exitBulkMode() }
-                        .foregroundColor(settings.backgroundColorChoice.color)
                 }
+                .cosmosPlainBackground()
 
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button(action: { selectAll() }) {
                             Label(Localized.selectAll, systemImage: "checkmark.circle")
@@ -997,27 +1454,23 @@ struct TrackListView: View {
                         }
                         .disabled(selectedTracks.isEmpty)
                     } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.title3)
-                            .foregroundColor(settings.backgroundColorChoice.color)
-                        // Increase hit area
-                            .padding(4)
-                            .contentShape(Rectangle())
+                        Label(Localized.moreOptions, systemImage: "ellipsis.circle")
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
                 }
+                .cosmosPlainBackground()
             } else {
-                // One item holding both, rather than two items: the bar
-                // spreads separate toolbar items far apart, and these read as
-                // a single group.
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 0) {
-                        LibrarySearchButton(state: search)
-                        if showsShuffleButton { shuffleButton }
-                        sortMenu
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    LibrarySearchButton(state: search)
+                    if showsShuffleButton { shuffleButton }
+                    sortMenu
+                    // Long-pressing a song selects too, but few found it.
+                    if !tracks.isEmpty {
+                        Button { enterBulkMode() } label: {
+                            Label(Localized.select, systemImage: "checkmark.circle")
+                        }
                     }
                 }
+                .cosmosPlainBackground()
             }
         }
         .sheet(isPresented: $showBulkPlaylistDialog) {
@@ -1034,6 +1487,15 @@ struct TrackListView: View {
         .onAppear {
             loadSortPreference()
         }
+        #if DEBUG
+        // -cosmosDebugSelect 1 opens the list already selecting, for
+        // screenshots.
+        .task(id: tracks.isEmpty) {
+            guard UserDefaults.standard.string(forKey: "cosmosDebugSelect") != nil,
+                  let first = tracks.first else { return }
+            enterBulkMode(initialSelection: first.stableId)
+        }
+        #endif
         // .task rather than onAppear + onChange: the rebuild is asynchronous
         // now, and this both starts it on the first appearance and restarts it
         // whenever the row set changes, cancelling the previous one.
@@ -1047,6 +1509,8 @@ struct TrackListView: View {
             searchIndex = rebuilt
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            // Artist names may have changed under the same songs.
+            sortCache.invalidate()
             Task {
                 searchIndex = await TrackSearchIndex.rebuilt(
                     from: searchIndex,
@@ -1078,6 +1542,7 @@ struct TrackListContentView: View {
     // Only THIS view updates when the song progresses
     @StateObject private var playerEngine = PlayerEngine.shared
     @EnvironmentObject private var appCoordinator: AppCoordinator
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var settings = DeleteSettings.load()
     @State private var displayLimit = 50
     @State private var artistNameCache: [Int64: String] = [:]
@@ -1138,21 +1603,38 @@ struct TrackListContentView: View {
         return Array(source[selectedIndex..<endIndex])
     }
 
+    /// Artist names for the rows shown so far and the next page;
+    /// `extendArtistNames` keeps a page ahead as the list grows, so a row
+    /// never appears with only its first artist. Resolving the whole list -
+    /// 20,000 lookups on the main thread - ran on every appearance and on
+    /// every keystroke of a search, for rows nobody had scrolled to.
     private func loadArtistNameCache() {
+        let signpost = Perf.begin("Song list artist names")
+        defer { Perf.end("Song list artist names", signpost) }
         do {
             artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
-            let fallbackArtistIds = tracks.reduce(into: [String: Int64]()) { result, track in
-                if let artistId = track.artistId {
-                    result[track.stableId] = artistId
-                }
-            }
-            artistDisplayNameCache = try DatabaseManager.shared.getArtistDisplayNames(
-                forTrackStableIds: tracks.map(\.stableId),
-                fallbackArtistIdsByStableId: fallbackArtistIds
-            )
+            artistDisplayNameCache = try artistDisplayNames(for: Array(tracks.prefix(displayLimit + pageSize)))
         } catch {
             print("Failed to load artist name cache: \(error)")
         }
+    }
+
+    private func extendArtistNames() {
+        let missing = tracks.prefix(displayLimit + pageSize).filter { artistDisplayNameCache[$0.stableId] == nil }
+        guard !missing.isEmpty, let names = try? artistDisplayNames(for: missing) else { return }
+        artistDisplayNameCache.merge(names) { current, _ in current }
+    }
+
+    private func artistDisplayNames(for rows: [Track]) throws -> [String: String] {
+        let fallbackArtistIds = rows.reduce(into: [String: Int64]()) { result, track in
+            if let artistId = track.artistId {
+                result[track.stableId] = artistId
+            }
+        }
+        return try DatabaseManager.shared.getArtistDisplayNames(
+            forTrackStableIds: rows.map(\.stableId),
+            fallbackArtistIdsByStableId: fallbackArtistIds
+        )
     }
 
     private func updateArtworkWindow() {
@@ -1161,6 +1643,34 @@ struct TrackListContentView: View {
         ArtworkManager.shared.updateVisibleArtworkWindow(
             visibleTrackIds: visibleWindowIds,
             prefetchTrackIds: prefetchIds
+        )
+    }
+
+    private func trackRow(_ track: Track, isTile: Bool = false) -> TrackRowView {
+        TrackRowView(
+            track: track,
+            activeTrackId: playerEngine.currentTrack?.stableId,
+            isAudioPlaying: playerEngine.isPlaying,
+            artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
+            isTile: isTile,
+            onTap: {
+                if isBulkMode {
+                    toggleSelection(for: track)
+                } else {
+                    dismissSearchKeyboard()
+                    Task {
+                        if let playlist = playlist, let playlistId = playlist.id {
+                            try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
+                            try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+                        }
+                        await appCoordinator.playTrack(track, queue: queueForPlayback(startingAt: track))
+                    }
+                }
+            },
+            playlist: playlist,
+            showDirectDeleteButton: playlist != nil && isEditMode,
+            onEnterBulkMode: { onEnterBulkMode(track.stableId) },
+            contextIdentity: rowContextIdentity
         )
     }
 
@@ -1179,86 +1689,73 @@ struct TrackListContentView: View {
 
     var body: some View {
         if tracks.isEmpty {
-            VStack(spacing: 16) {
-                Image(systemName: isSearching ? "magnifyingglass" : "music.note")
-                    .font(.system(size: 40)).foregroundColor(.secondary)
-                Text(isSearching ? Localized.noResultsFound : Localized.noSongsFound).font(.headline)
-                Text(isSearching ? Localized.tryDifferentKeywords : Localized.yourMusicWillAppearHere)
-                    .font(.subheadline).foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
+            if isSearching {
+                ContentUnavailableView.search
+            } else {
+                CosmosEmptyState(
+                    systemImage: "music.note",
+                    title: Localized.noSongsFound,
+                    message: Localized.yourMusicWillAppearHere.namingThisDevice
+                )
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if usesGrid {
+            // iPad: songs as a grid of covers, like albums, rather than one
+            // long column stretched across the screen. Selecting songs and
+            // editing a playlist keep the list, where the row controls are.
+            paged(
+                ScrollView {
+                    TileGrid(minimum: 160, maximum: 220, spacing: Design.Spacing.l, rowSpacing: Design.Spacing.xl) {
+                        ForEach(displayedTracks, id: \.stableId) { track in
+                            trackRow(track, isTile: true)
+                                .equatable()
+                        }
+                    }
+                    // The same side margin as Albums and Playlists.
+                    .pagePadding()
+                    .padding(.vertical, Design.Spacing.m)
+                }
+            )
         } else {
-            List {
+            paged(List {
                 ForEach(displayedTracks, id: \.stableId) { track in
-                ZStack(alignment: .leading) {
                     HStack(spacing: 0) {
                         if isBulkMode {
-                            Image(systemName: selectedTracks.contains(track.stableId) ? "checkmark.circle.fill" : "circle")
-                                .font(.title2)
-                                .foregroundColor(selectedTracks.contains(track.stableId) ? settings.backgroundColorChoice.color : .secondary)
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                                .onTapGesture { toggleSelection(for: track) }
+                            TrackSelectionIndicator(
+                                isSelected: selectedTracks.contains(track.stableId),
+                                accentColor: settings.backgroundColorChoice.color,
+                                onTap: { toggleSelection(for: track) }
+                            )
+                            .padding(.leading, Design.Spacing.s)
                         }
 
-                        TrackRowView(
-                            track: track,
-                            activeTrackId: playerEngine.currentTrack?.stableId,
-                            isAudioPlaying: playerEngine.isPlaying,
-                            artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
-                            onTap: {
-                                if isBulkMode {
-                                    toggleSelection(for: track)
-                                } else {
-                                    dismissSearchKeyboard()
-                                    Task {
-                                        if let playlist = playlist, let playlistId = playlist.id {
-                                            try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
-                                            try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
-                                        }
-                                        await appCoordinator.playTrack(track, queue: queueForPlayback(startingAt: track))
-                                    }
-                                }
-                            },
-                            playlist: playlist,
-                            showDirectDeleteButton: playlist != nil && isEditMode,
-                            onEnterBulkMode: { onEnterBulkMode(track.stableId) },
-                            contextIdentity: rowContextIdentity
-                        )
+                        trackRow(track)
                         .equatable() // Crucial for performance
                         .onLongPressGesture(minimumDuration: 0.5) {
                             if !isBulkMode { onEnterBulkMode(track.stableId) }
                         }
                     }
+                    .songListRow(
+                        track,
+                        separatorLeading: (isBulkMode ? Design.Size.minTouch + Design.Spacing.s : 0)
+                            + Design.Spacing.l + Design.Size.rowArtwork + Design.Spacing.m,
+                        swipeActionsEnabled: !isBulkMode
+                    )
                 }
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if !isBulkMode && !recentlyActedTracks.contains(track.stableId) {
-                        Button {
-                            playerEngine.insertNext(track)
-                            markAsActed(track.stableId)
-                        } label: { Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward") }
-                            .tint(settings.backgroundColorChoice.color)
-                    }
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if !isBulkMode && !recentlyActedTracks.contains(track.stableId) {
-                        Button {
-                            playerEngine.addToQueue(track)
-                            markAsActed(track.stableId)
-                        } label: { Label(Localized.addToQueue, systemImage: "text.append") }
-                            .tint(.blue)
-                    }
-                }
-                .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial).opacity(0.7))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .listRowSeparator(.hidden).listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
             }
-            }
-            .listStyle(PlainListStyle())
-            .scrollContentBackground(.hidden)
-            .contentMargins(.bottom, 100, for: .scrollContent)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden))
+        }
+    }
+
+    private var usesGrid: Bool {
+        horizontalSizeClass == .regular && playlist == nil && !isBulkMode && !isEditMode
+    }
+
+    /// Loads more songs near the bottom and keeps the artwork window current,
+    /// for the list and the grid alike.
+    private func paged<Content: View>(_ content: Content) -> some View {
+        content
+            .debugScrollToBottom()
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 guard displayLimit < tracks.count,
                       geometry.containerSize.height > 0,
@@ -1285,9 +1782,9 @@ struct TrackListContentView: View {
                 updateArtworkWindow()
             }
             .onChange(of: displayLimit) { _, _ in
+                extendArtistNames()
                 updateArtworkWindow()
             }
-        }
     }
 }
 
@@ -1304,7 +1801,7 @@ struct BulkPlaylistSelectionView: View {
     @State private var settings = DeleteSettings.load()
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 20) {
                 VStack(spacing: 8) {
                     Text(Localized.addToPlaylist)
@@ -1363,7 +1860,7 @@ struct BulkPlaylistSelectionView: View {
             .padding()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(Localized.cancel) {
                         dismiss()
                     }
@@ -1394,11 +1891,19 @@ struct BulkPlaylistSelectionView: View {
     }
 
     private func createPlaylist() {
-        guard !newPlaylistName.isEmpty else { return }
+        let title = newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
 
         do {
-            let playlist = try appCoordinator.createPlaylist(title: newPlaylistName)
-            playlists.append(playlist)
+            // Same name as an existing playlist (any case): add to that one
+            // rather than making a second of the same name.
+            let playlist: Playlist
+            if let existing = try DatabaseManager.shared.playlist(matchingTitle: title) {
+                playlist = existing
+            } else {
+                playlist = try appCoordinator.createPlaylist(title: title)
+                playlists.append(playlist)
+            }
             newPlaylistName = ""
 
             // Automatically add the tracks to the new playlist
@@ -1436,24 +1941,30 @@ struct BulkPlaylistSelectionView: View {
 
 // MARK: - Search View
 
+/// The Search tab. Uses the system search field and scope bar, so it reads,
+/// scales and speaks like search everywhere else in iOS, and opens results in
+/// its own tab - it used to be a sheet that had to dismiss itself and then
+/// push the result onto the Library screen behind it.
 struct SearchView: View {
     let allTracks: [Track]
-    let onNavigateToArtist: (Artist, [Track]) -> Void
-    let onNavigateToAlbum: (Album, [Track]) -> Void
-    let onNavigateToPlaylist: (Playlist) -> Void
     @EnvironmentObject private var appCoordinator: AppCoordinator
-    @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
     @State private var debouncedSearchText = ""
     @State private var selectedCategory = SearchCategory.all
-    @State private var settings = DeleteSettings.load()
-    @FocusState private var isSearchFocused: Bool
     @State private var debounceTask: Task<Void, Never>?
     @State private var searchTask: Task<Void, Never>?
     @State private var searchResults = SearchResults()
     @State private var isSearching = false
+    @State private var artistNameCache: [Int64: String] = [:]
+    @State private var artistDisplayNameCache: [String: String] = [:]
+    /// A song with a cover per artist, for their circle - as the Artists
+    /// screen does. Without it every artist result showed only an initial.
+    @State private var artworkTrackByArtist: [Int64: Track] = [:]
 
-    enum SearchCategory: String, CaseIterable {
+    /// How many results of each kind the "All" scope shows before "See All".
+    private let previewCount = 5
+
+    enum SearchCategory: String, CaseIterable, Hashable {
         case all = "All"
         case songs = "Songs"
         case artists = "Artists"
@@ -1468,6 +1979,24 @@ struct SearchView: View {
             case .albums: return Localized.albums
             case .playlists: return Localized.playlists
             }
+        }
+    }
+
+    struct SearchResults {
+        let songs: [Track]
+        let artists: [Artist]
+        let albums: [Album]
+        let playlists: [Playlist]
+
+        init(songs: [Track] = [], artists: [Artist] = [], albums: [Album] = [], playlists: [Playlist] = []) {
+            self.songs = songs
+            self.artists = artists
+            self.albums = albums
+            self.playlists = playlists
+        }
+
+        var isEmpty: Bool {
+            songs.isEmpty && artists.isEmpty && albums.isEmpty && playlists.isEmpty
         }
     }
 
@@ -1491,6 +2020,8 @@ struct SearchView: View {
 
             // Run database queries on background thread
             let results = await Task.detached(priority: .userInitiated) {
+                let signpost = Perf.begin("Search query")
+                defer { Perf.end("Search query", signpost) }
                 var songs: [Track] = []
                 var artists: [Artist] = []
                 var albums: [Album] = []
@@ -1506,18 +2037,21 @@ struct SearchView: View {
                     // Also include songs and albums from matched artists
                     let matchedArtistIds = artists.compactMap { $0.id }
                     if !matchedArtistIds.isEmpty {
-                        let existingSongIds = Set(songs.map { $0.stableId })
-                        let existingAlbumIds = Set(albums.compactMap { $0.id })
+                        var existingSongIds = Set(songs.map { $0.stableId })
+                        var existingAlbumIds = Set(albums.compactMap { $0.id })
 
                         for artistId in matchedArtistIds {
                             let artistTracks = try DatabaseManager.shared.getTracksByArtistId(artistId)
                             for track in artistTracks where !existingSongIds.contains(track.stableId) {
                                 songs.append(track)
+                                existingSongIds.insert(track.stableId)
                             }
 
                             let artistAlbums = try DatabaseManager.shared.getAlbumsByArtistId(artistId)
-                            for album in artistAlbums where !existingAlbumIds.contains(album.id!) {
+                            for album in artistAlbums {
+                                guard let albumId = album.id, !existingAlbumIds.contains(albumId) else { continue }
                                 albums.append(album)
+                                existingAlbumIds.insert(albumId)
                             }
                         }
                     }
@@ -1540,895 +2074,635 @@ struct SearchView: View {
             await MainActor.run {
                 self.searchResults = results
                 self.isSearching = false
+                loadArtistCache(for: results.songs)
+                let visibleIds = Array(results.songs.prefix(20)).map { $0.stableId }
+                ArtworkManager.shared.updateVisibleArtworkWindow(visibleTrackIds: visibleIds)
             }
         }
+    }
+
+    @FocusState private var isFieldFocused: Bool
+    @ObservedObject private var theme = ThemeStore.shared
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// The last searches, newest first, newline-separated.
+    @AppStorage("cosmos.recentSearches") private var recentSearchesStorage = ""
+    @State private var browseArtwork: [BrowseCategory: Track] = [:]
+    @State private var browseWidth: CGFloat = 0
+
+    private var recentSearches: [String] {
+        recentSearchesStorage.split(separator: "\n").map(String.init)
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                ScreenSpecificBackgroundView(screen: .library)
+        ScrollView {
+            VStack(alignment: .leading, spacing: Design.Spacing.l) {
+                searchField
+                    .pagePadding()
 
-                VStack(spacing: 0) {
-                    // Search bar
-                    HStack {
-                        HStack {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundColor(.secondary)
-
-                            TextField(Localized.searchYourMusicLibrary, text: $searchText)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .autocorrectionDisabled()
-                                .focused($isSearchFocused)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(.systemGray6))
-                        .cornerRadius(10)
+                if debouncedSearchText.isEmpty {
+                    if !recentSearches.isEmpty {
+                        recentSearchesSection
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-
-                    // Category filters
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
-                            ForEach(SearchCategory.allCases, id: \.self) { category in
-                                Button(action: {
-                                    selectedCategory = category
-                                }) {
-                                    Text(category.localizedString)
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                        .background(
-                                            selectedCategory == category ?
-                                            settings.backgroundColorChoice.color :
-                                                Color(.systemGray6)
-                                        )
-                                        .foregroundColor(
-                                            selectedCategory == category ?
-                                                .white :
-                                                    .primary
-                                        )
-                                        .cornerRadius(20)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                    .padding(.top, 12)
-
-                    // Results
-                    if debouncedSearchText.isEmpty {
-                        VStack(spacing: 16) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 40))
-                                .foregroundColor(.secondary)
-
-                            Text(Localized.searchYourMusicLibrary)
-                                .font(.headline)
-
-                            Text(Localized.findSongsArtistsAlbumsPlaylists)
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if isSearching {
-                        VStack(spacing: 16) {
-                            ProgressView()
-                                .scaleEffect(1.2)
-                                .progressViewStyle(CircularProgressViewStyle(tint: settings.backgroundColorChoice.color))
-
-                            Text(Localized.searching)
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        SearchResultsView(
-                            results: searchResults,
-                            selectedCategory: selectedCategory,
-                            allTracks: allTracks,
-                            onDismiss: { dismiss() },
-                            onNavigateToArtist: onNavigateToArtist,
-                            onNavigateToAlbum: onNavigateToAlbum,
-                            onNavigateToPlaylist: onNavigateToPlaylist
-                        )
-                    }
-                }
-                .navigationTitle(Localized.search)
-                .navigationBarTitleDisplayMode(.inline)
-                .navigationBarBackButtonHidden()
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button(Localized.done) {
-                            dismiss()
-                        }
-                        .foregroundColor(settings.backgroundColorChoice.color)
-                    }
-                }
-            }
-            .onChange(of: searchText) { newValue in
-                // Cancel any existing debounce task
-                debounceTask?.cancel()
-
-                // Create new debounce task
-                debounceTask = Task {
-                    try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
-                    if !Task.isCancelled {
-                        debouncedSearchText = newValue
-                        performSearch(query: newValue)
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
-                settings = DeleteSettings.load()
-            }
-            .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    isSearchFocused = true
-                }
-            }
-            .onDisappear {
-                debounceTask?.cancel()
-                searchTask?.cancel()
-            }
-        }
-    }
-
-    struct SearchResults {
-        let songs: [Track]
-        let artists: [Artist]
-        let albums: [Album]
-        let playlists: [Playlist]
-
-        init(songs: [Track] = [], artists: [Artist] = [], albums: [Album] = [], playlists: [Playlist] = []) {
-            self.songs = songs
-            self.artists = artists
-            self.albums = albums
-            self.playlists = playlists
-        }
-
-        var isEmpty: Bool {
-            songs.isEmpty && artists.isEmpty && albums.isEmpty && playlists.isEmpty
-        }
-    }
-
-
-    struct SearchResultsView: View {
-        let results: SearchResults
-        let selectedCategory: SearchView.SearchCategory
-        let allTracks: [Track]
-        let onDismiss: () -> Void
-        let onNavigateToArtist: (Artist, [Track]) -> Void
-        let onNavigateToAlbum: (Album, [Track]) -> Void
-        let onNavigateToPlaylist: (Playlist) -> Void
-        @State private var settings = DeleteSettings.load()
-        @State private var artistNameCache: [Int64: String] = [:]
-        @State private var artistDisplayNameCache: [String: String] = [:]
-
-        private func loadArtistCache() {
-            do {
-                artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
-                let fallbackArtistIds = results.songs.reduce(into: [String: Int64]()) { result, track in
-                    if let artistId = track.artistId {
-                        result[track.stableId] = artistId
-                    }
-                }
-                artistDisplayNameCache = try DatabaseManager.shared.getArtistDisplayNames(
-                    forTrackStableIds: results.songs.map(\.stableId),
-                    fallbackArtistIdsByStableId: fallbackArtistIds
-                )
-            } catch {
-                print("Failed to load search artist cache: \(error)")
-            }
-        }
-
-        var body: some View {
-            if results.isEmpty {
-                VStack(spacing: 16) {
-                    Image(systemName: "magnifyingglass.circle")
-                        .font(.system(size: 40))
-                        .foregroundColor(.secondary)
-
-                    Text(Localized.noResultsFound)
-                        .font(.headline)
-
-                    Text(Localized.tryDifferentKeywords)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        // Songs
-                        if selectedCategory == .all || selectedCategory == .songs, !results.songs.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(Localized.songs)
-                                    .font(.title3)
-                                    .fontWeight(.bold)
-                                    .padding(.horizontal, 16)
-
-                                ForEach(results.songs, id: \.stableId) { track in
-                                    SearchSongRowView(
-                                        track: track,
-                                        allTracks: allTracks,
-                                        artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
-                                        onDismiss: onDismiss
-                                    )
-                                    .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                    .padding(.horizontal, 16)
-                                }
-                            }
-                        }
-
-                        // Albums (also shown when Artists category is selected, grouped by artist)
-                        if selectedCategory == .all || selectedCategory == .albums, !results.albums.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(Localized.albums)
-                                    .font(.title3)
-                                    .fontWeight(.bold)
-                                    .padding(.horizontal, 16)
-
-                                ForEach(results.albums, id: \.id) { album in
-                                    SearchAlbumRowView(
-                                        album: album,
-                                        albumArtistName: album.albumArtist ?? album.artistId.flatMap { artistNameCache[$0] },
-                                        onDismiss: onDismiss,
-                                        onNavigate: onNavigateToAlbum
-                                    )
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .fill(.ultraThinMaterial)
-                                            .opacity(0.7)
-                                    )
-                                    .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                    .padding(.horizontal, 16)
-                                }
-                            }
-                        }
-
-                        // Artists - show artist row + their albums underneath
-                        if selectedCategory == .all || selectedCategory == .artists, !results.artists.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(Localized.artists)
-                                    .font(.title3)
-                                    .fontWeight(.bold)
-                                    .padding(.horizontal, 16)
-
-                                ForEach(results.artists, id: \.id) { artist in
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        SearchArtistRowView(
-                                            artist: artist,
-                                            onDismiss: onDismiss,
-                                            onNavigate: onNavigateToArtist
-                                        )
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 12)
-                                                .fill(.ultraThinMaterial)
-                                                .opacity(0.7)
-                                        )
-                                        .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                        .padding(.horizontal, 16)
-
-                                        // Show this artist's albums below
-                                        SearchArtistAlbumsRow(
-                                            artist: artist,
-                                            onDismiss: onDismiss,
-                                            onNavigateToAlbum: onNavigateToAlbum
-                                        )
-                                    }
-                                    .padding(.bottom, 4)
-                                }
-                            }
-                        }
-
-                        // Playlists
-                        if selectedCategory == .all || selectedCategory == .playlists, !results.playlists.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(Localized.playlists)
-                                    .font(.title3)
-                                    .fontWeight(.bold)
-                                    .padding(.horizontal, 16)
-
-                                ForEach(results.playlists, id: \.id) { playlist in
-                                    SearchPlaylistRowView(
-                                        playlist: playlist,
-                                        onDismiss: onDismiss,
-                                        onNavigate: onNavigateToPlaylist
-                                    )
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .fill(.ultraThinMaterial)
-                                            .opacity(0.7)
-                                    )
-                                    .shadow(color: settings.backgroundColorChoice.color.opacity(0.15), radius: 4, x: 0, y: 2)
-                                    .padding(.horizontal, 16)
-                                }
-                            }
-                        }
-                    }
-                    .padding(.vertical, 16)
-                }
-                .safeAreaInset(edge: .bottom) {
-                    Color.clear.frame(height: 100) // Space for mini player
-                }
-                .onAppear {
-                    if artistNameCache.isEmpty {
-                        loadArtistCache()
-                    }
-                    let visibleIds = Array(results.songs.prefix(20)).map { $0.stableId }
-                    ArtworkManager.shared.updateVisibleArtworkWindow(visibleTrackIds: visibleIds)
-                }
-                .onChange(of: results.songs.map(\.stableId)) { _, _ in
-                    loadArtistCache()
-                }
-            }
-        }
-    }
-
-    struct SearchSongRowView: View {
-        let track: Track
-        let allTracks: [Track]
-        let artistName: String?
-        let onDismiss: () -> Void
-        @EnvironmentObject private var appCoordinator: AppCoordinator
-        @StateObject private var playerEngine = PlayerEngine.shared
-        @State private var settings = DeleteSettings.load()
-        @State private var artworkImage: UIImage?
-        @State private var swipeOffset: CGFloat = 0
-        @State private var swipeAction: SwipeAction = .none
-        @State private var isFavorite = false
-        @State private var showPlaylistDialog = false
-        @State private var showDeleteConfirmation = false
-        private let swipeThreshold: CGFloat = 80
-
-        private enum SwipeAction {
-            case none, playNext, addToQueue
-        }
-
-        private var isCurrentlyPlaying: Bool {
-            playerEngine.currentTrack?.stableId == track.stableId
-        }
-
-        var body: some View {
-            ZStack {
-                // Swipe bubble icons
-                HStack {
-                    // Left side - Play Next bubble (appears on right swipe)
-                    if swipeOffset > 0 {
-                        Image(systemName: "text.line.first.and.arrowtriangle.forward")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .background(settings.backgroundColorChoice.color)
-                            .clipShape(Circle())
-                            .opacity(min(Double(swipeOffset) / swipeThreshold, 1.0))
-                            .scaleEffect(min(Double(swipeOffset) / swipeThreshold, 1.0))
-                            .padding(.leading, 8)
-                    }
-
-                    Spacer()
-
-                    // Right side - Add to Queue bubble (appears on left swipe)
-                    if swipeOffset < 0 {
-                        Image(systemName: "text.append")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .background(.blue)
-                            .clipShape(Circle())
-                            .opacity(min(Double(-swipeOffset) / swipeThreshold, 1.0))
-                            .scaleEffect(min(Double(-swipeOffset) / swipeThreshold, 1.0))
-                            .padding(.trailing, 8)
-                    }
-                }
-
-                // Main content
-                HStack(spacing: 12) {
-                    // Album artwork
-                    ZStack {
-                        Group {
-                            if let artworkImage = artworkImage {
-                                Image(uiImage: artworkImage)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                            } else {
-                                Image(systemName: "music.note")
-                                    .font(.system(size: 16))
-                                    .foregroundColor(settings.backgroundColorChoice.color)
-                            }
-                        }
-                        .frame(width: 40, height: 40)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .background(Color(.systemGray5))
-
-                        if isCurrentlyPlaying {
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(settings.backgroundColorChoice.color, lineWidth: 1.5)
-                                .frame(width: 40, height: 40)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(track.title)
-                            .font(.body)
-                            .fontWeight(.medium)
-                            .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color : .primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .multilineTextAlignment(.leading)
-
-                        if let artistName, !artistName.isEmpty {
-                            Text(artistName)
-                                .font(.caption)
-                                .foregroundColor(isCurrentlyPlaying ? settings.backgroundColorChoice.color.opacity(0.8) : .secondary)
-                        }
-                    }
-
-                    Spacer()
-
-                    // Currently playing indicator
-                    if isCurrentlyPlaying {
-                        let eqKey = "\(playerEngine.isPlaying && isCurrentlyPlaying)-\(playerEngine.currentTrack?.stableId ?? "")"
-
-                        EqualizerBarsExact(
-                            color: settings.backgroundColorChoice.color,
-                            isActive: playerEngine.isPlaying && isCurrentlyPlaying,
-                            isLarge: false,
-                            trackId: playerEngine.currentTrack?.stableId
-                        )
-                        .id(eqKey)
-                    }
-
-                    if let duration = track.durationMs {
-                        Text(formatDuration(duration))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.ultraThinMaterial)
-                        .opacity(0.7)
-                )
-                .offset(x: swipeOffset)
-                .gesture(
-                    DragGesture(minimumDistance: 20)
-                        .onChanged { value in
-                            swipeOffset = value.translation.width
-                            if swipeOffset > swipeThreshold {
-                                swipeAction = .playNext
-                            } else if swipeOffset < -swipeThreshold {
-                                swipeAction = .addToQueue
-                            } else {
-                                swipeAction = .none
-                            }
-                        }
-                        .onEnded { _ in
-                            withAnimation(.spring(response: 0.3)) {
-                                switch swipeAction {
-                                case .playNext:
-                                    playerEngine.insertNext(track)
-                                case .addToQueue:
-                                    playerEngine.addToQueue(track)
-                                case .none:
-                                    break
-                                }
-                                swipeOffset = 0
-                                swipeAction = .none
-                            }
-                        }
-                )
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    onDismiss()
-                    Task {
-                        // Only queue the selected song from search
-                        await appCoordinator.playTrack(track, queue: [track])
-                    }
-                }
-                .contextMenu {
-                    Button(action: {
-                        do {
-                            try appCoordinator.toggleFavorite(trackStableId: track.stableId)
-                            isFavorite.toggle()
-                        } catch {
-                            print("Failed to toggle favorite: \(error)")
-                        }
-                    }) {
-                        Label(
-                            isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs,
-                            systemImage: isFavorite ? "heart.slash" : "heart"
-                        )
-                    }
-
-                    Button(action: {
-                        playerEngine.insertNext(track)
-                    }) {
-                        Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward")
-                    }
-
-                    Button(action: {
-                        playerEngine.addToQueue(track)
-                    }) {
-                        Label(Localized.addToQueue, systemImage: "text.append")
-                    }
-
-                    Button(action: {
-                        showPlaylistDialog = true
-                    }) {
-                        Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
-                    }
-
-                    if let artistId = track.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }),
-                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
-                        NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
-                            Label(Localized.showArtistPage, systemImage: "person.circle")
-                        }
-                    }
-
-                    Button(role: .destructive, action: {
-                        showDeleteConfirmation = true
-                    }) {
-                        Label(Localized.deleteFile, systemImage: "trash")
-                    }
-                }
-            }
-            .onAppear {
-                loadArtwork()
-                checkFavoriteStatus()
-            }
-            .sheet(isPresented: $showPlaylistDialog) {
-                PlaylistSelectionView(track: track)
-                    .accentColor(settings.backgroundColorChoice.color)
-            }
-            .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
-                Button(Localized.delete, role: .destructive) {
-                    deleteFile()
-                }
-                Button(Localized.cancel, role: .cancel) { }
-            } message: {
-                Text(Localized.deleteFileConfirmation(track.title))
-            }
-            .reloadsArtwork(for: track.stableId) { loadArtwork() }
-        }
-
-        private func checkFavoriteStatus() {
-            do {
-                isFavorite = try DatabaseManager.shared.isFavorite(trackStableId: track.stableId)
-            } catch {
-                print("Failed to check favorite status: \(error)")
-            }
-        }
-
-        private func loadArtwork() {
-            Task {
-                artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
-            }
-        }
-
-        private func deleteFile() {
-            Task {
-                do {
-                    let settings = DeleteSettings.load()
-                    if settings.deleteFromLibraryOnly {
-                        DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
-                    } else {
-                        do {
-                            try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
-                        } catch {
-                            print("⚠️ Could not remove file from disk: \(error.localizedDescription)")
-                        }
-                    }
-
-                    try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
-                    NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
-                } catch {
-                    print("❌ Failed to delete track: \(error)")
-                }
-            }
-        }
-
-        private func formatDuration(_ milliseconds: Int) -> String {
-            let seconds = milliseconds / 1000
-            let minutes = seconds / 60
-            let remainingSeconds = seconds % 60
-            return String(format: "%d:%02d", minutes, remainingSeconds)
-        }
-
-    }
-
-    struct SearchArtistRowView: View {
-        let artist: Artist
-        let onDismiss: () -> Void
-        let onNavigate: (Artist, [Track]) -> Void
-
-        var body: some View {
-            Button(action: {
-                let artistTracks: [Track]
-                if let artistId = artist.id {
-                    artistTracks = (try? DatabaseManager.shared.getTracksByArtistId(artistId)) ?? []
+                    browseSection
                 } else {
-                    artistTracks = []
+                    scopeChips
+                    results
                 }
-                onDismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    onNavigate(artist, artistTracks)
-                }
-            }) {
-                HStack(spacing: 12) {
-                    Image(systemName: "person.circle.fill")
-                        .font(.title2)
-                        .foregroundColor(.purple)
-                        .frame(width: 24, height: 24)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(artist.name)
-                            .font(.body)
-                            .fontWeight(.medium)
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-
-                        Text(Localized.artist)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(PlainButtonStyle())
+            .frame(maxWidth: horizontalSizeClass == .regular ? 1100 : .infinity, alignment: .leading)
+            .padding(.bottom, Design.Spacing.xl)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(ScreenSpecificBackgroundView(screen: .allSongs))
+        .cosmosTabHeader(Localized.search)
+        .onChange(of: searchText) { _, newValue in
+            // Cancel any existing debounce task
+            debounceTask?.cancel()
+
+            // Create new debounce task
+            debounceTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                if !Task.isCancelled {
+                    debouncedSearchText = newValue
+                    performSearch(query: newValue)
+                }
+            }
+        }
+        // Search is a tab now and stays alive, so results have to follow the
+        // library: a song deleted from a result row, or removed by a rescan,
+        // must not stay playable here.
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            guard !debouncedSearchText.isEmpty else { return }
+            performSearch(query: debouncedSearchText)
+        }
+        .task(id: allTracks.count) {
+            loadBrowseArtwork()
+            #if DEBUG
+            // -cosmosDebugSearch <query> searches at launch, for screenshots.
+            if let query = UserDefaults.standard.string(forKey: "cosmosDebugSearch"), !allTracks.isEmpty {
+                searchText = query
+            }
+            #endif
+        }
+        .task(id: TrackSearchIndex.identity(for: allTracks)) {
+            var index: [Int64: Track] = [:]
+            for track in allTracks where track.hasArtwork {
+                if let artistId = track.artistId, index[artistId] == nil {
+                    index[artistId] = track
+                }
+            }
+            artworkTrackByArtist = index
         }
     }
 
-    struct SearchArtistAlbumsRow: View {
-        let artist: Artist
-        let onDismiss: () -> Void
-        let onNavigateToAlbum: (Album, [Track]) -> Void
-        @State private var artistAlbums: [Album] = []
-        @State private var artistTracks: [Track] = []
+    // MARK: Field
 
-        var body: some View {
-            Group {
-                if !artistAlbums.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(artistAlbums, id: \.id) { album in
-                                let albumTracks = artistTracks.filter { $0.albumId == album.id }
-                                Button {
-                                    onDismiss()
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                        onNavigateToAlbum(album, albumTracks)
-                                    }
-                                } label: {
-                                    SearchArtistAlbumCard(album: album, tracks: artistTracks)
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 8)
-                    }
-                }
-            }
-            .onAppear { loadArtistData() }
-        }
+    /// A large search field in the page itself - on iPad the system one sat
+    /// as a small box in the corner of the toolbar.
+    private var searchField: some View {
+        HStack(spacing: Design.Spacing.s) {
+            Image(systemName: "magnifyingglass")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
 
-        private func loadArtistData() {
-            guard let artistId = artist.id else { return }
-            Task {
-                let tracks = (try? DatabaseManager.shared.getTracksByArtistId(artistId)) ?? []
-                let albums = (try? DatabaseManager.shared.getAlbumsByArtistId(artistId)) ?? []
-                await MainActor.run {
-                    artistTracks = tracks
-                    artistAlbums = albums
+            TextField(Localized.searchYourMusicLibrary, text: $searchText)
+                .font(.body)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.search)
+                .focused($isFieldFocused)
+                .onSubmit { remember(searchText) }
+
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                    debouncedSearchText = ""
+                    searchResults = SearchResults()
+                    // Clearing ends the search: the keyboard goes too,
+                    // showing the browse page underneath in full.
+                    isFieldFocused = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .frame(width: Design.Size.minTouch, height: Design.Size.minTouch)
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Localized.clear)
             }
         }
-
-        struct SearchArtistAlbumCard: View {
-            let album: Album
-            let tracks: [Track]
-            @State private var artworkImage: UIImage?
-
-            var body: some View {
-                VStack(spacing: 4) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(.systemGray5))
-                            .frame(width: 80, height: 80)
-
-                        if let image = artworkImage {
-                            Image(uiImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: 80, height: 80)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        } else {
-                            Image(systemName: "opticaldisc.fill")
-                                .font(.title3)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Text(album.title)
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .frame(width: 80)
-                        .foregroundColor(.primary)
-                }
-                .onAppear { loadArtwork() }
-                .reloadsArtwork(for: tracks.first(where: { $0.albumId == album.id })?.stableId) {
-                    loadArtwork()
-                }
-            }
-
-            private func loadArtwork() {
-                let albumTracks = tracks.filter { $0.albumId == album.id }
-                guard let firstTrack = albumTracks.first else { return }
-                Task {
-                    let image = await ArtworkManager.shared.getThumbnail(for: firstTrack, maxPixelSize: 320)
-                    await MainActor.run { artworkImage = image }
-                }
-            }
-        }
-
+        .padding(.leading, Design.Spacing.m)
+        .frame(minHeight: 50)
+        .background(SurfaceColor.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(isFieldFocused ? theme.accent.opacity(0.7) : Color(.separator).opacity(0.5), lineWidth: isFieldFocused ? 1.5 : 0.5)
+        )
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+        .animation(.easeOut(duration: 0.2), value: isFieldFocused)
+        .contentShape(Rectangle())
+        .onTapGesture { isFieldFocused = true }
     }
 
-    struct SearchAlbumRowView: View {
-        let album: Album
-        let albumArtistName: String?
-        let onDismiss: () -> Void
-        let onNavigate: (Album, [Track]) -> Void
-        @State private var settings = DeleteSettings.load()
-        @State private var artworkImage: UIImage?
-        @State private var albumTracks: [Track] = []
-
-        var body: some View {
-            Button(action: {
-                onDismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    onNavigate(album, albumTracks)
-                }
-            }) {
-                HStack(spacing: 12) {
-                    // Album artwork
-                    Group {
-                        if let artworkImage = artworkImage {
-                            Image(uiImage: artworkImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } else {
-                            Image(systemName: "opticaldisc.fill")
-                                .font(.system(size: 20))
-                                .foregroundColor(.orange)
-                        }
+    private var scopeChips: some View {
+        ShelfScrollView {
+            HStack(spacing: Design.Spacing.s) {
+                ForEach(SearchCategory.allCases, id: \.self) { category in
+                    let isSelected = selectedCategory == category
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) { selectedCategory = category }
+                    } label: {
+                        Text(category.localizedString)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(isSelected ? Color.white : Color.primary)
+                            .padding(.horizontal, Design.Spacing.l)
+                            .frame(minHeight: 36)
+                            // Filled like the Play and Shuffle buttons: white
+                            // chips vanished into the page in light mode.
+                            .background(isSelected ? theme.accent : SurfaceColor.control, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Color(.separator).opacity(isSelected ? 0 : 0.5), lineWidth: 0.5))
                     }
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .background(Color(.systemGray5))
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(album.title)
-                            .font(.body)
-                            .fontWeight(.medium)
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-
-                        HStack(spacing: 4) {
-                            if let albumArtistName, !albumArtistName.isEmpty {
-                                Text(albumArtistName)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Text("• \(Localized.album)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Spacer()
-
-                    Text(Localized.songsCountOnly(albumTracks.count))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(PlainButtonStyle())
-            .onAppear {
-                loadAlbumData()
+            .pagePadding()
+        }
+        .clipsShelfSides()
+    }
+
+    // MARK: Before typing
+
+    private var recentSearchesSection: some View {
+        VStack(alignment: .leading, spacing: Design.Spacing.s) {
+            SectionTitle(title: Localized.recentSearches) {
+                Button(Localized.clear) {
+                    withAnimation { recentSearchesStorage = "" }
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(theme.accent)
+            }
+            .pagePadding()
+
+            ShelfScrollView {
+                HStack(spacing: Design.Spacing.s) {
+                    ForEach(recentSearches, id: \.self) { query in
+                        Button {
+                            searchText = query
+                        } label: {
+                            Label(query, systemImage: "clock.arrow.circlepath")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, Design.Spacing.m)
+                                .frame(minHeight: 36)
+                                .background(SurfaceColor.control, in: Capsule())
+                                .overlay(Capsule().strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .pagePadding()
+            }
+            .clipsShelfSides()
+        }
+    }
+
+    enum BrowseCategory: CaseIterable, Hashable {
+        case songs, liked, albums, artists, playlists, recentlyAdded
+
+        var title: String {
+            switch self {
+            case .songs: return Localized.allSongs
+            case .liked: return Localized.likedSongs
+            case .albums: return Localized.albums
+            case .artists: return Localized.artists
+            case .playlists: return Localized.playlists
+            case .recentlyAdded: return Localized.recentlyAdded
             }
         }
 
-        private func loadAlbumData() {
+        var color: Color {
+            switch self {
+            case .songs: return Color(red: 0.20, green: 0.42, blue: 0.85)
+            case .liked: return Color(red: 0.86, green: 0.22, blue: 0.36)
+            case .albums: return Color(red: 0.90, green: 0.50, blue: 0.12)
+            case .artists: return Color(red: 0.52, green: 0.30, blue: 0.82)
+            case .playlists: return Color(red: 0.12, green: 0.62, blue: 0.42)
+            case .recentlyAdded: return Color(red: 0.14, green: 0.55, blue: 0.70)
+            }
+        }
+
+        var route: LibraryRoute {
+            switch self {
+            case .songs, .recentlyAdded: return .allSongs
+            case .liked: return .likedSongs
+            case .albums: return .albums
+            case .artists: return .artists
+            case .playlists: return .playlists
+            }
+        }
+    }
+
+    private var isRegularWidth: Bool { horizontalSizeClass == .regular }
+
+    /// iPad's bigger tiles, where two of them still fit side by side. A
+    /// "regular" column can be phone-narrow - iPhone Duo's page on one half
+    /// of the fold - and there the big tiles stacked one per row, three of
+    /// them filling the screen.
+    private var usesLargeBrowseTiles: Bool {
+        isRegularWidth && browseWidth >= 240 * 2 + Design.Spacing.l * 3
+    }
+
+    /// Colourful tiles into the library, each with a tilted cover from it.
+    private var browseSection: some View {
+        let isLarge = usesLargeBrowseTiles
+        return VStack(alignment: .leading, spacing: Design.Spacing.m) {
+            SectionTitle(Localized.browse)
+                .pagePadding()
+
+            TileGrid(minimum: isLarge ? 240 : 160, spacing: isLarge ? Design.Spacing.l : Design.Spacing.m, rowSpacing: isLarge ? Design.Spacing.l : Design.Spacing.m) {
+                ForEach(BrowseCategory.allCases, id: \.self) { category in
+                    NavigationLink(value: category.route) {
+                        BrowseTile(title: category.title, color: category.color, track: browseArtwork[category], isLarge: isLarge)
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
+            }
+            .pagePadding()
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { browseWidth = $0 }
+    }
+
+    private func loadBrowseArtwork() {
+        let withArt = allTracks.filter(\.hasArtwork)
+        guard !withArt.isEmpty else { return }
+        let favorites = Set((try? appCoordinator.getFavorites()) ?? [])
+        let newest = withArt.max { ($0.id ?? 0) < ($1.id ?? 0) }
+        var picks: [BrowseCategory: Track] = [:]
+        picks[.songs] = withArt.first
+        picks[.liked] = withArt.first { favorites.contains($0.stableId) } ?? withArt.dropFirst().first
+        picks[.albums] = withArt.dropFirst(2).first
+        picks[.artists] = withArt.dropFirst(3).first
+        picks[.playlists] = withArt.dropFirst(4).first
+        picks[.recentlyAdded] = newest
+        browseArtwork = picks
+    }
+
+    private func remember(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = recentSearches.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
+        list.insert(trimmed, at: 0)
+        recentSearchesStorage = list.prefix(8).joined(separator: "\n")
+    }
+
+    // MARK: Results
+
+    @ViewBuilder
+    private var results: some View {
+        if isSearching && searchResults.isEmpty {
+            ProgressView(Localized.searching)
+                .frame(maxWidth: .infinity)
+                .padding(.top, Design.Spacing.xxl)
+        } else if searchResults.isEmpty || !hasResults(in: selectedCategory) {
+            ContentUnavailableView.search(text: debouncedSearchText)
+                .padding(.top, Design.Spacing.xl)
+        } else {
+            resultsList
+        }
+    }
+
+    private func hasResults(in category: SearchCategory) -> Bool {
+        switch category {
+        case .all: return !searchResults.isEmpty
+        case .songs: return !searchResults.songs.isEmpty
+        case .artists: return !searchResults.artists.isEmpty
+        case .albums: return !searchResults.albums.isEmpty
+        case .playlists: return !searchResults.playlists.isEmpty
+        }
+    }
+
+    private func limited<T>(_ items: [T], for category: SearchCategory) -> [T] {
+        selectedCategory == .all ? Array(items.prefix(previewCount)) : items
+    }
+
+    private func shows(_ category: SearchCategory) -> Bool {
+        selectedCategory == .all || selectedCategory == category
+    }
+
+    private var resultsIdentity: String {
+        "\(debouncedSearchText)|\(searchResults.songs.count)"
+    }
+
+    private var resultsList: some View {
+        LazyVStack(alignment: .leading, spacing: Design.Spacing.xl) {
+            if shows(.songs), !searchResults.songs.isEmpty {
+                resultsGroup(Localized.songs, category: .songs, count: searchResults.songs.count) {
+                    ForEach(limited(searchResults.songs, for: .songs), id: \.stableId) { track in
+                        LiveTrackRow(
+                            track: track,
+                            artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
+                            contextIdentity: resultsIdentity
+                        ) {
+                            remember(debouncedSearchText)
+                            dismissSearchKeyboard()
+                            Task {
+                                // Only queue the selected song from search
+                                await appCoordinator.playTrack(track, queue: [track])
+                            }
+                        }
+                    }
+                }
+            }
+
+            if shows(.artists), !searchResults.artists.isEmpty {
+                resultsGroup(Localized.artists, category: .artists, count: searchResults.artists.count) {
+                    ForEach(limited(searchResults.artists, for: .artists), id: \.id) { artist in
+                        NavigationLink(value: LibraryRoute.artist(id: artist.id, name: artist.name)) {
+                            ArtistRowView(name: artist.name, artworkTrack: artist.id.flatMap { artworkTrackByArtist[$0] }, photoLookupArtistId: artist.id)
+                                .pagePadding()
+                        }
+                        .buttonStyle(.plain)
+                        .simultaneousGesture(TapGesture().onEnded { remember(debouncedSearchText) })
+                    }
+                }
+            }
+
+            if shows(.albums), !searchResults.albums.isEmpty {
+                resultsGroup(Localized.albums, category: .albums, count: searchResults.albums.count) {
+                    ForEach(limited(searchResults.albums, for: .albums), id: \.id) { album in
+                        if let albumId = album.id {
+                            NavigationLink(value: LibraryRoute.album(id: albumId)) {
+                                AlbumRowView(
+                                    album: album,
+                                    artistName: album.albumArtist ?? album.artistId.flatMap { artistNameCache[$0] }
+                                )
+                                .pagePadding()
+                            }
+                            .buttonStyle(.plain)
+                            .simultaneousGesture(TapGesture().onEnded { remember(debouncedSearchText) })
+                        }
+                    }
+                }
+            }
+
+            if shows(.playlists), !searchResults.playlists.isEmpty {
+                resultsGroup(Localized.playlists, category: .playlists, count: searchResults.playlists.count) {
+                    ForEach(limited(searchResults.playlists, for: .playlists), id: \.id) { playlist in
+                        if let playlistId = playlist.id {
+                            NavigationLink(value: LibraryRoute.playlist(id: playlistId)) {
+                                PlaylistRowView(playlist: playlist)
+                                    .pagePadding()
+                            }
+                            .buttonStyle(.plain)
+                            .simultaneousGesture(TapGesture().onEnded { remember(debouncedSearchText) })
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func resultsGroup<Content: View>(_ title: String, category: SearchCategory, count: Int, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: Design.Spacing.xs) {
+            resultsHeader(title, category: category, count: count)
+                .pagePadding()
+            content()
+        }
+    }
+
+    private func resultsHeader(_ title: String, category: SearchCategory, count: Int) -> some View {
+        SectionTitle(title: title) {
+            if selectedCategory == .all && count > previewCount {
+                Button(Localized.seeAll) {
+                    selectedCategory = category
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+        }
+        .padding(.top, Design.Spacing.s)
+    }
+
+    private func loadArtistCache(for songs: [Track]) {
+        do {
+            if artistNameCache.isEmpty {
+                artistNameCache = try DatabaseManager.shared.getAllArtistNamesById()
+            }
+            let fallbackArtistIds = songs.reduce(into: [String: Int64]()) { result, track in
+                if let artistId = track.artistId {
+                    result[track.stableId] = artistId
+                }
+            }
+            artistDisplayNameCache = try DatabaseManager.shared.getArtistDisplayNames(
+                forTrackStableIds: songs.map(\.stableId),
+                fallbackArtistIdsByStableId: fallbackArtistIds
+            )
+        } catch {
+            print("Failed to load search artist cache: \(error)")
+        }
+    }
+}
+
+/// A Browse tile on the Search tab: a block of colour, its title, and one of
+/// the library's covers tilted into the corner.
+struct BrowseTile: View {
+    let title: String
+    let color: Color
+    let track: Track?
+    /// iPad: a taller tile with a bigger cover and title.
+    var isLarge = false
+    @State private var image: UIImage?
+
+    private var coverSide: CGFloat { isLarge ? 112 : 72 }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            LinearGradient(colors: [color, color.opacity(0.78)], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: coverSide, height: coverSide)
+                    .clipShape(RoundedRectangle(cornerRadius: isLarge ? 8 : 6, style: .continuous))
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
+                    .rotationEffect(.degrees(22))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .offset(x: coverSide * 0.2, y: coverSide * 0.17)
+                    .accessibilityHidden(true)
+            }
+
+            Text(title)
+                .font((isLarge ? Font.title3 : Font.headline).weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                // The tile is a fixed height: large text shrinks a little
+                // rather than cutting "Ajoutés récemment" to "récem…".
+                .minimumScaleFactor(0.7)
+                .padding(isLarge ? Design.Spacing.l : Design.Spacing.m)
+                .padding(.trailing, coverSide * 0.66)
+        }
+        .frame(height: isLarge ? 150 : 104)
+        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .task(id: track?.stableId) {
+            guard let track else { return }
+            image = await ArtworkManager.shared.getThumbnail(for: track, maxPixelSize: 360)
+        }
+    }
+}
+
+// MARK: - Library item rows
+
+/// A row for something that opens a page - an artist, album or playlist - in
+/// a list. Same height and text styles as a song row.
+struct LibraryItemRow<Artwork: View>: View {
+    let title: String
+    var subtitle: String? = nil
+    @ViewBuilder let artwork: () -> Artwork
+
+    var body: some View {
+        HStack(spacing: Design.Spacing.m) {
+            artwork()
+                .frame(width: Design.Size.rowArtwork, height: Design.Size.rowArtwork)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 72)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// An artist in a list. Local files carry no artist photo, so the avatar is
+/// the artist's initial on the accent colour.
+struct ArtistRowView: View {
+    let name: String
+    var subtitle: String? = nil
+    var artworkTrack: Track? = nil
+    /// Set to look the artist's photo up online when none is saved yet.
+    var photoLookupArtistId: Int64? = nil
+
+    var body: some View {
+        LibraryItemRow(title: name, subtitle: subtitle) {
+            ArtistAvatar(name: name, artworkTrack: artworkTrack, photoLookupArtistId: photoLookupArtistId)
+        }
+    }
+}
+
+/// An artist's circle: their photo once one is saved (from their page, or
+/// looked up when `fetchesPhoto`), else the artwork of one of their songs,
+/// else - while it loads, or when there is none - their initial.
+struct ArtistAvatar: View {
+    let name: String
+    var artworkTrack: Track? = nil
+    /// Set to look the artist's photo up online when none is saved yet.
+    var photoLookupArtistId: Int64? = nil
+    @ObservedObject private var theme = ThemeStore.shared
+    @State private var artwork: UIImage?
+
+    private var initial: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return "?" }
+        return String(first).uppercased()
+    }
+
+    var body: some View {
+        Circle()
+            .fill(theme.accent.opacity(0.18))
+            .overlay {
+                if let artwork {
+                    Image(uiImage: artwork)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .transition(.opacity)
+                } else {
+                    // Scales with the circle, from a row to a grid portrait.
+                    GeometryReader { geometry in
+                        Text(initial)
+                            .font(.system(size: max(14, geometry.size.width * 0.38), weight: .semibold, design: .rounded))
+                            .foregroundStyle(theme.accent)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+            .clipShape(Circle())
+            .overlay(Circle().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .accessibilityHidden(true)
+            .task(id: "\(name)|\(artworkTrack?.stableId ?? "")") {
+                if let photo = await ArtistPhotoStore.shared.cachedPhoto(for: name) {
+                    withAnimation(.easeOut(duration: 0.25)) { artwork = photo }
+                    return
+                }
+                if let artworkTrack {
+                    let image = await ArtworkManager.shared.getThumbnail(for: artworkTrack, maxPixelSize: 400)
+                    withAnimation(.easeOut(duration: 0.25)) { artwork = image }
+                }
+                guard let artistId = photoLookupArtistId, !Task.isCancelled,
+                      let photo = await ArtistPhotoStore.shared.photo(for: name, artistId: artistId) else { return }
+                withAnimation(.easeOut(duration: 0.25)) { artwork = photo }
+            }
+    }
+}
+
+struct AlbumRowView: View {
+    let album: Album
+    let artistName: String?
+    @State private var artworkImage: UIImage?
+    @State private var trackCount: Int?
+
+    var body: some View {
+        LibraryItemRow(title: album.title, subtitle: subtitle) {
+            ArtworkView(image: artworkImage, cornerRadius: Design.Radius.thumbnail, placeholderSymbol: "opticaldisc")
+        }
+        .task(id: album.id) {
             guard let albumId = album.id else { return }
-
-            Task {
-                let tracks = (try? DatabaseManager.shared.getTracksByAlbumId(albumId)) ?? []
-                await MainActor.run {
-                    albumTracks = tracks
-                }
-
-                guard let firstTrack = tracks.first else { return }
-                let artwork = await ArtworkManager.shared.getThumbnail(for: firstTrack)
-                await MainActor.run {
-                    artworkImage = artwork
-                }
+            let tracks = (try? DatabaseManager.shared.getTracksByAlbumId(albumId)) ?? []
+            trackCount = tracks.count
+            if let first = tracks.first {
+                artworkImage = await ArtworkManager.shared.getThumbnail(for: first)
             }
         }
     }
 
-    struct SearchPlaylistRowView: View {
-        let playlist: Playlist
-        let onDismiss: () -> Void
-        let onNavigate: (Playlist) -> Void
-        @State private var settings = DeleteSettings.load()
+    private var subtitle: String {
+        var parts: [String] = []
+        if let artistName, !artistName.isEmpty { parts.append(artistName) }
+        if let year = album.year, year > 0 { parts.append(String(year)) }
+        if parts.isEmpty, let trackCount { parts.append(Localized.songsCountOnly(trackCount)) }
+        return parts.joined(separator: " · ")
+    }
+}
 
-        var body: some View {
-            Button(action: {
-                onDismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    onNavigate(playlist)
-                }
-            }) {
-                HStack(spacing: 12) {
+struct PlaylistRowView: View {
+    let playlist: Playlist
+    @ObservedObject private var theme = ThemeStore.shared
+
+    var body: some View {
+        LibraryItemRow(title: playlist.title, subtitle: Localized.playlist) {
+            RoundedRectangle(cornerRadius: Design.Radius.thumbnail, style: .continuous)
+                .fill(theme.accent.opacity(0.16))
+                .overlay {
                     Image(systemName: "music.note.list")
                         .font(.title2)
-                        .foregroundColor(.green)
-                        .frame(width: 24, height: 24)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(playlist.title)
-                            .font(.body)
-                            .fontWeight(.medium)
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-
-                        Text(Localized.playlist)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(theme.accent)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PlainButtonStyle())
+                .accessibilityHidden(true)
         }
     }
 }

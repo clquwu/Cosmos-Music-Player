@@ -67,18 +67,30 @@ struct AlbumQuery {
 @available(iOS 27.0, *)
 extension AlbumQuery: EntityQuery {
     func entities(for identifiers: [AlbumEntity.ID]) async throws -> [AlbumEntity] {
-        try await store.albumEntities(for: identifiers)
+        do {
+            return try await store.albumEntities(for: identifiers)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "AlbumQuery.entities")
+        }
     }
 
     func suggestedEntities() async throws -> [AlbumEntity] {
-        try await store.allAlbumEntities(limit: 50)
+        do {
+            return try await store.allAlbumEntities(limit: 50)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "AlbumQuery.suggestedEntities")
+        }
     }
 }
 
 @available(iOS 27.0, *)
 extension AlbumQuery: EntityStringQuery {
     func entities(matching string: String) async throws -> [AlbumEntity] {
-        try await store.albumEntities(matching: string)
+        do {
+            return try await store.albumEntities(matching: string)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "AlbumQuery.entities")
+        }
     }
 }
 

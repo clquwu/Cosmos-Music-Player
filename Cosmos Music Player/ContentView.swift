@@ -22,7 +22,9 @@ struct ContentView: View {
                 libraryIndexer: libraryIndexer,
                 refreshTimer: $refreshTimer,
                 showTutorial: $showTutorial,
-                onRefresh: refreshLibrary
+                libraryCount: tracks.count,
+                onRefresh: refreshLibrary,
+                onScanProgress: appendNewTracks
             ))
             .modifier(OverlayModifier(
                 appCoordinator: appCoordinator
@@ -33,21 +35,19 @@ struct ContentView: View {
                 showPlaylistManagement: $showPlaylistManagement,
                 showSettings: $showSettings
             ))
+            // Not before the tutorial is done: a first launch has enough to read.
+            .modifier(SupportPromptModifier(
+                isReady: appCoordinator.isInitialized && !showTutorial && !TutorialViewModel.shouldShowTutorial()
+            ))
     }
 
     private var mainContent: some View {
-        LibraryView(
+        RootTabView(
             tracks: tracks,
-            showTutorial: $showTutorial,
-            showPlaylistManagement: $showPlaylistManagement,
             showSettings: $showSettings,
             onRefresh: performRefresh,
             onManualSync: performManualSync
         )
-        .safeAreaInset(edge: .bottom) {
-            MiniPlayerView()
-                .background(.clear)
-        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
             Task {
                 await refreshLibrary()
@@ -71,6 +71,29 @@ struct ContentView: View {
             tracks = allTracks
         } catch {
             print("Failed to refresh library: \(error)")
+        }
+    }
+
+    /// While a scan runs: adds the songs it has found since the last update
+    /// instead of reading the whole library again. Re-reading 20,000 rows
+    /// (90-180 ms) and handing every view a new copy of all of them, every
+    /// 2 s for the length of a scan, had become the slowest part of it. The
+    /// scan only adds rows as it goes; whatever it updates or removes is
+    /// picked up by the full reload when it ends.
+    @Sendable private func appendNewTracks() async {
+        let newest = tracks.lazy.compactMap(\.id).max() ?? 0
+        do {
+            let added = try await Task.detached(priority: .utility) {
+                try DatabaseManager.shared.getTracks(newerThan: newest)
+            }.value
+            guard !added.isEmpty else { return }
+            // Something else may have reloaded meanwhile.
+            let known = Set(tracks.lazy.compactMap(\.id))
+            let fresh = added.filter { $0.id.map { !known.contains($0) } ?? false }
+            guard !fresh.isEmpty else { return }
+            tracks = fresh + tracks
+        } catch {
+            print("Failed to add newly found songs: \(error)")
         }
     }
 
@@ -108,8 +131,19 @@ struct LifecycleModifier: ViewModifier {
     let libraryIndexer: LibraryIndexer
     @Binding var refreshTimer: Timer?
     @Binding var showTutorial: Bool
+    /// Songs in the library when a scan starts: sets how often it updates.
+    let libraryCount: Int
     let onRefresh: @Sendable () async -> Void
+    let onScanProgress: @Sendable () async -> Void
     @State private var hasPendingIndexRefresh = false
+
+    /// How often a running scan shows the songs it has found: every 2 s for
+    /// a small library, up to every 10 s from 10,000 songs. Each update hands
+    /// every list a new copy of the library, and with a big one that work -
+    /// not the new rows - is what the scan was waiting on.
+    private var scanRefreshInterval: TimeInterval {
+        min(10, max(2, Double(libraryCount) / 1000))
+    }
 
     func body(content: Content) -> some View {
         content
@@ -141,11 +175,14 @@ struct LifecycleModifier: ViewModifier {
             .onChange(of: libraryIndexer.isIndexing) { _, isIndexing in
                 if isIndexing {
                     refreshTimer?.invalidate()
-                    refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                    refreshTimer = Timer.scheduledTimer(withTimeInterval: scanRefreshInterval, repeats: true) { _ in
                         Task { @MainActor in
-                            guard hasPendingIndexRefresh else { return }
+                            guard hasPendingIndexRefresh,
+                                  // Nobody sees the list in the background;
+                                  // the reload at the end of the scan covers it.
+                                  UIApplication.shared.applicationState != .background else { return }
                             hasPendingIndexRefresh = false
-                            await onRefresh()
+                            await onScanProgress()
                         }
                     }
                 } else {

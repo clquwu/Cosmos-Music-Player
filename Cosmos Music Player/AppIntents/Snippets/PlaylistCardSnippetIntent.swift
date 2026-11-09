@@ -31,7 +31,13 @@ struct PlaylistCardSnippetIntent: SnippetIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ShowsSnippetView {
-        guard let playlist = try store.playlistEntities(for: [playlistId]).first else {
+        let found: PlaylistEntity?
+        do {
+            found = try store.playlistEntities(for: [playlistId]).first
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "PlaylistCardSnippetIntent")
+        }
+        guard let playlist = found else {
             throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
         }
         return .result(view: PlaylistCardSnippetView(

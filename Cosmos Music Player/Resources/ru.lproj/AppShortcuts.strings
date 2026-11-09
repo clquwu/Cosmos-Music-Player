@@ -16,3 +16,38 @@
 "Make me a mix in ${applicationName}" = "Создать для меня микс в ${applicationName}";
 "Generate a mix in ${applicationName}" = "Создать микс в ${applicationName}";
 "Play me something new in ${applicationName}" = "Включить что-нибудь новое в ${applicationName}";
+
+"Play my liked songs in ${applicationName}" = "Включи мои любимые песни в ${applicationName}";
+"Play my favorites in ${applicationName}" = "Включи избранное в ${applicationName}";
+"Play my favourite songs in ${applicationName}" = "Поставь мои любимые песни в ${applicationName}";
+"Shuffle my liked songs in ${applicationName}" = "Перемешай мои любимые песни в ${applicationName}";
+
+/* Voice coverage pass: mixes, song radio, player commands, sleep timer, shuffle, add to playlist */
+"Play my loved songs in ${applicationName}" = "Включи мои любимые треки в ${applicationName}";
+"Play the songs I like in ${applicationName}" = "Включи песни, которые мне нравятся, в ${applicationName}";
+"Play ${mix} in ${applicationName}" = "Включи ${mix} в ${applicationName}";
+"Play the ${mix} mix in ${applicationName}" = "Включи микс ${mix} в ${applicationName}";
+"Play my mix ${mix} in ${applicationName}" = "Поставь мой микс ${mix} в ${applicationName}";
+"Play a mix made for me in ${applicationName}" = "Включи микс для меня в ${applicationName}";
+"Play my mixes in ${applicationName}" = "Включи мои миксы в ${applicationName}";
+"Play a mix like this song in ${applicationName}" = "Включи микс как эта песня в ${applicationName}";
+"Play more like this in ${applicationName}" = "Включи похожее в ${applicationName}";
+"Start a radio from this song in ${applicationName}" = "Запусти радио по этой песне в ${applicationName}";
+"Play similar songs in ${applicationName}" = "Включи похожие песни в ${applicationName}";
+"Play songs like this one in ${applicationName}" = "Включи песни как эта в ${applicationName}";
+"${command} in ${applicationName}" = "${command} в ${applicationName}";
+"${command} on ${applicationName}" = "${command} на ${applicationName}";
+"${applicationName} ${command}" = "${applicationName} ${command}";
+"Set a sleep timer in ${applicationName}" = "Установи таймер сна в ${applicationName}";
+"Set a sleep timer for ${duration} in ${applicationName}" = "Установи таймер сна на ${duration} в ${applicationName}";
+"Stop the music in ${duration} with ${applicationName}" = "Выключи музыку через ${duration} в ${applicationName}";
+"Sleep timer ${duration} in ${applicationName}" = "Таймер сна ${duration} в ${applicationName}";
+"Shuffle my music in ${applicationName}" = "Перемешай мою музыку в ${applicationName}";
+"Shuffle my library in ${applicationName}" = "Перемешай мою медиатеку в ${applicationName}";
+"Shuffle all my songs in ${applicationName}" = "Перемешай все мои песни в ${applicationName}";
+"Shuffle ${artist} in ${applicationName}" = "Перемешай ${artist} в ${applicationName}";
+"Play ${artist} shuffled in ${applicationName}" = "Включи ${artist} вперемешку в ${applicationName}";
+"Shuffle songs by ${artist} in ${applicationName}" = "Перемешай песни ${artist} в ${applicationName}";
+"Add this song to ${playlist} in ${applicationName}" = "Добавь эту песню в ${playlist} в ${applicationName}";
+"Add this song to my ${playlist} playlist in ${applicationName}" = "Добавь эту песню в мой плейлист ${playlist} в ${applicationName}";
+"Add the current song to ${playlist} in ${applicationName}" = "Добавь текущую песню в ${playlist} в ${applicationName}";

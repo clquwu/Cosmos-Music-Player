@@ -16,9 +16,8 @@ struct EQSettingsView: View {
     @State private var showingEditManual = false
 
     var body: some View {
-        NavigationView {
-            formContent
-        }
+        // Pushed from Settings, which already provides the navigation stack.
+        formContent
     }
 
     private var formContent: some View {
@@ -26,7 +25,6 @@ struct EQSettingsView: View {
             // EQ Enable/Disable
             Section {
                 Toggle(Localized.enableEqualizer, isOn: $eqManager.isEnabled)
-                    .tint(.blue)
             } footer: {
                 Text(Localized.enableDisableEqDescription)
                     .font(.caption)
@@ -44,15 +42,16 @@ struct EQSettingsView: View {
 
                                 Text(Localized.manualParametricEQ)
                                     .font(.caption)
-                                    .foregroundColor(.green)
+                                    .foregroundStyle(.secondary)
                             }
 
                             Spacer()
 
                             if eqManager.currentPreset?.id == preset.id {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.blue)
-                                    .font(.system(size: 20))
+                                    .foregroundStyle(.tint)
+                                    .font(.title3)
+                                    .accessibilityLabel(Localized.select)
                             }
                         }
                         .contentShape(Rectangle())
@@ -92,7 +91,6 @@ struct EQSettingsView: View {
                 Button(Localized.createManualEQ) {
                     showingCreateManual = true
                 }
-                .foregroundColor(.green)
             }
 
             // Imported GraphicEQ Presets
@@ -106,15 +104,16 @@ struct EQSettingsView: View {
 
                                 Text(Localized.importedGraphicEQ)
                                     .font(.caption)
-                                    .foregroundColor(.blue)
+                                    .foregroundStyle(.secondary)
                             }
 
                             Spacer()
 
                             if eqManager.currentPreset?.id == preset.id {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.blue)
-                                    .font(.system(size: 20))
+                                    .foregroundStyle(.tint)
+                                    .font(.title3)
+                                    .accessibilityLabel(Localized.select)
                             }
                         }
                         .contentShape(Rectangle())
@@ -147,7 +146,6 @@ struct EQSettingsView: View {
                 Button(Localized.importGraphicEQFile) {
                     showingImport = true
                 }
-                .foregroundColor(.blue)
             }
 
             // Global Gain (only show when EQ is enabled)
@@ -162,7 +160,8 @@ struct EQSettingsView: View {
                         }
 
                         Slider(value: $eqManager.globalGain, in: -30...30, step: 0.5)
-                            .tint(.blue)
+                            .accessibilityLabel(Localized.globalGain)
+                            .accessibilityValue("\(String(format: "%.1f", eqManager.globalGain)) dB")
                     }
                 } header: {
                     Text(Localized.globalSettings)
@@ -250,7 +249,7 @@ struct CreateManualEQView: View {
     @State private var createError: String?
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
                 Section(Localized.presetName) {
                     TextField(Localized.enterPresetName, text: $presetName)
@@ -285,13 +284,13 @@ struct CreateManualEQView: View {
             .navigationTitle(Localized.createManualEQ)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .topBarLeading) {
                     Button(Localized.eqCancel) {
                         dismiss()
                     }
                 }
 
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(Localized.eqCreate) {
                         createPreset()
                     }
@@ -344,7 +343,7 @@ struct ManualEQEditorView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             if isLoading {
                 ProgressView()
                     .onAppear {
@@ -444,13 +443,13 @@ struct ManualEQEditorView: View {
                 .navigationTitle(Localized.editEqualizer)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
+                    ToolbarItem(placement: .topBarLeading) {
                         Button(Localized.eqCancel) {
                             dismiss()
                         }
                     }
 
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                    ToolbarItem(placement: .topBarTrailing) {
                         Button(Localized.eqSave) {
                             saveChanges()
                         }
@@ -741,7 +740,7 @@ struct GraphicEQImportView: View {
     @State private var textContent = ""
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
                 Section(Localized.presetName) {
                     TextField(Localized.enterPresetName, text: $presetName)
@@ -789,7 +788,7 @@ struct GraphicEQImportView: View {
             .navigationTitle(Localized.importGraphicEQ)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .topBarLeading) {
                     Button(Localized.eqCancel) {
                         dismiss()
                     }
@@ -879,7 +878,7 @@ struct TextImportView: View {
     let onImport: (String, String) -> Void
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
                 Section(Localized.pasteGraphicEQTextSection) {
                     TextEditor(text: $textContent)
@@ -896,13 +895,13 @@ struct TextImportView: View {
             .navigationTitle(Localized.pasteGraphicEQ)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .topBarLeading) {
                     Button(Localized.eqCancel) {
                         dismiss()
                     }
                 }
 
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(Localized.eqImport) {
                         onImport(textContent, presetName)
                         dismiss()

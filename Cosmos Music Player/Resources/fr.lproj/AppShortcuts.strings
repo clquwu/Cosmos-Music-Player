@@ -20,3 +20,38 @@
 "Make me a mix in ${applicationName}" = "Fais-moi un mix dans ${applicationName}";
 "Generate a mix in ${applicationName}" = "Génère un mix dans ${applicationName}";
 "Play me something new in ${applicationName}" = "Joue-moi quelque chose de nouveau dans ${applicationName}";
+
+"Play my liked songs in ${applicationName}" = "Joue mes titres likés dans ${applicationName}";
+"Play my favorites in ${applicationName}" = "Joue mes favoris dans ${applicationName}";
+"Play my favourite songs in ${applicationName}" = "Mets mes favoris dans ${applicationName}";
+"Shuffle my liked songs in ${applicationName}" = "Lance mes coups de cœur dans ${applicationName}";
+
+/* Voice coverage pass: mixes, song radio, player commands, sleep timer, shuffle, add to playlist */
+"Play my loved songs in ${applicationName}" = "Joue mes coups de cœur dans ${applicationName}";
+"Play the songs I like in ${applicationName}" = "Joue les morceaux que j'aime dans ${applicationName}";
+"Play ${mix} in ${applicationName}" = "Joue ${mix} dans ${applicationName}";
+"Play the ${mix} mix in ${applicationName}" = "Mets le mix ${mix} dans ${applicationName}";
+"Play my mix ${mix} in ${applicationName}" = "Lance le mix ${mix} dans ${applicationName}";
+"Play a mix made for me in ${applicationName}" = "Joue un mix pour moi dans ${applicationName}";
+"Play my mixes in ${applicationName}" = "Joue mes mix dans ${applicationName}";
+"Play a mix like this song in ${applicationName}" = "Joue un mix comme ce morceau dans ${applicationName}";
+"Play more like this in ${applicationName}" = "Joue plus de morceaux comme celui-ci dans ${applicationName}";
+"Start a radio from this song in ${applicationName}" = "Lance une radio à partir de ce morceau dans ${applicationName}";
+"Play similar songs in ${applicationName}" = "Joue des titres similaires dans ${applicationName}";
+"Play songs like this one in ${applicationName}" = "Mets des morceaux du même genre dans ${applicationName}";
+"${command} in ${applicationName}" = "${command} dans ${applicationName}";
+"${command} on ${applicationName}" = "${command} sur ${applicationName}";
+"${applicationName} ${command}" = "${applicationName} ${command}";
+"Set a sleep timer in ${applicationName}" = "Règle une minuterie de sommeil dans ${applicationName}";
+"Set a sleep timer for ${duration} in ${applicationName}" = "Règle une minuterie de ${duration} dans ${applicationName}";
+"Stop the music in ${duration} with ${applicationName}" = "Arrête la musique dans ${duration} avec ${applicationName}";
+"Sleep timer ${duration} in ${applicationName}" = "Minuterie ${duration} dans ${applicationName}";
+"Shuffle my music in ${applicationName}" = "Lecture aléatoire de ma musique dans ${applicationName}";
+"Shuffle my library in ${applicationName}" = "Mélange ma bibliothèque dans ${applicationName}";
+"Shuffle all my songs in ${applicationName}" = "Mélange toute ma musique dans ${applicationName}";
+"Shuffle ${artist} in ${applicationName}" = "Mélange ${artist} dans ${applicationName}";
+"Play ${artist} shuffled in ${applicationName}" = "Joue ${artist} en aléatoire dans ${applicationName}";
+"Shuffle songs by ${artist} in ${applicationName}" = "Lecture aléatoire de ${artist} dans ${applicationName}";
+"Add this song to ${playlist} in ${applicationName}" = "Ajoute ce morceau à ${playlist} dans ${applicationName}";
+"Add this song to my ${playlist} playlist in ${applicationName}" = "Ajoute ce titre à la playlist ${playlist} dans ${applicationName}";
+"Add the current song to ${playlist} in ${applicationName}" = "Ajoute le morceau en cours à ${playlist} dans ${applicationName}";

@@ -49,6 +49,11 @@ class ArtworkManager: ObservableObject {
     /// that later gains a cover is picked up by `forceRefreshArtwork`, which
     /// the scanner calls when a file's fingerprint changes.
     private var knownArtworkless: Set<String> = []
+    /// Folder covers the scan found or dropped since the `Track` values held
+    /// around the app were loaded ("" for dropped). A row keeps the `Track` it
+    /// was built with, so without this its reload would still ask with the
+    /// old `artworkPath`.
+    private var folderArtworkOverrides: [String: String] = [:]
     /// Scrolling a large un-downloaded library must not spawn one waiting task
     /// per row. Rows that miss a slot are retried by their next `.onAppear` or
     /// by the end-of-scan refresh, so nothing is lost by capping this.
@@ -149,7 +154,9 @@ class ArtworkManager: ObservableObject {
         }
     }
 
-    func forceRefreshArtwork(for track: Track) async -> UIImage? {
+    /// - Parameter requestDownload: false from the scan, which must not pull a
+    ///   folder cover down from iCloud; it is fetched when it is shown.
+    func forceRefreshArtwork(for track: Track, requestDownload: Bool = true) async -> UIImage? {
         // Remove from memory cache and mapping to force re-extraction
         memoryCache.removeObject(forKey: track.stableId as NSString)
         // Thumbnail keys are size-suffixed and NSCache can't enumerate, so drop them all
@@ -163,7 +170,7 @@ class ArtworkManager: ObservableObject {
         saveMapping()
 
         print("🔄 Force refreshing artwork for: \(track.title)")
-        let refreshed = await getArtwork(for: track)
+        let refreshed = await getArtwork(for: track, requestDownload: requestDownload)
         notifyArtworkChanged(for: track.stableId)
         return refreshed
     }
@@ -206,6 +213,10 @@ class ArtworkManager: ObservableObject {
     }
 
     func getArtwork(for track: Track) async -> UIImage? {
+        await getArtwork(for: track, requestDownload: true)
+    }
+
+    private func getArtwork(for track: Track, requestDownload: Bool) async -> UIImage? {
         // 1. Check memory cache first (fastest)
         if let cachedImage = memoryCache.object(forKey: track.stableId as NSString) {
             return cachedImage
@@ -220,6 +231,14 @@ class ArtworkManager: ObservableObject {
 
         if knownArtworkless.contains(track.stableId) {
             return nil
+        }
+
+        // A song with no cover of its own whose folder has one: read the
+        // image, not the audio file - which for an offloaded iCloud song would
+        // mean downloading the whole song to draw its row.
+        let folderArtworkPath = self.folderArtworkPath(for: track)
+        if !track.hasEmbeddedArt, let folderArtworkPath {
+            return await loadFolderArtwork(for: track, imagePath: folderArtworkPath, requestDownload: requestDownload)
         }
 
         // 3. Read the file itself. This is the only step that can fill the two
@@ -244,6 +263,11 @@ class ArtworkManager: ObservableObject {
             return image
         }
 
+        // Embedded art first, the folder's when there turned out to be none.
+        if let folderArtworkPath {
+            return await loadFolderArtwork(for: track, imagePath: folderArtworkPath, requestDownload: requestDownload)
+        }
+
         // Nothing was read. If that is only because the bytes have not landed
         // yet, keep waiting off to one side instead of answering "no cover" for
         // the rest of the session.
@@ -254,6 +278,76 @@ class ArtworkManager: ObservableObject {
             knownArtworkless.insert(track.stableId)
         }
         return nil
+    }
+
+    // MARK: - Folder artwork
+
+    /// The track's folder cover, preferring what the latest scan found.
+    private func folderArtworkPath(for track: Track) -> String? {
+        if let override = folderArtworkOverrides[track.stableId] {
+            return override.isEmpty ? nil : override
+        }
+        return track.artworkPath
+    }
+
+    /// Reads a cover image file from the song's folder into the same caches
+    /// embedded art goes to, so rows, the player, CarPlay, the widget and
+    /// Now Playing all get it the same way.
+    @discardableResult
+    private func loadFolderArtwork(for track: Track, imagePath: String, requestDownload: Bool) async -> UIImage? {
+        // Through localFileURL: an image in a linked folder needs its scope.
+        let url = DatabaseManager.localFileURL(forStoredPath: imagePath)
+        if requestDownload {
+            try? await CloudDownloadManager.shared.ensureLocal(url, downloadTimeout: 0)
+        }
+
+        let maxPixelSize = Self.maxFullArtworkPixelSize
+        if let image = await Task.detached(priority: .userInitiated, operation: {
+            Self.downsampledImage(at: url, maxPixelSize: maxPixelSize)
+        }).value {
+            cacheImage(image, for: track.stableId)
+            await saveToDiskCache(image: image, stableId: track.stableId)
+            notifyArtworkChanged(for: track.stableId)
+            return image
+        }
+
+        if isAwaitingCloudDownload(url) {
+            // Not "no cover" - "not yet". A scan only notes it; drawing waits.
+            if requestDownload {
+                scheduleCloudArtworkRetryIfNeeded(for: track, at: url)
+            }
+        } else {
+            // Gone or unreadable. The next scan's folder pass corrects the row.
+            knownArtworkless.insert(track.stableId)
+        }
+        return nil
+    }
+
+    /// Takes in the folder covers a scan found, changed or dropped, and
+    /// forgets what was cached for those songs so the next draw reads anew.
+    /// Nothing is read here: that waits until a cover is actually shown.
+    func adoptFolderArtwork(_ changes: [String: String?]) {
+        guard !changes.isEmpty else { return }
+        var notify: [String] = []
+        for (stableId, path) in changes {
+            folderArtworkOverrides[stableId] = path ?? ""
+            let hadMapping = artworkMapping.removeValue(forKey: stableId) != nil
+            let wasArtworkless = knownArtworkless.remove(stableId) != nil
+            let wasInMemory = memoryCache.object(forKey: stableId as NSString) != nil
+            let wasKnown = hadMapping || wasArtworkless || wasInMemory
+            memoryCache.removeObject(forKey: stableId as NSString)
+            cachedTrackIds.remove(stableId)
+            if wasKnown {
+                notify.append(stableId)
+            }
+        }
+        thumbnailCache.removeAllObjects()
+        saveMapping()
+        // Only covers something has already drawn need telling; a first-time
+        // cover reloads with the library refresh that follows the scan.
+        for stableId in notify {
+            notifyArtworkChanged(for: stableId)
+        }
     }
 
     /// A file open for reading, plus whatever has to be handed back afterwards.
@@ -292,7 +386,7 @@ class ArtworkManager: ObservableObject {
     /// must not rewrite the library, and a stale bookmark is simply declined -
     /// the playback path owns repairing that.
     private func beginReadAccess(for track: Track) async -> ScopedFile {
-        let databaseURL = URL(fileURLWithPath: track.path)
+        let databaseURL = DatabaseManager.localFileURL(forStoredPath: track.path)
 
         guard let bookmarkData = try? await ExternalBookmarkStore.shared.bookmarkData(for: track.stableId) else {
             return ScopedFile(url: databaseURL)
@@ -376,6 +470,12 @@ class ArtworkManager: ObservableObject {
             // Playback, a rescan or another row may have cached it meanwhile.
             guard self.artworkMapping[stableId] == nil else { return }
 
+            if let folderArtworkPath = self.folderArtworkPath(for: track),
+               DatabaseManager.canonicalPath(url.path) == DatabaseManager.canonicalPath(folderArtworkPath) {
+                await self.loadFolderArtwork(for: track, imagePath: folderArtworkPath, requestDownload: false)
+                return
+            }
+
             // Access was relinquished when the original read returned, so an
             // external file has to be opened again for this second attempt.
             let access = await self.beginReadAccess(for: track)
@@ -404,17 +504,24 @@ class ArtworkManager: ObservableObject {
     func getThumbnail(for track: Track, maxPixelSize: CGFloat = 160) async -> UIImage? {
         let key = "\(track.stableId)-\(Int(maxPixelSize))" as NSString
         if let cached = thumbnailCache.object(forKey: key) {
+            Perf.event("Thumbnail cache hit")
             return cached
         }
 
         // Fast path: downsample straight from the disk cache file
-        if let artworkHash = artworkMapping[track.stableId],
-           let thumbnail = await loadThumbnailFromDisk(artworkHash: artworkHash, maxPixelSize: maxPixelSize) {
-            thumbnailCache.setObject(thumbnail, forKey: key)
-            return thumbnail
+        if let artworkHash = artworkMapping[track.stableId] {
+            let signpost = Perf.begin("Thumbnail miss (disk)")
+            let thumbnail = await loadThumbnailFromDisk(artworkHash: artworkHash, maxPixelSize: maxPixelSize)
+            Perf.end("Thumbnail miss (disk)", signpost)
+            if let thumbnail {
+                thumbnailCache.setObject(thumbnail, forKey: key)
+                return thumbnail
+            }
         }
 
         // Slow path: full pipeline (extracts and fills the disk cache), then shrink
+        let signpost = Perf.begin("Thumbnail miss (extract)")
+        defer { Perf.end("Thumbnail miss (extract)", signpost) }
         guard let fullImage = await getArtwork(for: track) else { return nil }
         let thumbnail = await Self.downsampledOffMain(fullImage, maxPixelSize: maxPixelSize)
         thumbnailCache.setObject(thumbnail, forKey: key)

@@ -102,3 +102,4 @@ Config.plist
 
 # macOS
 .DS_Store
+/.claude

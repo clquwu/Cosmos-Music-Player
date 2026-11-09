@@ -60,6 +60,93 @@ enum DSDPlaybackMode: String, CaseIterable, Codable {
     }
 }
 
+/// ReplayGain volume levelling: which of a track's gain tags playback applies.
+///
+/// Off by default, like Apple's Sound Check. Turning it on changes how loud
+/// every song plays, which existing users must choose rather than discover.
+/// Stored on its own key rather than in `DeleteSettings` so PlayerEngine can
+/// read it without decoding that blob, and so `-cosmos.volumeLevelling album`
+/// on a debug launch overrides it.
+enum VolumeLevellingMode: String, CaseIterable, Codable {
+    case off
+    case track
+    case album
+
+    static let storageKey = "cosmos.volumeLevelling"
+
+    static var current: VolumeLevellingMode {
+        UserDefaults.standard.string(forKey: storageKey).flatMap(Self.init(rawValue:)) ?? .off
+    }
+
+    var displayName: String {
+        switch self {
+        case .off: return Localized.volumeLevellingOff
+        case .track: return Localized.volumeLevellingPerSong
+        case .album: return Localized.volumeLevellingPerAlbum
+        }
+    }
+
+    /// The most a tag may lower a song. Real tags sit well inside it; the
+    /// bound is for garbage values, which would otherwise mute a track.
+    static let minimumGainDB = -20.0
+    /// The most a tag may raise a song, before the peak cap below.
+    static let maximumGainDB = 12.0
+
+    /// What playback should apply to `track`, in dB and as the linear factor
+    /// the mixer takes.
+    ///
+    /// Per Album uses the album's gain so an album keeps its own quiet and
+    /// loud moments, falling back to the track's where the album was never
+    /// analysed; Per Song is the reverse. The peak is taken from the same
+    /// source as the gain, with the other as a fallback: an album peak is at
+    /// least the track's, so it is the safe stand-in for Per Song, and the
+    /// track's own peak still keeps that track from clipping under Per Album.
+    ///
+    /// A boost is capped so gain + peak stays at or under 0 dBFS. Without a
+    /// peak there is nothing to say how close the master already runs to full
+    /// scale - most modern ones touch it - so an untagged peak allows no
+    /// boost at all, only cuts. Untagged songs play unchanged: the on-device
+    /// analysis measures ten seconds of unweighted RMS clamped to 0...1 for
+    /// mood matching, not a loudness a gain could be derived from.
+    func gain(for track: Track) -> (db: Double, linear: Float, source: String) {
+        let gain: Double?
+        let peak: Double?
+        let source: String
+        switch self {
+        case .off:
+            return (0, 1, "off")
+        case .track:
+            gain = track.replaygainTrackGain ?? track.replaygainAlbumGain
+            peak = track.replaygainTrackGain != nil
+                ? Self.usablePeak(track.replaygainTrackPeak) ?? Self.usablePeak(track.replaygainAlbumPeak)
+                : Self.usablePeak(track.replaygainAlbumPeak) ?? Self.usablePeak(track.replaygainTrackPeak)
+            source = track.replaygainTrackGain != nil ? "track" : "album fallback"
+        case .album:
+            gain = track.replaygainAlbumGain ?? track.replaygainTrackGain
+            peak = track.replaygainAlbumGain != nil
+                ? Self.usablePeak(track.replaygainAlbumPeak) ?? Self.usablePeak(track.replaygainTrackPeak)
+                : Self.usablePeak(track.replaygainTrackPeak) ?? Self.usablePeak(track.replaygainAlbumPeak)
+            source = track.replaygainAlbumGain != nil ? "album" : "track fallback"
+        }
+
+        guard let gain, gain.isFinite else { return (0, 1, "untagged") }
+        var db = min(max(gain, Self.minimumGainDB), Self.maximumGainDB)
+        let ceiling = peak.map { -20 * log10($0) } ?? 0
+        if db > ceiling {
+            db = ceiling
+        }
+        return (db, Float(pow(10, db / 20)), peak == nil ? "\(source), no peak" : source)
+    }
+
+    /// A peak tag as a linear sample value. A non-positive one is meaningless,
+    /// and anything past +20 dBFS is a tag written on another scale (16-bit
+    /// integer peaks turn up) rather than a real overshoot.
+    private static func usablePeak(_ peak: Double?) -> Double? {
+        guard let peak, peak.isFinite, peak > 0, peak <= 10 else { return nil }
+        return peak
+    }
+}
+
 /// How long the app waits before it will automatically rescan the library on
 /// launch.
 ///

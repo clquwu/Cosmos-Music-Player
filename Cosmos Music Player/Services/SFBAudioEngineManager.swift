@@ -45,6 +45,42 @@ private final class WeakAudioPlayerBox: @unchecked Sendable {
     }
 }
 
+/// The gapless successor's volume-levelling factor, waiting for the render
+/// notification that says the successor has started.
+///
+/// That notification arrives on SFBAudioPlayer's event thread, and applying
+/// the factor there rather than a main-actor hop later is the point - so the
+/// hand-off is locked instead of actor-isolated. The decoder is held weakly:
+/// an entry left behind by a successor that was dropped can then never match
+/// a later decoder that happens to reuse its address.
+private final class LevellingHandoff: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var decoder: AnyObject?
+    private var gain: Float = 1
+
+    func set(_ gain: Float, for decoder: AnyObject) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.decoder = decoder
+        self.gain = gain
+    }
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        decoder = nil
+    }
+
+    /// The factor armed for `decoder`, consumed so it is applied once.
+    func take(for decoder: AnyObject) -> Float? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let armed = self.decoder, armed === decoder else { return nil }
+        self.decoder = nil
+        return gain
+    }
+}
+
 /// Carries a decoder that was built and opened off the main actor back to it.
 ///
 /// `@unchecked` for the same reason the box above is: neither `PCMDecoding` nor
@@ -85,9 +121,23 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         let url: URL
         let decoder: PCMDecoding
         let track: SFBTrack
+        /// Its volume-levelling factor, adopted when it takes over.
+        var levellingGain: Float
     }
 
     private var gaplessNext: GaplessNext?
+
+    // MARK: - Volume levelling
+
+    /// The volume-levelling (ReplayGain) factor for the loaded decoder, as the
+    /// main mixer's output volume. The mixer sits after the EQ and is in every
+    /// graph this player builds, so the factor holds with EQ on or off; it
+    /// accepts values above 1 for boosts, and smooths each change over a few
+    /// milliseconds, so moving it under a playing song does not click.
+    private var levellingGain: Float = 1
+    /// The successor's factor, applied from the render notification - see
+    /// `audioPlayer(_:renderingWillStart:at:)`.
+    private nonisolated let successorLevelling = LevellingHandoff()
 
     /// Whether a successor is queued behind the current decoder. Callers use
     /// this to suppress their own end-of-track detection: the player renders
@@ -336,6 +386,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
 
+    /// The player's position read now, rather than `currentTime`'s copy from
+    /// the last 0.1s poll. Only the lyrics clock needs it that fresh; nil
+    /// when nothing is playing or the decoder cannot report a position.
+    var livePlaybackTime: TimeInterval? {
+        guard isPlaying, let time = audioPlayer?.currentTime else { return nil }
+        return duration > 0 ? min(time, duration) : time
+    }
+
     /// Called exactly once when SFBAudioEngine reaches the end of all queued
     /// audio. PlayerEngine owns queue advancement; the manager only reports the
     /// event so it also works while PlayerEngine's foreground UI timer is off.
@@ -518,6 +576,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
     private func resetAudioPlayer() {
         gaplessNext = nil
+        successorLevelling.clear()
         audioPlayer?.stop()
         cleanupEqualizer()
         // eqAttachmentFailed was never cleared anywhere, so a single transient
@@ -526,7 +585,35 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         audioPlayer = nil
         audioPlayer = AudioPlayer()
         audioPlayer?.delegate = self
+        // A new player brings a new engine whose mixer starts at unity.
+        applyLevellingToMixer()
         print("🔄 SFBAudioEngine AudioPlayer reset")
+    }
+
+    /// Sets the volume-levelling factor for the loaded decoder and applies it
+    /// at once - a change of setting reaches the song that is playing.
+    func setVolumeLevelling(_ gain: Float) {
+        levellingGain = gain
+        applyLevellingToMixer()
+    }
+
+    /// Updates the queued successor's factor after the setting changed.
+    func setSuccessorVolumeLevelling(_ gain: Float) {
+        guard var next = gaplessNext else { return }
+        next.levellingGain = gain
+        gaplessNext = next
+        successorLevelling.set(gain, for: next.decoder as AnyObject)
+    }
+
+    private func applyLevellingToMixer() {
+        guard let mixer = audioPlayer?.mainMixerNode else { return }
+        // DoP frames are a DSD bitstream dressed up as PCM. Any scaling breaks
+        // the markers and the DAC plays noise instead of music, so they always
+        // pass at unity.
+        let gain = loadedDecoderUsesDoP ? 1 : levellingGain
+        if mixer.outputVolume != gain {
+            mixer.outputVolume = gain
+        }
     }
 
     nonisolated private func formatSupportsSFBEQ(_ format: AVAudioFormat?) -> Bool {
@@ -755,6 +842,9 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             loadedDecoderUsesDoP = decoderUsesDoP
             hasConfiguredSessionForLoadedDecoder = false
             hasReportedEndOfAudio = false
+            // Whether this decoder is DoP decides whether levelling may touch
+            // it at all. PlayerEngine sets the new song's factor after load.
+            applyLevellingToMixer()
 
             // Decoder activation happens off-thread. Waiting briefly for the
             // ready state makes a preserved-position seek reliable before the
@@ -810,7 +900,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     /// A refusal is not an error: the caller simply falls back to the ordinary
     /// stop/load/play transition it has always used.
     @discardableResult
-    func enqueueGaplessNext(url: URL) async throws -> Bool {
+    func enqueueGaplessNext(url: URL, levellingGain: Float = 1) async throws -> Bool {
         guard let player = audioPlayer, loadedDecoder != nil else { return false }
         guard !carPlayIsActiveNow else { return false }
         guard gaplessNext == nil else { return false }
@@ -867,8 +957,16 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             return false
         }
 
-        try player.enqueue(decoder, immediate: false)
-        gaplessNext = GaplessNext(url: url, decoder: decoder, track: track)
+        // Armed before the enqueue: a short successor behind a nearly finished
+        // track can start rendering before this actor runs again.
+        successorLevelling.set(levellingGain, for: decoder as AnyObject)
+        do {
+            try player.enqueue(decoder, immediate: false)
+        } catch {
+            successorLevelling.clear()
+            throw error
+        }
+        gaplessNext = GaplessNext(url: url, decoder: decoder, track: track, levellingGain: levellingGain)
         print("✅ Enqueued gapless successor on SFBAudioEngine: \(url.lastPathComponent)")
         return true
     }
@@ -901,6 +999,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
         }
 
         gaplessNext = nil
+        successorLevelling.clear()
         audioPlayer?.clearQueue()
         print("♻️ Dropped the queued SFBAudioEngine successor")
     }
@@ -927,6 +1026,13 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             : next.decoder.processingFormat.sampleRate
         currentTime = 0
         hasReportedEndOfAudio = false
+
+        // Normally already on the mixer: the render notification switched it
+        // at the boundary itself. This only covers that notification being
+        // missed, and keeps `levellingGain` describing the loaded decoder.
+        successorLevelling.clear()
+        levellingGain = next.levellingGain
+        applyLevellingToMixer()
 
         print("⏭️ SFBAudioEngine continued gaplessly into: \(next.url.lastPathComponent)")
         onGaplessTrackStarted?(next.url)
@@ -1027,6 +1133,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                 throw error
             }
 
+            applyLevellingToMixer()
             if player.isPaused {
                 guard player.resume() else {
                     throw NSError(domain: "SFBAudioEngineManager", code: 5, userInfo: [
@@ -1118,10 +1225,14 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
     /// False after `stopEngineForInterruption()`, which releases the engine
     /// entirely so another app can take the route.
     var hasLoadedDecoder: Bool { loadedDecoder != nil }
+    /// The file whose decoder is enqueued, so a superseded load can tell its
+    /// own decoder from the one a newer load put on the shared player.
+    var loadedURL: URL? { loadedDecoder == nil ? nil : currentTrack?.url }
 
     func stop() {
         hasReportedEndOfAudio = true
         gaplessNext = nil
+        successorLevelling.clear()
         audioPlayer?.stop()
         isPlaying = false
         currentTime = 0
@@ -1218,16 +1329,38 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
     // MARK: - Timer Management
 
+    /// Position poll interval. 0.1s while the app is on screen, where it
+    /// feeds the scrubber and lyrics; 0.5s in the background, where nothing
+    /// shows it and screen-off listening is where the battery goes. Ending
+    /// a track does not depend on it (`audioPlayerEndOfAudio` reports that),
+    /// the stall check's 1.5s window still fits three polls, and
+    /// PlayerEngine's background monitor only reads it every 0.5s anyway.
+    private var pollInterval: TimeInterval { isPollingForBackground ? 0.5 : 0.1 }
+    private var isPollingForBackground = false
+
+    /// Called by PlayerEngine as the app leaves or returns to the screen.
+    func setBackgroundPolling(_ background: Bool) {
+        guard background != isPollingForBackground else { return }
+        isPollingForBackground = background
+        // Re-arm only a running poll; a paused or stopped player has none.
+        if updateTimer != nil {
+            startUpdateTimer()
+        }
+    }
+
     private func startUpdateTimer() {
         updateTimer?.invalidate()
+        let interval = pollInterval
         // .common mode, not the default one: a plain scheduledTimer stops
         // firing while a scroll view is tracking, which used to strand the
         // position counter every time the user flicked through a list.
-        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.updatePlaybackPosition()
             }
         }
+        // Coalescing slack: lets iOS batch this wake-up with others.
+        timer.tolerance = interval * 0.2
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
     }
@@ -1287,7 +1420,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
             } else if currentTime < duration || duration <= 0 {
                 // Position unknown (some decoders cannot report it); fall back
                 // to advancing by the timer interval so the UI still moves.
-                currentTime += 0.1
+                currentTime += pollInterval
                 if duration > 0 { currentTime = min(currentTime, duration) }
             }
 
@@ -1813,6 +1946,24 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
                   ObjectIdentifier(next.decoder as AnyObject) == nowPlayingID else { return }
             self.promoteGaplessNext(next)
         }
+    }
+
+    /// Moves volume levelling to the gapless successor's factor at the track
+    /// boundary.
+    ///
+    /// SFBAudioPlayer posts this from its event thread straight after the
+    /// render cycle holding the successor's first frames, while those frames
+    /// are still on their way to the hardware. Setting the mixer here lands on
+    /// the very next render cycle - so the successor plays at most one I/O
+    /// buffer at the old level, inside the mixer's own few-millisecond ramp.
+    /// `nowPlayingChanged`, and so the main-actor promotion, is scheduled for
+    /// when those frames reach the output and then hops to the main actor;
+    /// switching there let the successor's opening render at the previous
+    /// song's level - a loud song starting with a quiet one's boost.
+    nonisolated func audioPlayer(_ audioPlayer: AudioPlayer, renderingWillStart decoder: PCMDecoding, at hostTime: UInt64) {
+        guard let gain = successorLevelling.take(for: decoder as AnyObject) else { return }
+        audioPlayer.mainMixerNode.outputVolume = gain
+        print(String(format: "🎚️ Volume levelling switched at the SFB gapless boundary: ×%.3f (%+.2f dB)", gain, 20 * log10(Double(gain))))
     }
 
     nonisolated func audioPlayerEndOfAudio(_ audioPlayer: AudioPlayer) {

@@ -43,6 +43,9 @@ struct PlaylistsScreen: View {
     @State private var showCreatePlaylist = false
     @State private var newPlaylistName = ""
     @StateObject private var search = LibrarySearchState()
+    /// Each playlist's songs, loaded with the list. The grid used to query
+    /// the database for every card on every render.
+    @State private var playlistTracks: [Int64: [Track]] = [:]
 
     private var visiblePlaylists: [Playlist] {
         let terms = LibrarySearch.terms(in: search.text)
@@ -51,161 +54,113 @@ struct PlaylistsScreen: View {
     }
 
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .playlists)
-
-            VStack {
-                if visiblePlaylists.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: playlists.isEmpty ? "music.note.list" : "magnifyingglass")
-                            .font(.system(size: 40))
-                            .foregroundColor(.secondary)
-
-                        Text(playlists.isEmpty ? Localized.noPlaylistsYet : Localized.noResultsFound)
-                            .font(.headline)
-
-                        Text(playlists.isEmpty ? Localized.createPlaylistsInstruction : Localized.tryDifferentKeywords)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-
-                        if playlists.isEmpty {
-                            Button {
-                                newPlaylistName = ""
-                                showCreatePlaylist = true
-                            } label: {
-                                Label(Localized.createPlaylist, systemImage: "plus")
-                                    .fontWeight(.semibold)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .padding(.top, 4)
-                        }
+        Group {
+            if visiblePlaylists.isEmpty {
+                if playlists.isEmpty {
+                    CosmosEmptyState(
+                        systemImage: "music.note.list",
+                        title: Localized.noPlaylistsYet,
+                        message: Localized.createPlaylistsInstruction,
+                        actionTitle: Localized.createPlaylist
+                    ) {
+                        newPlaylistName = ""
+                        showCreatePlaylist = true
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ScrollView {
-                        LazyVGrid(columns: [
-                            GridItem(.flexible(), spacing: 8),
-                            GridItem(.flexible(), spacing: 8)
-                        ], spacing: 16) {
-                            ForEach(visiblePlaylists, id: \.id) { playlist in
-                                if isEditMode {
-                                    PlaylistCardView(playlist: playlist, allTracks: getAllPlaylistTracks(playlist), isEditMode: true, onEdit: {
-                                        playlistToEdit = playlist
-                                        editPlaylistName = playlist.title
-                                        showEditDialog = true
-                                    }, onDelete: {
-                                        playlistToDelete = playlist
-                                        showDeleteConfirmation = true
-                                    })
-                                } else {
-                                    NavigationLink {
-                                        PlaylistDetailScreen(playlist: playlist)
-                                    } label: {
-                                        PlaylistCardView(playlist: playlist, allTracks: getAllPlaylistTracks(playlist))
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                }
-                            }
-
-                            // Trailing "new playlist" tile, only while editing.
+                    ContentUnavailableView.search(text: search.text)
+                }
+            } else {
+                ScrollView {
+                    TileGrid(minimum: Design.Size.gridTileMinWidth, maximum: 260, spacing: Design.Spacing.l, rowSpacing: Design.Spacing.xl) {
+                        ForEach(visiblePlaylists, id: \.id) { playlist in
+                            let tracks = playlist.id.flatMap { playlistTracks[$0] } ?? []
                             if isEditMode {
-                                Button {
-                                    newPlaylistName = ""
-                                    showCreatePlaylist = true
-                                } label: {
-                                    NewPlaylistCardView()
+                                PlaylistCardView(playlist: playlist, allTracks: tracks, isEditMode: true, onEdit: {
+                                    playlistToEdit = playlist
+                                    editPlaylistName = playlist.title
+                                    showEditDialog = true
+                                }, onDelete: {
+                                    playlistToDelete = playlist
+                                    showDeleteConfirmation = true
+                                })
+                            } else if let playlistId = playlist.id {
+                                NavigationLink(value: LibraryRoute.playlist(id: playlistId)) {
+                                    PlaylistCardView(playlist: playlist, allTracks: tracks)
                                 }
-                                .buttonStyle(PlainButtonStyle())
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button {
+                                        MixStore.shared.playPlaylistMix(playlistId: playlistId)
+                                    } label: {
+                                        Label(Localized.playlistMix, systemImage: "dot.radiowaves.left.and.right")
+                                    }
+                                    .disabled(tracks.isEmpty)
+                                }
                             }
                         }
-                        .padding(16)
-                        .padding(.bottom, 100) // Add padding for mini player
                     }
+                    .padding(.vertical, Design.Spacing.l)
+                    .pagePadding()
                 }
             }
-            .navigationTitle(Localized.playlists)
-            .navigationBarTitleDisplayMode(.inline)
-            .librarySearchField(search, prompt: Localized.searchPlaylists)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 8) {
-                        LibrarySearchButton(state: search)
-                        Button(isEditMode ? Localized.done : Localized.edit) {
-                            withAnimation {
-                                isEditMode.toggle()
-                            }
+        }
+        .background(ScreenSpecificBackgroundView(screen: .playlists))
+        .navigationTitle(Localized.playlists)
+        .navigationBarTitleDisplayMode(.large)
+        .librarySearchField(search, prompt: Localized.searchPlaylists)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                LibrarySearchButton(state: search)
+                if !playlists.isEmpty {
+                    Button(isEditMode ? Localized.done : Localized.edit) {
+                        withAnimation {
+                            isEditMode.toggle()
                         }
-                        .disabled(playlists.isEmpty)
                     }
                 }
+                createButton
             }
-            .alert(Localized.editPlaylist, isPresented: $showEditDialog) {
-                TextField(Localized.playlistNamePlaceholder, text: $editPlaylistName)
-                Button(Localized.save) {
-                    if let playlist = playlistToEdit, !editPlaylistName.isEmpty {
-                        editPlaylist(playlist, newName: editPlaylistName)
-                    }
+            .cosmosPlainBackground()
+        }
+        .alert(Localized.editPlaylist, isPresented: $showEditDialog) {
+            TextField(Localized.playlistNamePlaceholder, text: $editPlaylistName)
+            Button(Localized.save) {
+                if let playlist = playlistToEdit, !editPlaylistName.isEmpty {
+                    editPlaylist(playlist, newName: editPlaylistName)
                 }
-                .disabled(editPlaylistName.isEmpty)
-                Button(Localized.cancel, role: .cancel) { }
-            } message: {
-                Text(Localized.enterNewName)
             }
-            .alert(Localized.createPlaylist, isPresented: $showCreatePlaylist) {
-                TextField(Localized.playlistNamePlaceholder, text: $newPlaylistName)
-                Button(Localized.create) {
-                    createPlaylist()
-                }
-                .disabled(newPlaylistName.isEmpty)
-                Button(Localized.cancel, role: .cancel) { }
-            } message: {
-                Text(Localized.enterPlaylistName)
+            .disabled(editPlaylistName.isEmpty)
+            Button(Localized.cancel, role: .cancel) { }
+        } message: {
+            Text(Localized.enterNewName)
+        }
+        .alert(Localized.createPlaylist, isPresented: $showCreatePlaylist) {
+            TextField(Localized.playlistNamePlaceholder, text: $newPlaylistName)
+            Button(Localized.create) {
+                createPlaylist()
             }
-            .alert(Localized.deletePlaylist, isPresented: $showDeleteConfirmation) {
-                Button(Localized.delete, role: .destructive) {
-                    if let playlist = playlistToDelete {
-                        deletePlaylist(playlist)
-                    }
-                }
-                Button(Localized.cancel, role: .cancel) { }
-            } message: {
+            .disabled(newPlaylistName.isEmpty)
+            Button(Localized.cancel, role: .cancel) { }
+        } message: {
+            Text(Localized.enterPlaylistName)
+        }
+        .alert(Localized.deletePlaylist, isPresented: $showDeleteConfirmation) {
+            Button(Localized.delete, role: .destructive) {
                 if let playlist = playlistToDelete {
-                    Text(Localized.deletePlaylistConfirmation(playlist.title))
+                    deletePlaylist(playlist)
                 }
             }
-            .onAppear {
-                loadPlaylists()
+            Button(Localized.cancel, role: .cancel) { }
+        } message: {
+            if let playlist = playlistToDelete {
+                Text(Localized.deletePlaylistConfirmation(playlist.title))
             }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
-                loadPlaylists()
-            }
-
-            #if canImport(FoundationModels)
-            if isAIAvailable {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        Button {
-                            showAIPlaylistSheet = true
-                        } label: {
-                            Image(systemName: "wand.and.stars")
-                                .font(.title2)
-                                .fontWeight(.semibold)
-                                .foregroundColor(.white)
-                                .frame(width: 56, height: 56)
-                                .background(Circle().fill(Color.accentColor))
-                                .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
-                        }
-                        .accessibilityLabel(Localized.aiPlaylistButton)
-                        .padding(.trailing, 20)
-                        .padding(.bottom, 110) // clear the mini player
-                    }
-                }
-            }
-            #endif
+        }
+        .onAppear {
+            loadPlaylists()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            loadPlaylists()
         }
         .sheet(isPresented: $showAIPlaylistSheet) {
             #if canImport(FoundationModels)
@@ -216,6 +171,34 @@ struct PlaylistsScreen: View {
                 .environmentObject(appCoordinator)
             }
             #endif
+        }
+    }
+
+    /// "New Playlist" lives in the toolbar where iOS puts creation, instead of
+    /// only inside Edit mode. It is a menu: a new playlist, the AI generator
+    /// when Apple Intelligence is available (that used to be a floating action
+    /// button, an Android pattern that also covered the last row of the grid),
+    /// and importing an M3U playlist from a computer.
+    private var createButton: some View {
+        Menu {
+            Button {
+                newPlaylistName = ""
+                showCreatePlaylist = true
+            } label: {
+                Label(Localized.newPlaylist, systemImage: "plus")
+            }
+
+            if isAIAvailable {
+                Button {
+                    showAIPlaylistSheet = true
+                } label: {
+                    Label(Localized.aiPlaylistButton, systemImage: "wand.and.stars")
+                }
+            }
+
+            PlaylistImportMenuButton()
+        } label: {
+            Label(Localized.newPlaylist, systemImage: "plus")
         }
     }
 
@@ -246,8 +229,18 @@ struct PlaylistsScreen: View {
     }
 
     private func loadPlaylists() {
+        let signpost = Perf.begin("Playlists load")
+        defer { Perf.end("Playlists load", signpost) }
         do {
             playlists = try appCoordinator.databaseManager.getAllPlaylists()
+            // One query for every playlist's songs, not two per playlist.
+            let found = (try? appCoordinator.databaseManager.getTracksForPlaylists(playlists.compactMap(\.id))) ?? [:]
+            var tracksById: [Int64: [Track]] = [:]
+            for playlist in playlists {
+                guard let playlistId = playlist.id else { continue }
+                tracksById[playlistId] = found[playlistId] ?? []
+            }
+            playlistTracks = tracksById
         } catch {
             print("Failed to load playlists: \(error)")
         }
@@ -257,7 +250,11 @@ struct PlaylistsScreen: View {
         let title = newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
         do {
-            _ = try appCoordinator.createPlaylist(title: title)
+            // A playlist by that name (any case) already exists: it is
+            // already in the list, and a second of the same name would only confuse.
+            if try DatabaseManager.shared.playlist(matchingTitle: title) == nil {
+                _ = try appCoordinator.createPlaylist(title: title)
+            }
             loadPlaylists()
             newPlaylistName = ""
         } catch {
@@ -386,7 +383,10 @@ struct AIPlaylistSheet: View {
                 let mix = try await MixGenerator().generate(matching: request)
                 guard !mix.tracks.isEmpty else { throw MixGenerationError.emptyLibrary }
 
-                let playlist = try appCoordinator.createPlaylist(title: mix.title)
+                // The model may pick a name already taken; never merge the
+                // mix into the listener's playlist, give it its own name.
+                let title = try DatabaseManager.shared.availablePlaylistTitle(mix.title)
+                let playlist = try appCoordinator.createPlaylist(title: title)
                 if let playlistId = playlist.id {
                     for track in mix.tracks {
                         try appCoordinator.addToPlaylist(playlistId: playlistId, trackStableId: track.stableId)
@@ -449,6 +449,68 @@ struct NewPlaylistCardView: View {
     }
 }
 
+/// A playlist's cover: the user's own image, or a 2x2 mosaic of its first
+/// four songs' artwork, or one cover for a short playlist. Fills whatever
+/// width it is given.
+struct PlaylistCoverView: View {
+    let customCover: UIImage?
+    let artworks: [UIImage]
+    let trackCount: Int
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous)
+            .fill(Color.secondary.opacity(0.15))
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                if let customCover {
+                    Image(uiImage: customCover)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else if trackCount >= 4 {
+                    GeometryReader { geometry in
+                        let side = (geometry.size.width - 1) / 2
+                        VStack(spacing: 1) {
+                            HStack(spacing: 1) {
+                                tile(at: 0, side: side)
+                                tile(at: 1, side: side)
+                            }
+                            HStack(spacing: 1) {
+                                tile(at: 2, side: side)
+                                tile(at: 3, side: side)
+                            }
+                        }
+                    }
+                } else if trackCount > 0 {
+                    GeometryReader { geometry in
+                        tile(at: 0, side: geometry.size.width)
+                    }
+                } else {
+                    ArtworkPlaceholder(symbol: "music.note.list")
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            )
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func tile(at index: Int, side: CGFloat) -> some View {
+        if index < artworks.count {
+            Image(uiImage: artworks[index])
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: side, height: side)
+                .clipped()
+        } else {
+            ArtworkPlaceholder()
+                .frame(width: side, height: side)
+        }
+    }
+}
+
 struct PlaylistCardView: View {
     let playlist: Playlist
     let allTracks: [Track]
@@ -470,118 +532,28 @@ struct PlaylistCardView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Artwork area
-            ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.gray.opacity(0.2))
-                    .aspectRatio(1, contentMode: .fit)
-
-                // Edit mode overlay with buttons - always on top
-                if isEditMode {
-                    VStack {
-                        HStack {
-                            Button(action: {
-                                onEdit?()
-                            }) {
-                                Image(systemName: "pencil")
-                                    .font(.title2)
-                                    .foregroundColor(.black)
-                                    .frame(width: 36, height: 36)
-                                    .background(.ultraThinMaterial, in: Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(.black.opacity(0.3), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-
-                            Spacer()
-
-                            Button(action: {
-                                onDelete?()
-                            }) {
-                                Image(systemName: "trash")
-                                    .font(.title2)
-                                    .foregroundColor(.red)
-                                    .frame(width: 36, height: 36)
-                                    .background(.ultraThinMaterial, in: Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(.red.opacity(0.3), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                        }
-                        Spacer()
-
-                        // Centered photo icon for changing cover
-                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                            Image(systemName: "photo")
-                                .font(.system(size: 32, weight: .light))
-                                .foregroundColor(.white)
-                                .frame(width: 64, height: 64)
-                                .background(Color.black.opacity(0.6))
-                                .clipShape(Circle())
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                        Spacer()
+        VStack(alignment: .leading, spacing: Design.Spacing.xs + 2) {
+            PlaylistCoverView(customCover: customCoverImage, artworks: artworks, trackCount: allTracks.count)
+                .overlay {
+                    if isEditMode {
+                        editOverlay
                     }
-                    .padding(8)
-                    .zIndex(1000)
                 }
 
-                // Artwork content - same in both edit and normal mode
-                // Show custom cover if available, otherwise show auto-generated mashup
-                if let customCover = customCoverImage {
-                    Image(uiImage: customCover)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(maxWidth: .infinity)
-                        .aspectRatio(1, contentMode: .fit)
-                        .clipped()
-                } else if allTracks.count >= 4 {
-                    // 2x2 mashup for 4+ songs
-                    GeometryReader { geometry in
-                        let size = (geometry.size.width - 2) / 2
-                        VStack(spacing: 2) {
-                            HStack(spacing: 2) {
-                                artworkView(at: 0, size: size)
-                                artworkView(at: 1, size: size)
-                            }
-                            HStack(spacing: 2) {
-                                artworkView(at: 2, size: size)
-                                artworkView(at: 3, size: size)
-                            }
-                        }
-                    }
-                } else if !allTracks.isEmpty {
-                    // Single artwork for 1-3 songs
-                    GeometryReader { geometry in
-                        artworkView(at: 0, size: geometry.size.width)
-                    }
-                } else {
-                    // Default icon for empty playlist
-                    Image(systemName: "music.note.list")
-                        .font(.system(size: 40))
-                        .foregroundColor(.secondary)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-
-            // Text info
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(playlist.title)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
 
                 Text(Localized.songsCount(allTracks.count))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: isEditMode ? .contain : .combine)
         .task {
             await loadCustomCover()
             await loadArtworks()
@@ -596,25 +568,49 @@ struct PlaylistCardView: View {
         }
     }
 
-    @ViewBuilder
-    private func artworkView(at index: Int, size: CGFloat?) -> some View {
-        if index < artworks.count {
-            Image(uiImage: artworks[index])
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: size, height: size)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: index < 4 && allTracks.count >= 4 ? 6 : 12))
-        } else if index < allTracks.count {
-            RoundedRectangle(cornerRadius: index < 4 && allTracks.count >= 4 ? 6 : 12)
-                .fill(Color.gray.opacity(0.3))
-                .frame(width: size, height: size)
-                .overlay(
-                    Image(systemName: "music.note")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: size != nil ? size!/4 : 40))
-                )
+    /// Rename, delete and change-cover controls, shown over the cover while
+    /// the grid is being edited.
+    private var editOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.25)
+
+            VStack {
+                HStack {
+                    editButton(systemImage: "pencil", label: Localized.editPlaylist, tint: .primary) {
+                        onEdit?()
+                    }
+                    Spacer()
+                    editButton(systemImage: "trash", label: Localized.deletePlaylist, tint: .red) {
+                        onDelete?()
+                    }
+                }
+                Spacer()
+            }
+            .padding(Design.Spacing.s)
+
+            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                Image(systemName: "photo")
+                    .font(.title2)
+                    .foregroundStyle(.white)
+                    .frame(width: 56, height: 56)
+                    .background(.black.opacity(0.55), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Localized.changeCoverImage)
         }
+        .clipShape(RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous))
+    }
+
+    private func editButton(systemImage: String, label: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: Design.Size.minTouch, height: Design.Size.minTouch)
+                .background(.regularMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private func loadArtworks() async {
@@ -717,6 +713,10 @@ struct PlaylistDetailScreen: View {
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var customCoverImage: UIImage?
     @State private var showCoverOptions = false
+    @State private var pickerAfterDialog: CoverPicker?
+    @State private var showingCoverFileImporter = false
+
+    private enum CoverPicker { case photos, files }
     @State private var artistNameCache: [Int64: String] = [:]
     @State private var artistDisplayNameCache: [String: String] = [:]
     @StateObject private var search = LibrarySearchState()
@@ -824,306 +824,201 @@ struct PlaylistDetailScreen: View {
         return cache
     }
 
+    /// "12 songs · 48 min"
+    private var detailLine: String {
+        var parts = [Localized.songsCountOnly(tracks.count)]
+        if let length = DurationFormatter.totalLength(of: tracks) { parts.append(length) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Identity for the rows' Equatable check - see
+    /// `TrackRowView.contextIdentity`. Each tap handler captures its row's
+    /// *position*, so the whole visible order goes in: moving a song in the
+    /// middle of the list leaves count, first and last unchanged, and every
+    /// row would otherwise keep a handler pointing at its old position.
+    private func rowContextIdentity(for rows: [IdentifiedTrackRow]) -> String {
+        var hasher = Hasher()
+        for row in rows { hasher.combine(row.rowId) }
+        return "\(rows.count)-\(hasher.finalize())|\(sortOption.rawValue)|\(isSearching)|\(isEditMode)"
+    }
+
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .playlistDetail)
+        // Sorted once per pass. Reading `sortedTracks` inside the ForEach
+        // re-sorted the playlist - and, for the artist sorts, re-queried the
+        // database - once per row.
+        let visibleRows = sortedTracks.uniquelyIdentifiedRows()
+        let contextIdentity = rowContextIdentity(for: visibleRows)
 
-            List {
-                // Header section with artwork and buttons
-                Section {
-                    VStack(spacing: 16) {
-                        // Four-song grid artwork
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color.gray.opacity(0.2))
-                                .frame(width: 250, height: 250)
-
-                            // Show custom cover if available, otherwise show auto-generated mashup
-                            if let customCover = customCoverImage {
-                                Image(uiImage: customCover)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .frame(width: 250, height: 250)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                            } else if tracks.count >= 4 {
-                                // 2x2 mashup for 4+ songs
-                                VStack(spacing: 2) {
-                                    HStack(spacing: 2) {
-                                        artworkView(at: 0, size: 124)
-                                        artworkView(at: 1, size: 124)
-                                    }
-                                    HStack(spacing: 2) {
-                                        artworkView(at: 2, size: 124)
-                                        artworkView(at: 3, size: 124)
-                                    }
-                                }
-                                .frame(width: 250, height: 250)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                            } else if !tracks.isEmpty {
-                                // Single artwork for 1-3 songs
-                                artworkView(at: 0, size: 250)
-                            } else {
-                                // Default icon for empty playlist
-                                Image(systemName: "music.note.list")
-                                    .font(.system(size: 50))
-                                    .foregroundColor(.secondary)
-                            }
-
-                            // Edit mode: Show large centered photo icon
-                            if isEditMode {
-                                VStack {
-                                    Spacer()
-                                    HStack {
-                                        Spacer()
-                                        Button(action: {
-                                            showCoverOptions = true
-                                        }) {
-                                            Image(systemName: "photo")
-                                                .font(.system(size: 40, weight: .light))
-                                                .foregroundColor(.white)
-                                                .frame(width: 80, height: 80)
-                                                .background(Color.black.opacity(0.6))
-                                                .clipShape(Circle())
-                                        }
-                                        .buttonStyle(PlainButtonStyle())
-                                        Spacer()
-                                    }
-                                    Spacer()
-                                }
-                                .frame(width: 250, height: 250)
-                            }
+        return DetailPage {
+            DetailHeader(
+                title: playlist.title,
+                detail: detailLine,
+                isPlayDisabled: tracks.isEmpty,
+                onPlay: {
+                    if let first = sortedTracks.first {
+                        Task {
+                            await playerEngine.playTrack(first, queue: sortedTracks)
                         }
-                        .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                        VStack(spacing: 8) {
-                            Text(playlist.title)
-                                .font(.title2)
-                                .fontWeight(.bold)
-                                .multilineTextAlignment(.center)
-
-                            Text(Localized.songsCount(tracks.count))
-                                .font(.title3)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        // Play and Shuffle buttons
-                        HStack(spacing: 12) {
-                            Button {
-                                if let first = sortedTracks.first {
-                                    Task {
-                                        await playerEngine.playTrack(first, queue: sortedTracks)
-                                    }
-                                }
-                            } label: {
-                                HStack {
-                                    Image(systemName: "play.fill")
-                                    Text(Localized.play)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.6)
-                                }
-                                .font(.title3.weight(.semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 56)
-                                .background(settings.backgroundColorChoice.color)
-                                .cornerRadius(28)
-                            }
-                            .disabled(tracks.isEmpty)
-
-                            Button {
-                                guard !sortedTracks.isEmpty else { return }
-                                let shuffled = sortedTracks.shuffled()
-                                Task {
-                                    await playerEngine.playTrack(shuffled[0], queue: shuffled)
-                                }
-                            } label: {
-                                HStack {
-                                    Image(systemName: "shuffle")
-                                    Text(Localized.shuffle)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.6)
-                                }
-                                .font(.title3.weight(.semibold))
-                                .foregroundColor(settings.backgroundColorChoice.color)
-                                .padding(.horizontal, 8)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 56)
-                                .background(settings.backgroundColorChoice.color.opacity(0.1))
-                                .cornerRadius(28)
-                            }
-                            .disabled(tracks.isEmpty)
-                        }
-                        // This row sits in a list row with zeroed insets, so it
-                        // needs its own horizontal margin. Without it the two
-                        // pills ran edge to edge and single-word translations
-                        // that cannot wrap ("Lecture", "Aléatoire",
-                        // "Воспроизвести") pushed them off screen.
-                        .padding(.horizontal)
                     }
-                    .padding(.vertical)
+                },
+                onShuffle: {
+                    guard !sortedTracks.isEmpty else { return }
+                    let shuffled = sortedTracks.shuffled()
+                    Task {
+                        await playerEngine.playTrack(shuffled[0], queue: shuffled)
+                    }
                 }
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets())
-
-                // Track list section
-                if !sortedTracks.isEmpty {
-                    Section {
-                        ForEach(sortedTracks.uniquelyIdentifiedRows(), id: \.rowId) { row in
-                            let index = row.index
-                            let track = row.track
-                            PlaylistTrackRowView(
-                                track: track,
-                                playlist: playlist,
-                                isEditMode: isEditMode,
-                                artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
-                                onTap: {
-                                    dismissSearchKeyboard()
-                                    Task {
-                                        guard let playlistId = playlist.id else { return }
-                                        try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
-                                        try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
-
-                                        let visible = sortedTracks
-                                        let queue = LibrarySearch.queueSource(
-                                            filtered: visible,
-                                            full: fullSortedTracks,
-                                            isSearching: search.isSearching
-                                        )
-                                        // A playlist may hold the same track twice, so the
-                                        // tapped copy has to be located by position rather
-                                        // than by stable ID.
-                                        let start = queue.count == visible.count
-                                            ? row.index
-                                            : LibrarySearch.fullListIndex(
-                                                ofFiltered: row.index,
-                                                in: visible,
-                                                within: queue
-                                            )
-                                        await playerEngine.playTrack(at: start, in: queue)
-                                    }
-                                }
-                            )
-                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                if !recentlyActedTracks.contains(track.stableId) {
-                                    Button {
-                                        playerEngine.insertNext(track)
-                                        markAsActed(track.stableId)
-                                    } label: {
-                                        Label(Localized.playNext, systemImage: "text.line.first.and.arrowtriangle.forward")
-                                    }
-                                    .tint(settings.backgroundColorChoice.color)
-                                }
-                            }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                if !recentlyActedTracks.contains(track.stableId) {
-                                    Button {
-                                        playerEngine.addToQueue(track)
-                                        markAsActed(track.stableId)
-                                    } label: {
-                                        Label(Localized.addToQueue, systemImage: "text.append")
-                                    }
-                                    .tint(.blue)
-                                }
-                            }
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(index < sortedTracks.count - 1 ? .visible : .hidden)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                        }
-                        .onMove(perform: sortOption == .playlistOrder && !isSearching ? { source, destination in
-                            guard let playlistId = playlist.id else { return }
-                            do {
-                                // Calculate actual destination index
-                                let sourceIndex = source.first ?? 0
-                                let destinationIndex = sourceIndex < destination ? destination - 1 : destination
-
-                                try appCoordinator.reorderPlaylistItems(
-                                    playlistId: playlistId,
-                                    from: sourceIndex,
-                                    to: destinationIndex
-                                )
-
-                                // Reload tracks from database to reflect new order
-                                loadPlaylistTracks()
-                            } catch {
-                                print("Failed to reorder tracks: \(error)")
-                            }
-                        } : nil)
-                    } header: {
-                        HStack {
-                            Text(Localized.songs)
-                                .font(.title3.weight(.bold))
-                                .foregroundColor(.primary)
-                            Spacer()
-
-                            // Sort menu button
-                            Menu {
-                                ForEach(TrackSortOption.allCases, id: \.self) { option in
-                                    Button(action: {
-                                        sortOption = option
-                                        saveSortPreference()
-                                    }) {
-                                        HStack {
-                                            Text(option.localizedString)
-                                            if sortOption == option {
-                                                Image(systemName: "checkmark")
-                                            }
-                                        }
-                                    }
-                                }
+            ) {
+                PlaylistCoverView(customCover: customCoverImage, artworks: artworks, trackCount: tracks.count)
+                    .overlay {
+                        // Edit mode: a button to change the cover.
+                        if isEditMode {
+                            Button {
+                                showCoverOptions = true
                             } label: {
-                                Image(systemName: "arrow.up.arrow.down")
-                                    .foregroundColor(settings.backgroundColorChoice.color)
+                                Image(systemName: "photo")
+                                    .font(.title)
+                                    .foregroundStyle(.white)
+                                    .frame(width: 72, height: 72)
+                                    .background(.black.opacity(0.55), in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(Localized.playlistCover)
+                            // On the button, so on iPad the choices open
+                            // beside the cover; on the page they floated at
+                            // the top, pointing at the tab bar.
+                            .confirmationDialog(Localized.playlistCover, isPresented: $showCoverOptions) {
+                                coverOptions
+                            }
+                            // The choices take the tint; the accent pink
+                            // was hard to read on the dialog's glass. In the
+                            // label colour, as a menu's items are.
+                            .tint(Color.primary)
+                        }
+                    }
+            }
+        } rows: {
+            // Track list section
+            if !visibleRows.isEmpty {
+                Section {
+                    // A row, not the section header: a plain list pins its
+                    // header, and "Songs" with its sort button stayed stuck
+                    // over the songs while scrolling.
+                    SectionTitle(title: Localized.songs) {
+                        sortMenu
+                    }
+                    .songsTitleRow()
+                    ForEach(visibleRows, id: \.rowId) { row in
+                        let track = row.track
+                        LiveTrackRow(
+                            track: track,
+                            artistName: artistDisplayNameCache[track.stableId] ?? track.artistId.flatMap { artistNameCache[$0] },
+                            playlist: playlist,
+                            showDirectDeleteButton: isEditMode,
+                            contextIdentity: contextIdentity
+                        ) {
+                            guard !isEditMode else { return }
+                            dismissSearchKeyboard()
+                            Task {
+                                guard let playlistId = playlist.id else { return }
+                                try? appCoordinator.updatePlaylistAccessed(playlistId: playlistId)
+                                try? appCoordinator.updatePlaylistLastPlayed(playlistId: playlistId)
+
+                                let visible = sortedTracks
+                                let queue = LibrarySearch.queueSource(
+                                    filtered: visible,
+                                    full: fullSortedTracks,
+                                    isSearching: search.isSearching
+                                )
+                                // A playlist may hold the same track twice, so the
+                                // tapped copy has to be located by position rather
+                                // than by stable ID.
+                                let start = queue.count == visible.count
+                                    ? row.index
+                                    : LibrarySearch.fullListIndex(
+                                        ofFiltered: row.index,
+                                        in: visible,
+                                        within: queue
+                                    )
+                                await playerEngine.playTrack(at: start, in: queue)
                             }
                         }
-                        .textCase(nil)
-                        .padding(.horizontal, 16)
+                        .songListRow(track, swipeActionsEnabled: !isEditMode)
                     }
-                } else {
-                    Section {
-                        VStack(spacing: 16) {
-                            Image(systemName: isSearching ? "magnifyingglass" : "music.note")
-                                .font(.system(size: 40))
-                                .foregroundColor(.secondary)
+                    .onMove(perform: sortOption == .playlistOrder && !isSearching ? { source, destination in
+                        guard let playlistId = playlist.id else { return }
+                        do {
+                            // Calculate actual destination index
+                            let sourceIndex = source.first ?? 0
+                            let destinationIndex = sourceIndex < destination ? destination - 1 : destination
 
-                            Text(isSearching ? Localized.noResultsFound : Localized.noSongsFound)
-                                .font(.headline)
+                            try appCoordinator.reorderPlaylistItems(
+                                playlistId: playlistId,
+                                from: sourceIndex,
+                                to: destinationIndex
+                            )
 
-                            Text(isSearching ? Localized.tryDifferentKeywords : Localized.yourMusicWillAppearHere)
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
+                            // Reload tracks from database to reflect new order
+                            loadPlaylistTracks()
+                        } catch {
+                            print("Failed to reorder tracks: \(error)")
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 40)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                    } : nil)
+                }
+            } else {
+                Section {
+                    Group {
+                        if isSearching {
+                            ContentUnavailableView.search(text: search.text)
+                        } else {
+                            CosmosEmptyState(
+                                systemImage: "music.note",
+                                title: Localized.noSongsFound,
+                                message: Localized.yourMusicWillAppearHere.namingThisDevice
+                            )
+                        }
                     }
+                    .padding(.vertical, Design.Spacing.xl)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
             }
-            .listStyle(PlainListStyle())
-            .scrollContentBackground(.hidden)
-            .contentMargins(.bottom, 100, for: .scrollContent)
-            .environment(\.editMode, .constant(isEditMode ? .active : .inactive))
         }
+        .environment(\.editMode, .constant(isEditMode ? .active : .inactive))
+        .background(ScreenSpecificBackgroundView(screen: .playlistDetail))
+        .navigationTitle(playlist.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarTitleDisplayMode(.inline)
         .librarySearchField(search, prompt: Localized.searchSongs)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 8) {
-                    LibrarySearchButton(state: search)
-                    Button(isEditMode ? Localized.done : Localized.edit) {
-                        withAnimation {
-                            isEditMode.toggle()
-                        }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                LibrarySearchButton(state: search)
+                // A mix grown from the whole playlist: mostly songs beyond it.
+                if !isEditMode, let playlistId = playlist.id {
+                    Button {
+                        MixStore.shared.playPlaylistMix(playlistId: playlistId)
+                    } label: {
+                        Label(Localized.playlistMix, systemImage: "dot.radiowaves.left.and.right")
                     }
                     .disabled(tracks.isEmpty)
                 }
+                // Edit lives in "…" with Export; while editing, Done takes
+                // its place in the bar.
+                if isEditMode {
+                    Button(Localized.done) {
+                        withAnimation {
+                            isEditMode = false
+                        }
+                    }
+                } else {
+                    PlaylistMoreMenu(playlist: playlist, hasSongs: !tracks.isEmpty) {
+                        withAnimation {
+                            isEditMode = true
+                        }
+                    }
+                }
             }
+            .cosmosPlainBackground()
         }
         .onAppear {
             loadPlaylistTracks()
@@ -1131,6 +1026,18 @@ struct PlaylistDetailScreen: View {
             loadCustomCover()
             loadArtistNameCache()
         }
+        #if DEBUG
+        // -cosmosDebugEdit 1 opens the playlist in edit mode, and `cover`
+        // with the cover choices up - for screenshots.
+        .task {
+            guard let mode = UserDefaults.standard.string(forKey: "cosmosDebugEdit"), !tracks.isEmpty else { return }
+            isEditMode = true
+            if mode == "cover" {
+                try? await Task.sleep(for: .milliseconds(600))
+                showCoverOptions = true
+            }
+        }
+        #endif
         // See TrackListView: the rebuild is asynchronous, so one .task covers
         // both the first appearance and every later change of the row set.
         .task(id: TrackSearchIndex.identity(for: tracks)) {
@@ -1153,51 +1060,92 @@ struct PlaylistDetailScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
             settings = DeleteSettings.load()
         }
-        .confirmationDialog(Localized.playlistCover, isPresented: $showCoverOptions) {
-            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                Text(Localized.changeCoverImage)
-            }
-
-            if customCoverImage != nil {
-                Button(Localized.removeCustomCover, role: .destructive) {
-                    removeCustomCover()
+        .onChange(of: showCoverOptions) { _, isShown in
+            guard !isShown, let picker = pickerAfterDialog else { return }
+            pickerAfterDialog = nil
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(350))
+                switch picker {
+                case .photos: showingImagePicker = true
+                case .files: showingCoverFileImporter = true
                 }
             }
-
-            Button(Localized.cancel, role: .cancel) { }
         }
+        .fileImporter(isPresented: $showingCoverFileImporter, allowedContentTypes: [.image]) { result in
+            guard case .success(let url) = result else { return }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else { return }
+            Task { await saveCustomCover(image) }
+        }
+        .photosPicker(isPresented: $showingImagePicker, selection: $selectedPhotoItem, matching: .images)
         .onChange(of: selectedPhotoItem) { newItem in
+            guard let newItem else { return }
             Task {
-                if let data = try? await newItem?.loadTransferable(type: Data.self),
+                if let data = try? await newItem.loadTransferable(type: Data.self),
                    let image = UIImage(data: data) {
                     await saveCustomCover(image)
                 }
+                // Lets the same photo be picked again later.
+                selectedPhotoItem = nil
             }
         }
     }
 
     @ViewBuilder
-    private func artworkView(at index: Int, size: CGFloat) -> some View {
-        if index < artworks.count {
-            Image(uiImage: artworks[index])
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: size, height: size)
-                .clipped()
-        } else if index < tracks.count {
-            RoundedRectangle(cornerRadius: 0)
-                .fill(Color.gray.opacity(0.3))
-                .frame(width: size, height: size)
-                .overlay(
-                    Image(systemName: "music.note")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: size/4))
-                )
+    private var coverOptions: some View {
+        // A plain button, with the picker presented from the screen below.
+        // A PhotosPicker inside the dialog is torn down with the dialog
+        // the moment it is tapped, so the picker never appeared.
+        // Each picker is presented once the dialog has finished closing:
+        // asking for it while the dialog was still on its way out was
+        // silently refused (iOS 27), and nothing opened.
+        Button(Localized.chooseCoverFromPhotos) {
+            pickerAfterDialog = .photos
         }
+        Button(Localized.chooseCoverFromFiles) {
+            pickerAfterDialog = .files
+        }
+
+        if customCoverImage != nil {
+            Button(Localized.removeCustomCover, role: .destructive) {
+                removeCustomCover()
+            }
+        }
+
+        Button(Localized.cancel, role: .cancel) { }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker(selection: Binding(
+                get: { sortOption },
+                set: { option in
+                    sortOption = option
+                    saveSortPreference()
+                }
+            )) {
+                ForEach(TrackSortOption.allCases, id: \.self) { option in
+                    Text(option.localizedString).tag(option)
+                }
+            } label: {
+                EmptyView()
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(settings.backgroundColorChoice.color)
+                .frame(width: Design.Size.minTouch, height: Design.Size.minTouch)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(Localized.sortBy)
     }
 
     private func loadPlaylistTracks() {
         guard let playlistId = playlist.id else { return }
+        let signpost = Perf.begin("Playlist page load")
+        defer { Perf.end("Playlist page load", signpost) }
 
         do {
             let playlistItems = try appCoordinator.databaseManager.getPlaylistItems(playlistId: playlistId)
@@ -1362,217 +1310,6 @@ struct PlaylistDetailScreen: View {
     }
 }
 
-struct PlaylistTrackRowView: View {
-    let track: Track
-    let playlist: Playlist?
-    let isEditMode: Bool
-    let artistName: String?
-    let onTap: () -> Void
-    @EnvironmentObject private var appCoordinator: AppCoordinator
-    @StateObject private var playerEngine = PlayerEngine.shared
-    @State private var isFavorite = false
-    @State private var showPlaylistDialog = false
-    @State private var showDeleteConfirmation = false
-    @State private var deleteSettings = DeleteSettings.load()
-    @State private var artworkImage: UIImage?
-    @StateObject private var artworkManager = ArtworkManager.shared
-
-    // Check if this track is currently playing
-    private var isCurrentlyPlaying: Bool {
-        playerEngine.currentTrack?.stableId == track.stableId
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            // MARK: - Tappable Content Area
-            HStack(spacing: 12) {
-                // Album artwork thumbnail (matching TrackRowView exactly)
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.gray.opacity(0.2))
-                        .frame(width: 60, height: 60)
-
-                    if let image = artworkImage {
-                        Image(uiImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 60, height: 60)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    } else {
-                        Image(systemName: "music.note")
-                            .font(.title2)
-                            .foregroundColor(.secondary)
-                    }
-
-                    // Stroke when playing (matching TrackRowView)
-                    if isCurrentlyPlaying {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(deleteSettings.backgroundColorChoice.color, lineWidth: 2)
-                            .frame(width: 60, height: 60)
-                    }
-                }
-
-                // Track info (matching TrackRowView exactly)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(track.title)
-                        .font(.title3)
-                        .fontWeight(.medium)
-                        .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color : .primary)
-                        .lineLimit(1)
-
-                    if let artistName, !artistName.isEmpty {
-                        Text(artistName)
-                            .font(.body)
-                            .foregroundColor(isCurrentlyPlaying ? deleteSettings.backgroundColorChoice.color.opacity(0.8) : .secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer()
-
-                // Equalizer animation when playing (matching TrackRowView)
-                if isCurrentlyPlaying {
-                    EqualizerBarsExact(
-                        color: deleteSettings.backgroundColorChoice.color,
-                        isActive: playerEngine.isPlaying && isCurrentlyPlaying,
-                        isLarge: true,
-                        trackId: playerEngine.currentTrack?.stableId
-                    )
-                    .id("\(playerEngine.isPlaying && isCurrentlyPlaying)-\(playerEngine.currentTrack?.stableId ?? "")")
-                    .padding(.trailing, 8)
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if !isEditMode {
-                    onTap()
-                }
-            }
-
-            // MARK: - Menu / Action Area
-            // Show delete button in edit mode, otherwise menu
-            if isEditMode, let playlist = playlist {
-                Button(action: {
-                    removeFromPlaylist()
-                }) {
-                    Image(systemName: "trash")
-                        .font(.title2)
-                        .foregroundColor(.red)
-                        .frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().stroke(.red.opacity(0.3), lineWidth: 1))
-                }
-                .buttonStyle(PlainButtonStyle())
-                .padding(.leading, 8)
-            } else {
-                Menu {
-                    Button(action: {
-                        do {
-                            try appCoordinator.toggleFavorite(trackStableId: track.stableId)
-                            isFavorite.toggle()
-                        } catch {
-                            print("Failed to toggle favorite: \(error)")
-                        }
-                    }) {
-                        HStack {
-                            Image(systemName: isFavorite ? "heart.slash" : "heart")
-                            Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
-                        }
-                    }
-
-                    if let artistId = track.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                               try Artist.fetchOne(db, key: artistId)
-                           }),
-                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
-                        NavigationLink(destination: ArtistDetailScreenWrapper(artistName: artist.name, allTracks: allArtistTracks)) {
-                            Label(Localized.showArtistPage, systemImage: "person.circle")
-                        }
-                    }
-
-                    Button(action: {
-                        showPlaylistDialog = true
-                    }) {
-                        Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
-                    }
-
-                    Button(action: {
-                        showDeleteConfirmation = true
-                    }) {
-                        Label(Localized.deleteFile, systemImage: "trash")
-                    }
-                    .foregroundColor(.red)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .foregroundColor(.secondary)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-        }
-        .frame(height: 80)
-        .padding(.horizontal, 12)
-        .sheet(isPresented: $showPlaylistDialog) {
-            PlaylistSelectionView(track: track)
-                .accentColor(deleteSettings.backgroundColorChoice.color)
-        }
-        .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
-            Button(Localized.delete, role: .destructive) {
-                deleteFile()
-            }
-            Button(Localized.cancel, role: .cancel) { }
-        } message: {
-            Text(Localized.deleteFileConfirmation(track.title))
-        }
-        .onAppear {
-            isFavorite = (try? appCoordinator.isFavorite(trackStableId: track.stableId)) ?? false
-            if artworkImage == nil { loadArtwork() }
-        }
-        .reloadsArtwork(for: track.stableId) { loadArtwork() }
-    }
-
-    private func loadArtwork() {
-        Task {
-            artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
-        }
-    }
-
-    private func deleteFile() {
-        Task {
-            do {
-                let settings = DeleteSettings.load()
-                if settings.deleteFromLibraryOnly {
-                    DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
-                } else {
-                    do {
-                        try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
-                    } catch {
-                        print("⚠️ Could not remove file from disk: \(error.localizedDescription)")
-                    }
-                }
-
-                try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
-                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
-            } catch {
-                print("❌ Failed to delete track: \(error)")
-            }
-        }
-    }
-
-    private func removeFromPlaylist() {
-        guard let playlist = playlist, let playlistId = playlist.id else { return }
-        Task {
-            do {
-                try appCoordinator.removeFromPlaylist(playlistId: playlistId, trackStableId: track.stableId)
-                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
-            } catch {
-                print("❌ Failed to remove from playlist: \(error)")
-            }
-        }
-    }
-}
-
 struct PlaylistListView: View {
     let playlists: [Playlist]
     let onPlaylistTap: (Playlist) -> Void
@@ -1665,7 +1402,7 @@ struct PlaylistSelectionView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 20) {
                 VStack(spacing: 8) {
                     Text(Localized.addToPlaylist)
@@ -1757,7 +1494,7 @@ struct PlaylistSelectionView: View {
             .padding()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(Localized.cancel) {
                         dismiss()
                     }
@@ -1798,11 +1535,19 @@ struct PlaylistSelectionView: View {
     }
 
     private func createPlaylist() {
-        guard !newPlaylistName.isEmpty else { return }
+        let title = newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
 
         do {
-            let playlist = try appCoordinator.createPlaylist(title: newPlaylistName)
-            playlists.append(playlist)
+            // Same name as an existing playlist (any case): add to that one
+            // rather than making a second of the same name.
+            let playlist: Playlist
+            if let existing = try DatabaseManager.shared.playlist(matchingTitle: title) {
+                playlist = existing
+            } else {
+                playlist = try appCoordinator.createPlaylist(title: title)
+                playlists.append(playlist)
+            }
             newPlaylistName = ""
 
             // Automatically add the track to the new playlist
@@ -1865,7 +1610,7 @@ struct PlaylistManagementView: View {
     @State private var showDeleteConfirmation = false
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 20) {
                 if playlists.isEmpty {
                     VStack(spacing: 16) {
@@ -1916,7 +1661,7 @@ struct PlaylistManagementView: View {
             .navigationTitle(Localized.managePlaylists)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button(Localized.done) {
                         dismiss()
                     }

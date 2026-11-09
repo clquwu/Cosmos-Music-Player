@@ -49,7 +49,28 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         // its Now Playing state are repaired regardless of whether the scene or
         // AVAudioSession route callback arrives first.
         Task { @MainActor in
-            PlayerEngine.shared.handleCarPlayStatusChange()
+            // CarPlay can launch the app with no phone UI, and only the phone
+            // UI started these. Without the restore, Now Playing was blank and
+            // Play had no song to resume.
+            DatabaseSuspensionCoordinator.shared.start()
+            let engine = PlayerEngine.shared
+            await engine.ensureSavedStateRestored()
+            engine.handleCarPlayStatusChange()
+            // Show the restored song straight away - artwork, title,
+            // position - rather than a blank screen until something plays.
+            engine.prepareNowPlayingForCarPlay()
+
+            // Opt-in: carry on where the phone left off as soon as the car
+            // connects. Only when nothing is playing, so a song already
+            // playing on the phone is simply handed over.
+            if UserDefaults.standard.bool(forKey: PlayerEngine.resumeOnCarPlayConnectKey),
+               self.interfaceController != nil,
+               engine.currentTrack != nil,
+               !engine.isPlaying {
+                print("🚗 Resuming the saved session because CarPlay connected")
+                await AppCoordinator.shared.prepareSiriAudioSession()
+                engine.play()
+            }
         }
 
         let allSongsTemplate = createAllSongsTab()

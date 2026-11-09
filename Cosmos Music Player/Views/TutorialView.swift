@@ -105,6 +105,9 @@ struct AppleIDStepView: View {
                     .font(.body)
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
+                    // Takes the room from the spacers rather than ending in
+                    // "..." in a short sheet (iPhone Duo held like a book).
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 20)
             }
             
@@ -227,6 +230,9 @@ struct iCloudDriveStepView: View {
                     .font(.body)
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
+                    // Takes the room from the spacers rather than ending in
+                    // "..." in a short sheet (iPhone Duo held like a book).
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 20)
             }
             
@@ -341,7 +347,7 @@ struct MusicFilesStepView: View {
                     InstructionRow(
                         step: "2",
                         title: Localized.navigateToIcloudDrive,
-                        description: Localized.tapIcloudDriveSidebar
+                        description: Localized.tapIcloudDriveSidebar.namingThisDevice
                     )
                     
                     InstructionRow(

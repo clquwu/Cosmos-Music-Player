@@ -27,52 +27,57 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         SiriDiag.log("APP didFinishLaunching")
+        SiriDiag.log("APP siri authorization: \(INPreferences.siriAuthorizationStatus().rawValue)")
+        requestSiriAuthorizationIfNeeded()
         // Set up Siri vocabulary and media context
         setupSiriIntegration()
+        // BGTaskScheduler only accepts handlers registered before launch
+        // finishes; the analysis runs while charging (AudioAnalysisScheduler).
+        MainActor.assumeIsolated {
+            AudioAnalysisScheduler.shared.register()
+            AudioAnalysisScheduler.shared.start()
+        }
+        // A launch straight into the background - a Siri request, a
+        // background task - may never show the app's window, whose .task is
+        // what starts the database suspension coordinator. Without it the
+        // database was never suspended and iOS killed the app (0xdead10cc)
+        // when it suspended it. Not decided here: in a scene-based app the
+        // state reads "background" during every launch, including one that
+        // is about to show the app. A few seconds on, a launch that shows
+        // the app has started the coordinator itself (this is then a no-op);
+        // one still in the background never will. Siri handlers and the
+        // analysis task hold the database awake while they run.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            MainActor.assumeIsolated {
+                guard UIApplication.shared.applicationState == .background else { return }
+                DatabaseSuspensionCoordinator.shared.start(assumingIdlePlayback: true)
+            }
+        }
         return true
+    }
+
+    /// SiriKit only hands requests ("play … in Cosmos") to an app the user
+    /// has allowed, and Settings only lists Cosmos under Siri once it has
+    /// asked. The app never asked, so every such request failed. Asked once,
+    /// shortly after launch so the prompt lands on the app, not the splash.
+    private func requestSiriAuthorizationIfNeeded() {
+        guard INPreferences.siriAuthorizationStatus() == .notDetermined else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            INPreferences.requestSiriAuthorization { status in
+                SiriDiag.log("APP siri authorization answered: \(status.rawValue)")
+            }
+        }
     }
 
     private func setupSiriIntegration() {
         // Donate vocabulary on every OS version: Siri keeps routing by-name
         // media requests through the legacy SiriKit extension even on iOS 27
         // with assistant schemas registered, so the old recognizer still
-        // needs playlist/artist names.
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Set up vocabulary for playlists, artists, and albums
-            Task { @MainActor in
-                do {
-                    // Playlist vocabulary
-                    let playlists = try AppCoordinator.shared.databaseManager.getAllPlaylists()
-                    var playlistVocabulary = playlists.map { $0.title }
-
-                    // Add French playlist generic terms to help recognition
-                    playlistVocabulary.append(contentsOf: [
-                        "ma playlist", "ma liste de lecture", "mes playlists",
-                        "liste de lecture", "playlist", "playlists",
-                        "Liked Songs", "Favorites", "Favourites", "Favoris"
-                    ])
-
-                    let playlistNames = NSOrderedSet(array: playlistVocabulary)
-                    INVocabulary.shared().setVocabularyStrings(playlistNames, of: .mediaPlaylistTitle)
-                    print("✅ Set up vocabulary for \(playlistNames.count) playlist terms")
-
-                } catch {
-                    print("❌ Failed to set up vocabulary: \\(error)")
-                }
-            }
-
-            // Create media user context
-            let context = INMediaUserContext()
-            Task { @MainActor in
-                do {
-                    let trackCount = try AppCoordinator.shared.databaseManager.getAllTracks().count
-                    context.numberOfLibraryItems = trackCount
-                    context.subscriptionStatus = .notSubscribed // Since this is a local music app
-                    context.becomeCurrent()
-                } catch {
-                    print("❌ Failed to set up media context: \\(error)")
-                }
-            }
+        // needs playlist/mix/artist names. SiriLibraryDonations reads the
+        // library off the main thread and keeps it fresh (scans, mixes,
+        // playlist edits), and also refreshes App Shortcut parameters.
+        Task { @MainActor in
+            SiriLibraryDonations.shared.activate()
         }
     }
 }
@@ -83,6 +88,13 @@ struct Cosmos_Music_PlayerApp: App {
     @StateObject private var appCoordinator = AppCoordinator.shared
 
     init() {
+        Perf.beginLaunch()
+        #if DEBUG
+        // Undoes "I've Donated", to see its thank-you again.
+        if UserDefaults.standard.bool(forKey: "cosmosDebugResetSupporter") {
+            UserDefaults.standard.removeObject(forKey: SupportCosmos.supporterKey)
+        }
+        #endif
         if #available(iOS 26.0, *) {
             AppIntentsDependencies.register()
         }
@@ -95,6 +107,10 @@ struct Cosmos_Music_PlayerApp: App {
                 .task {
                     DatabaseSuspensionCoordinator.shared.start()
                     await appCoordinator.initialize()
+                    #if DEBUG
+                    // -cosmosDebugSelfTest <suite|all>: on-device scenario checks.
+                    SelfTests.runIfRequested()
+                    #endif
                     #if canImport(MediaIntents)
                     if #available(iOS 27.0, *) {
                         SpotlightLibraryIndexer.shared.activate()
@@ -114,6 +130,9 @@ struct Cosmos_Music_PlayerApp: App {
                 .onOpenURL { url in
                     handleOpenURL(url)
                 }
+                // M3U import picker and summary, here so a playlist opened
+                // from Files shows its result on whatever screen is up.
+                .playlistImportHost()
                 .onContinueUserActivity("com.cosmos.music.play") { userActivity in
                     handleSiriIntent(userActivity)
                 }
@@ -244,6 +263,15 @@ struct Cosmos_Music_PlayerApp: App {
     
     private func handleOpenURL(_ url: URL) {
         print("🔗 Received URL: \(url.absoluteString)")
+
+        // An .m3u/.m3u8 opened in Cosmos is a playlist to import, not a song
+        // to index.
+        if url.isFileURL, PlaylistImporter.isPlaylistFile(url) {
+            Task { @MainActor in
+                PlaylistImportCenter.shared.importFile(at: url)
+            }
+            return
+        }
 
         if url.isFileURL {
             Task { @MainActor in

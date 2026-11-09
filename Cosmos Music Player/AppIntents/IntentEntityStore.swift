@@ -9,9 +9,14 @@
 #if canImport(MediaIntents)
 import Foundation
 
+// Not main-actor bound: it holds no state, and every method is database
+// reads (GRDB's pool is thread-safe) plus value building. On the main actor,
+// the Spotlight reindex and Shortcuts' suggestion queries built an entity
+// for every song, album, artist and playlist on the main thread - hundreds
+// of milliseconds of frozen UI a few seconds after each launch and scan on
+// a large library.
 @available(iOS 27.0, *)
-@MainActor
-final class IntentEntityStore {
+final class IntentEntityStore: Sendable {
 
     private var database: DatabaseManager { DatabaseManager.shared }
 
@@ -129,14 +134,38 @@ final class IntentEntityStore {
     }
 
     func artistEntities(matching string: String) throws -> [ArtistEntity] {
-        try artistEntities(from: database.searchArtists(query: string))
+        let literal = try database.searchArtists(query: string)
+        if !literal.isEmpty { return try artistEntities(from: literal) }
+        // Speech rarely spells a name the way the tags do ("Shiva Sagisu"
+        // for Shiro Sagisu): fall back to the fuzzy matcher.
+        return try artistEntities(from: ArtistMatcher.artists(matching: string, in: database.getAllArtists()))
+    }
+
+    /// The artists with the most songs: the values Siri pre-registers for
+    /// App Shortcut phrases such as "Mélange <artiste> dans Cosmos".
+    func topArtistEntities(limit: Int) throws -> [ArtistEntity] {
+        // Counted by SQL: this runs on the main actor at launch, after every
+        // scan and on each trip to the background, and loading every track
+        // just to count them stalled the UI on large libraries.
+        let songCount = try database.artistSongCounts().byArtist
+        let artists = try database.getAllArtists()
+            .filter { $0.id != nil }
+            .sorted { songCount[$0.id!, default: 0] > songCount[$1.id!, default: 0] }
+        return try artistEntities(from: Array(artists.prefix(limit)))
     }
 
     private func artistEntities(from artists: [Artist]) throws -> [ArtistEntity] {
-        try artists.map { artist in
+        // Every artist's albums from one query: the Spotlight index builds
+        // an entity for every artist in the library, and a query per artist
+        // was the bulk of a main-thread stall after each launch and scan.
+        // A handful of artists (a Siri lookup) keeps the per-artist query.
+        let albumsByArtist = artists.count > 8 ? try database.getAlbumsByArtist() : nil
+        return try artists.map { artist in
             var albums: [AlbumEntity] = []
             if let artistId = artist.id {
-                albums = try database.getAlbumsByArtistId(artistId).map {
+                let artistAlbums = try albumsByArtist.map { $0[artistId] ?? [] }
+                    ?? database.getAlbumsByArtistId(artistId)
+                albums = artistAlbums.map {
                     AlbumEntity(album: $0, artistName: artist.name)
                 }
             }
@@ -164,12 +193,15 @@ final class IntentEntityStore {
     }
 
     private func playlistEntities(from playlists: [Playlist]) throws -> [PlaylistEntity] {
-        try playlists.compactMap { playlist in
+        // Counts and lengths summed by SQL for all playlists at once. Every
+        // playlist's songs used to be loaded in full just to add up their
+        // durations - on each Shortcuts suggestion and Spotlight reindex.
+        let stats = try database.getPlaylistItemStats()
+        return playlists.compactMap { playlist in
             guard let playlistId = playlist.id else { return nil }
-            let items = try database.getPlaylistItems(playlistId: playlistId)
-            let tracks = try database.getTracksByStableIdsPreservingOrder(items.map(\.trackStableId))
-            let totalDuration = TimeInterval(tracks.reduce(0) { $0 + ($1.durationMs ?? 0) }) / 1000.0
-            return PlaylistEntity(playlist: playlist, trackCount: items.count, totalDuration: totalDuration)
+            let stat = stats[playlistId] ?? (itemCount: 0, durationMs: 0)
+            let totalDuration = TimeInterval(stat.durationMs) / 1000.0
+            return PlaylistEntity(playlist: playlist, trackCount: stat.itemCount, totalDuration: totalDuration)
         }
     }
 }

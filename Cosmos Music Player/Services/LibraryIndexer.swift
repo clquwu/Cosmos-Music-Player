@@ -10,6 +10,7 @@ import CryptoKit
 import AVFoundation
 import GRDB
 import SFBAudioEngine
+import os
 
 /// Resume gate for a race: whichever racer finishes first wins and the others
 /// are dropped, so the winner never waits on the loser.
@@ -459,9 +460,26 @@ class LibraryIndexer: NSObject, ObservableObject {
 
     static let shared = LibraryIndexer()
 
-    @Published var isIndexing = false
+    @Published var isIndexing = false {
+        // One "Library scan" signpost per scan, however it ends (complete,
+        // fail, stop), so a scan's total cost reads straight off a trace.
+        didSet {
+            guard isIndexing != oldValue else { return }
+            if isIndexing {
+                scanSignpost = Perf.begin("Library scan")
+            } else if let state = scanSignpost {
+                scanSignpost = nil
+                Perf.end("Library scan", state)
+            }
+        }
+    }
+    private var scanSignpost: OSSignpostIntervalState?
     @Published var indexingProgress: Double = 0.0
     @Published var tracksFound = 0
+    /// New songs this scan that `tracksFound` does not show yet - see
+    /// `noteTrackFound`.
+    private var tracksFoundPending = 0
+    private var tracksFoundFlush: Task<Void, Never>?
     @Published var currentlyProcessing: String = ""
     @Published var queuedFiles: [String] = []
     /// Emits only after a real scan has finished all database and folder-
@@ -471,6 +489,10 @@ class LibraryIndexer: NSObject, ObservableObject {
     /// authoritative completion. AppCoordinator still runs state restoration
     /// after a partial/failed scan, but must not infer deletions from it.
     private(set) var lastCompletedScanWasAuthoritative = false
+    /// Roots the most recently completed scan could only partly enumerate.
+    /// Destructive maintenance skips the tracks under these rather than
+    /// refusing to run at all.
+    private(set) var lastCompletedScanIncompleteRoots: [URL] = []
     private var hasPendingLibraryRefresh = false
     /// Serializes processQueryResults; see the comment there.
     private var isProcessingQueryResults = false
@@ -490,6 +512,9 @@ class LibraryIndexer: NSObject, ObservableObject {
     /// successfully" for a root that had never been read - which is the answer
     /// that authorises `reconcileMissingFiles` to delete every row under it.
     private var localDocumentsSweepSucceeded: Bool?
+    /// The linked music folders this scan walked completely, or nil while it
+    /// has not walked them yet. Cached for the same reason as the sweep above.
+    private var linkedFoldersSweptRoots: [URL]?
     /// Set when any file failed to download or parse during the active scan.
     private var scanHadFileFailures = false
     /// Set when a file was skipped only because its iCloud bytes had not landed
@@ -504,8 +529,16 @@ class LibraryIndexer: NSObject, ObservableObject {
     /// At least one filesystem root could only be enumerated partially. This is
     /// deliberately separate from the deduplicated failure log: a root that is
     /// repeatedly unavailable may eventually stop suppressing the scan date,
-    /// but it is never authoritative enough for destructive maintenance.
+    /// but nothing under it is ever judged deleted (see `incompleteRoots`),
+    /// and folder playlists are not synced from such a scan.
     private var scanHadIncompleteRoots = false
+    /// Which roots those were. Repeating a known root failure must not stop
+    /// deletions being reconciled in every *other* root: one permanently
+    /// unreadable folder otherwise kept every song the user deleted from
+    /// iCloud in the library for good.
+    private var incompleteRoots: [URL] = []
+    /// Files the live query reported removed, drained by processQueryResults.
+    private var pendingRemovedQueryURLs: [URL] = []
     /// Set when a database write was cut short because GRDB was suspended
     /// (see `DatabaseSuspensionCoordinator`). Like a file failure it withholds
     /// `lastLibraryScanDate` so the scan is retried, but it is tracked
@@ -560,7 +593,8 @@ class LibraryIndexer: NSObject, ObservableObject {
         // happens on the main actor while the app launches, and asking
         // StateManager for the music folder forces the ubiquity container to
         // resolve - a call Apple documents as unsafe for the main thread.
-        // start() narrows the scope later, off the main actor.
+        // start() resolves it off the main actor before starting the query,
+        // and leaves this scope as it is (see the note there).
         metadataQuery.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
 
         // Support all audio formats according to plan
@@ -583,7 +617,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(queryDidUpdate),
+            selector: #selector(queryDidUpdate(_:)),
             name: NSNotification.Name.NSMetadataQueryDidUpdate,
             object: metadataQuery
         )
@@ -603,13 +637,15 @@ class LibraryIndexer: NSObject, ObservableObject {
         interruptedScanMode = nil
         isIndexing = true
         indexingProgress = 0.0
-        tracksFound = 0
+        resetTracksFound()
 
         ScanFailureLog.pruneMissingFiles()
         localDocumentsSweepSucceeded = nil
+        linkedFoldersSweptRoots = nil
         scanHadFileFailures = false
         scanHadPendingDownloads = false
         scanHadIncompleteRoots = false
+        incompleteRoots = []
         scanWasInterrupted = false
         scanCollectedFiles.removeAll()
 
@@ -646,9 +682,17 @@ class LibraryIndexer: NSObject, ObservableObject {
             // spun for ever. Restart so this generation is guaranteed a
             // gather, and its completion event, of its own.
             metadataQuery.stop()
-            if let musicFolderURL {
-                metadataQuery.searchScopes = [musicFolderURL]
-            }
+            // The scope stays NSMetadataQueryUbiquitousDocumentsScope. It used
+            // to be narrowed to musicFolderURL here, and on device a query
+            // scoped to that folder - URL or path, with or without /private -
+            // never finishes gathering (0 results after minutes; SelfTests
+            // `query-probe`), so every scan sat out the zero-result check and
+            // fell back to the direct scan, and no live update ever arrived
+            // between scans. The ubiquitous scope is the Documents folder of
+            // the app's one iCloud container - the music folder itself - and
+            // only searches a container this process has resolved, which the
+            // resolve above has done.
+            print("🔍 Starting NSMetadataQuery over the iCloud container's Documents (music folder resolved: \(musicFolderURL != nil))")
             guard metadataQuery.start() else {
                 print("❌ NSMetadataQuery refused to start - falling back to direct scan")
                 await fallbackToDirectScan(generation: generation)
@@ -696,13 +740,15 @@ class LibraryIndexer: NSObject, ObservableObject {
         interruptedScanMode = nil
         isIndexing = true
         indexingProgress = 0.0
-        tracksFound = 0
+        resetTracksFound()
 
         ScanFailureLog.pruneMissingFiles()
         localDocumentsSweepSucceeded = nil
+        linkedFoldersSweptRoots = nil
         scanHadFileFailures = false
         scanHadPendingDownloads = false
         scanHadIncompleteRoots = false
+        incompleteRoots = []
         scanWasInterrupted = false
         scanCollectedFiles.removeAll()
 
@@ -851,6 +897,7 @@ class LibraryIndexer: NSObject, ObservableObject {
     /// See `ScanRootFailureLog` for why a repeat must not count.
     func recordScanRootFailure(forRootAt url: URL) {
         scanHadIncompleteRoots = true
+        incompleteRoots.append(url)
         guard ScanRootFailureLog.noteFailure(at: url.path) else {
             print("↩️ Same root failure as last scan for \(url.lastPathComponent) - not withholding the scan date")
             return
@@ -1097,9 +1144,12 @@ class LibraryIndexer: NSObject, ObservableObject {
         isIndexing = false
         // An interrupted scan saw only part of the library, so destructive
         // maintenance must not act on it either.
+        // A root failure that is new information already set
+        // scanHadFileFailures. A repeated one only excludes its own root, via
+        // lastCompletedScanIncompleteRoots.
         lastCompletedScanWasAuthoritative = !scanHadFileFailures
-            && !scanHadIncompleteRoots
             && !scanWasInterrupted
+        lastCompletedScanIncompleteRoots = incompleteRoots
         completedScanGeneration = generation
         print(message)
     }
@@ -1220,6 +1270,58 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
 
     nonisolated private func needsMetadataRefresh(_ track: Track, fingerprint: FileFingerprint) -> Bool {
+        if fileChangedSinceIndexed(track, fingerprint: fingerprint) {
+            return true
+        }
+
+        // Rows from before the genre/BPM/year columns existed. Their files are
+        // unchanged, so nothing above would ever re-read them; the flag is
+        // cleared by the upsert that stores the re-parsed row. One indexed
+        // lookup per file that otherwise skips the parse - and none at all
+        // once no row is pending (trackNeedsTagRefresh caches that).
+        return pendingTagRefresh(track)
+    }
+
+    /// The re-parse is wanted only for the one-time genre/BPM/year backfill:
+    /// the file itself is unchanged. Such a refresh is optional - it must
+    /// never pull an offloaded song down from iCloud (that would download the
+    /// whole library on the first scan after the migration, over cellular
+    /// too), and a file that cannot be read gives up rather than being
+    /// retried on every scan.
+    nonisolated private func isTagRefreshOnly(_ track: Track, fingerprint: FileFingerprint) -> Bool {
+        !fileChangedSinceIndexed(track, fingerprint: fingerprint) && pendingTagRefresh(track)
+    }
+
+    nonisolated private func pendingTagRefresh(_ track: Track) -> Bool {
+        (try? databaseManager.trackNeedsTagRefresh(stableId: track.stableId)) == true
+    }
+
+    /// Ends a tag-only refresh whose parse failed: the existing row is still
+    /// good, so this is not a scan failure, and clearing the flag stops an
+    /// unreadable file from being re-parsed on every scan for ever.
+    nonisolated private func abandonTagRefresh(stableId: String, fileURL: URL, error: Error) {
+        print("⏭️ Giving up the genre/BPM/year refresh for \(fileURL.lastPathComponent): \(error)")
+        try? databaseManager.clearTagRefreshPending(stableId: stableId)
+    }
+
+    /// For an offloaded iCloud file whose row only wants the tag refresh:
+    /// true when the scan should leave it alone this pass (flag kept, so it
+    /// is refreshed once the user downloads the song) instead of requesting
+    /// a download. Cheap - attributes and two indexed lookups, no file read.
+    nonisolated private func shouldDeferTagRefresh(of fileURL: URL) -> Bool {
+        // Once the backfill is done nothing below can return true; skip the
+        // fingerprint and row lookups for every offloaded file.
+        guard (try? databaseManager.anyTrackNeedsTagRefresh()) == true,
+              !CloudDownloadManager.isLocallyResident(fileURL),
+              let stableId = try? generateStableId(for: fileURL),
+              let fingerprint = try? fileFingerprint(for: fileURL),
+              let track = try? existingTrack(stableId: stableId, path: fileURL.path) else {
+            return false
+        }
+        return isTagRefreshOnly(track, fingerprint: fingerprint)
+    }
+
+    nonisolated private func fileChangedSinceIndexed(_ track: Track, fingerprint: FileFingerprint) -> Bool {
         // Rows written by the filename-only parser carry its signature: no
         // duration, no sample rate and no channel count. Every Opus/Vorbis
         // track looked like this until they were routed to a real tag reader,
@@ -1295,6 +1397,11 @@ class LibraryIndexer: NSObject, ObservableObject {
     ) async throws {
         var track = parsedFile.track
         track.id = existingTrack?.id
+        // A song without its own cover takes its folder's. Names only, from a
+        // per-folder cache, so this costs one stat per file at most.
+        if !track.hasEmbeddedArt {
+            track.artworkPath = FolderArtworkIndex.shared.artworkPath(forTrackAt: track.path)
+        }
 
         try databaseManager.upsertTrackWithArtistRelationships(
             track,
@@ -1307,8 +1414,18 @@ class LibraryIndexer: NSObject, ObservableObject {
             // artwork may also be stale. Legacy rows are all refreshed once;
             // avoid synchronously re-extracting artwork for an entire large
             // upgraded library when no prior fingerprint can prove it changed.
-            if existingTrack.modificationDate != nil {
-                _ = await ArtworkManager.shared.forceRefreshArtwork(for: track)
+            //
+            // The one-time genre/BPM/year refresh re-parses files whose
+            // fingerprint has NOT changed, so it must not count as "artwork
+            // may be stale" - otherwise an upgraded library would re-extract
+            // every cover in one scan.
+            let fileChanged = existingTrack.modificationDate != track.modificationDate
+                || existingTrack.fileSize != track.fileSize
+            if existingTrack.modificationDate != nil,
+               fileChanged || trackLooksUnparsed(existingTrack) {
+                // Never downloads a folder cover from iCloud mid-scan; it is
+                // fetched when the song is shown or played.
+                _ = await ArtworkManager.shared.forceRefreshArtwork(for: track, requestDownload: false)
             }
             print("🔄 Refreshed metadata for \(sourceDescription): \(track.title)")
             if notifyImmediately {
@@ -1333,13 +1450,44 @@ class LibraryIndexer: NSObject, ObservableObject {
             // fill the disk cache lazily the first time a row is displayed.
             print("📢 Posting TrackFound notification for \(sourceDescription): \(track.title)")
             await MainActor.run {
-                self.tracksFound += 1
+                self.noteTrackFound()
                 NotificationCenter.default.post(
                     name: NSNotification.Name("TrackFound"),
                     object: track
                 )
             }
         }
+    }
+
+    /// Counts a new song for the "found N tracks" progress, published at
+    /// most four times a second. Published per song, a first scan of a big
+    /// folder re-rendered every view observing the indexer - the app's root
+    /// among them - once per file, and kept the main thread saturated for
+    /// the whole scan, which then waited on it too.
+    private func noteTrackFound() {
+        tracksFoundPending += 1
+        guard tracksFoundFlush == nil else { return }
+        tracksFoundFlush = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.flushTracksFound()
+        }
+    }
+
+    private func flushTracksFound() {
+        tracksFoundFlush = nil
+        guard tracksFoundPending > 0 else { return }
+        tracksFound += tracksFoundPending
+        tracksFoundPending = 0
+    }
+
+    /// A new scan's count starts from zero, with nothing of the last one
+    /// still waiting to be published.
+    private func resetTracksFound() {
+        tracksFoundFlush?.cancel()
+        tracksFoundFlush = nil
+        tracksFoundPending = 0
+        tracksFound = 0
     }
 
     private func postPendingLibraryRefresh() {
@@ -1471,7 +1619,14 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
     }
 
-    @objc private func queryDidUpdate() {
+    @objc private func queryDidUpdate(_ notification: Notification) {
+        // Read synchronously: the items are only described by this
+        // notification, and processQueryResults coalesces updates.
+        if let removedItems = notification.userInfo?[NSMetadataQueryUpdateRemovedItemsKey] as? [NSMetadataItem] {
+            pendingRemovedQueryURLs.append(contentsOf: removedItems.compactMap {
+                $0.value(forAttribute: NSMetadataItemURLKey) as? URL
+            })
+        }
         Task {
             await processQueryResults(completionGeneration: nil)
         }
@@ -1537,6 +1692,14 @@ class LibraryIndexer: NSObject, ObservableObject {
             )
         } while hasPendingQueryResults && !handedOffToDirectScan
 
+        // After indexing, so a rename's new file is already in the library
+        // and inherits the old row's favourites and playlist entries.
+        if !pendingRemovedQueryURLs.isEmpty {
+            let removedURLs = pendingRemovedQueryURLs
+            pendingRemovedQueryURLs.removeAll()
+            await FileCleanupManager.shared.removeTracksDeletedFromICloud(at: removedURLs)
+        }
+
         // The direct scan finishes and reports on its own.
         guard !handedOffToDirectScan else { return }
 
@@ -1572,10 +1735,12 @@ class LibraryIndexer: NSObject, ObservableObject {
         // (`scanHadPendingDownloads` is deliberately excluded - an evicted
         // placeholder still exists on disk, so it is never seen as missing.)
         if AppCoordinator.shared.iCloudStatus == .available,
-           !scanHadIncompleteRoots,
            !scanHadFileFailures,
            !scanWasInterrupted,
-           let musicFolderURL = stateManager.getMusicFolderURL() {
+           let musicFolderURL = stateManager.getMusicFolderURL(),
+           !incompleteRoots.contains(where: {
+               DatabaseManager.canonicalPath($0.path) == DatabaseManager.canonicalPath(musicFolderURL.path)
+           }) {
             scannedRoots.append(musicFolderURL)
         } else if AppCoordinator.shared.iCloudStatus == .available {
             print("🛡️ Not reconciling the iCloud root - this scan could not read all of it")
@@ -1588,6 +1753,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         if await sweepLocalDocuments(generation: generation) {
             scannedRoots.append(Self.localDocumentsURL)
         }
+        scannedRoots.append(contentsOf: await sweepLinkedFolders(generation: generation))
 
         guard isActiveScan(generation, mode: .metadataQuery),
               metadataGatheringTimedOutGeneration != generation else { return }
@@ -1595,6 +1761,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         await FileCleanupManager.shared.reconcileMissingFiles(in: scannedRoots)
         guard isActiveScan(generation, mode: .metadataQuery),
               metadataGatheringTimedOutGeneration != generation else { return }
+        await refreshFolderArtwork()
         postPendingLibraryRefresh()
 
         // Folder playlists used to be built only by the direct and offline
@@ -1608,7 +1775,7 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         completeScan(
             generation: generation,
-            message: "Library indexing completed. Found \(tracksFound) tracks."
+            message: "Library indexing completed. Found \(tracksFound + tracksFoundPending) tracks."
         )
     }
 
@@ -1808,6 +1975,11 @@ class LibraryIndexer: NSObject, ObservableObject {
             // Same reasoning as the iCloud root above.
             recordScanRootFailure(forRootAt: documentsPath)
         }
+
+        // Linked folders index themselves (most of their files are skipped
+        // unchanged), so only their roots join the reconciliation below.
+        successfullyScannedRoots.append(contentsOf: await sweepLinkedFolders(generation: generation))
+        guard isActiveScan(generation, mode: .metadataQuery) else { return }
         
         let totalFiles = allMusicFiles.count
         print("📁 Total music files found (iCloud + local): \(totalFiles)")
@@ -1817,6 +1989,7 @@ class LibraryIndexer: NSObject, ObservableObject {
             // its former tracks may have been deleted.
             await FileCleanupManager.shared.reconcileMissingFiles(in: successfullyScannedRoots)
             guard isActiveScan(generation, mode: .metadataQuery) else { return }
+            await refreshFolderArtwork()
             postPendingLibraryRefresh()
             completeScan(generation: generation, message: "No music files found in any location")
             return
@@ -1838,6 +2011,7 @@ class LibraryIndexer: NSObject, ObservableObject {
         let maxConcurrentFiles = 4
         var completedCount = 0
         var nextIndex = 0
+        var lastProgressPublish = ContinuousClock.now
 
         await withTaskGroup(of: Void.self) { group in
             while nextIndex < min(maxConcurrentFiles, totalFiles) {
@@ -1855,8 +2029,17 @@ class LibraryIndexer: NSObject, ObservableObject {
 
                 // Throttle @Published updates: rebuilding the 2000-element
                 // queuedFiles array per file made SwiftUI re-diff the whole list
-                // for every import - a major cause of freezes on large libraries
-                if completedCount % 20 == 0 || completedCount == totalFiles {
+                // for every import - a major cause of freezes on large libraries.
+                // By time, not by count: an unchanged file takes well under a
+                // millisecond, so "every 20 files" still published ~150 times
+                // a second on a rescan, each re-rendering every view that
+                // observes the indexer (the app root among them) and copying
+                // the rest of a 20,000-name queue. That kept the main thread
+                // saturated for the whole rescan - which the scan itself then
+                // waited on, since each file checks in with the main actor.
+                let now = ContinuousClock.now
+                if completedCount == totalFiles || now - lastProgressPublish >= .milliseconds(250) {
+                    lastProgressPublish = now
                     currentlyProcessing = allFileNames[min(completedCount, totalFiles - 1)]
                     queuedFiles = Array(allFileNames.suffix(from: min(completedCount, totalFiles)))
                     indexingProgress = Double(completedCount) / Double(totalFiles)
@@ -1880,15 +2063,16 @@ class LibraryIndexer: NSObject, ObservableObject {
 
         await FileCleanupManager.shared.reconcileMissingFiles(in: successfullyScannedRoots)
         guard isActiveScan(generation, mode: .metadataQuery) else { return }
+        await refreshFolderArtwork()
         postPendingLibraryRefresh()
 
         // Folder playlists are part of the scan transaction. Do not publish
         // completion while they are still mutating the database.
-        await processFolderPlaylists(allMusicFiles: allMusicFiles, generation: generation)
+        await processFolderPlaylists(allMusicFiles: allMusicFiles + linkedFolderFilesThisScan, generation: generation)
         guard isActiveScan(generation, mode: .metadataQuery) else { return }
         completeScan(
             generation: generation,
-            message: "✅ Direct scan completed. Found \(tracksFound) tracks from both iCloud and local folders."
+            message: "✅ Direct scan completed. Found \(tracksFound + tracksFoundPending) tracks from both iCloud and local folders."
         )
     }
 
@@ -2021,19 +2205,26 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
             guard isActiveScan(generation, mode: .offline) else { return }
 
+            // Folders linked on the device and on drives are as readable
+            // offline as Documents is.
+            var reconciledRoots = await sweepLinkedFolders(generation: generation)
+            guard isActiveScan(generation, mode: .offline) else { return }
+
             if enumeration.isComplete {
-                await FileCleanupManager.shared.reconcileMissingFiles(in: [documentsPath])
+                reconciledRoots.append(documentsPath)
             } else {
                 print("🛡️ Skipping deletion reconciliation for partially enumerated Documents")
             }
+            await FileCleanupManager.shared.reconcileMissingFiles(in: reconciledRoots)
             guard isActiveScan(generation, mode: .offline) else { return }
+            await refreshFolderArtwork()
             postPendingLibraryRefresh()
 
-            await processFolderPlaylists(allMusicFiles: musicFiles, generation: generation)
+            await processFolderPlaylists(allMusicFiles: musicFiles + linkedFolderFilesThisScan, generation: generation)
             guard isActiveScan(generation, mode: .offline) else { return }
             completeScan(
                 generation: generation,
-                message: "Offline library scan completed. Found \(tracksFound) tracks."
+                message: "Offline library scan completed. Found \(tracksFound + tracksFoundPending) tracks."
             )
         } catch {
             failScan(generation: generation, message: "Offline library scan failed: \(error)")
@@ -2159,6 +2350,16 @@ class LibraryIndexer: NSObject, ObservableObject {
     /// mid-scan auth failure still halts further iCloud reads.
     nonisolated private func indexFile(_ fileURL: URL, generation: Int) async {
         guard await isActiveScan(generation) else { return }
+
+        // A linked iCloud Drive folder is the user's own iCloud Drive, not
+        // the app's container, so the app's iCloud setting does not gate it.
+        if LinkedFolderStore.shared.folder(containing: fileURL.path) != nil {
+            await Perf.measure("Index file") {
+                await processLinkedFile(fileURL, generation: generation)
+            }
+            return
+        }
+
         let isLocalFile = !fileURL.path.contains("Mobile Documents")
 
         if !isLocalFile {
@@ -2171,7 +2372,9 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
 
         guard await isActiveScan(generation) else { return }
-        await processLocalFile(fileURL, generation: generation)
+        await Perf.measure("Index file") {
+            await processLocalFile(fileURL, generation: generation)
+        }
     }
 
     nonisolated private func processLocalFile(_ fileURL: URL, generation: Int) async {
@@ -2181,6 +2384,13 @@ class LibraryIndexer: NSObject, ObservableObject {
             
             let isLocalFile = !fileURL.path.contains("Mobile Documents")
             
+            // A row that only wants the genre/BPM/year backfill must not
+            // trigger a download of an offloaded song - see isTagRefreshOnly.
+            if !isLocalFile, shouldDeferTagRefresh(of: fileURL) {
+                print("⏭️ Offloaded; genre/BPM/year refresh deferred until it is downloaded: \(fileURL.lastPathComponent)")
+                return
+            }
+
             // Only try to download from iCloud if it's actually an iCloud file
             if !isLocalFile {
                 do {
@@ -2248,7 +2458,14 @@ class LibraryIndexer: NSObject, ObservableObject {
             }
 
             print("🎶 Parsing audio file: \(fileURL.lastPathComponent)")
-            let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let tagRefreshOnly = existingTrack.map { isTagRefreshOnly($0, fingerprint: fingerprint) } ?? false
+            let parsedFile: ParsedAudioFile
+            do {
+                parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            } catch let error where tagRefreshOnly && !Self.isUnplayableFormat(error) {
+                abandonTagRefresh(stableId: stableId, fileURL: fileURL, error: error)
+                return
+            }
             guard await isActiveScan(generation) else { return }
             print("✅ Audio file parsed successfully: \(parsedFile.track.title)")
             try await saveParsedFile(
@@ -2316,6 +2533,8 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
     
     private func processMetadataItem(_ item: NSMetadataItem, generation: Int?) async {
+        let signpost = Perf.begin("Index file")
+        defer { Perf.end("Index file", signpost) }
         if let generation, !isActiveScan(generation, mode: .metadataQuery) { return }
         guard let fileURL = item.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
         let ext = fileURL.pathExtension.lowercased()
@@ -2346,10 +2565,26 @@ class LibraryIndexer: NSObject, ObservableObject {
                 return
             }
 
-            try await CloudDownloadManager.shared.ensureLocal(fileURL, downloadTimeout: 0)
+            // The genre/BPM/year backfill alone never downloads a song, and
+            // never counts as a pending download (which would keep the scan
+            // repeating): an offloaded file keeps its flag until it is local.
+            let tagRefreshOnly = existingTrack.map { isTagRefreshOnly($0, fingerprint: fingerprint) } ?? false
+            if tagRefreshOnly, !CloudDownloadManager.isLocallyResident(fileURL) {
+                return
+            }
+
+            if !tagRefreshOnly {
+                try await CloudDownloadManager.shared.ensureLocal(fileURL, downloadTimeout: 0)
+            }
             if let generation, !isActiveScan(generation, mode: .metadataQuery) { return }
 
-            let parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            let parsedFile: ParsedAudioFile
+            do {
+                parsedFile = try await parseAudioFile(at: fileURL, stableId: stableId)
+            } catch let error where tagRefreshOnly && !Self.isUnplayableFormat(error) {
+                abandonTagRefresh(stableId: stableId, fileURL: fileURL, error: error)
+                return
+            }
             if let generation, !isActiveScan(generation, mode: .metadataQuery) { return }
             try await saveParsedFile(
                 parsedFile,
@@ -2387,6 +2622,11 @@ class LibraryIndexer: NSObject, ObservableObject {
         }
     }
     
+    nonisolated private static func isUnplayableFormat(_ error: Error) -> Bool {
+        if case AudioParseError.unplayableFormat = error { return true }
+        return false
+    }
+
     nonisolated func generateStableId(for url: URL) throws -> String {
         DatabaseManager.generatePathStableId(forPath: url.path)
     }
@@ -2410,7 +2650,12 @@ class LibraryIndexer: NSObject, ObservableObject {
         
         let artistNames = parseArtistNames(metadata.artist)
         let rawAlbumArtist = metadata.albumArtist?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let albumArtistNames = rawAlbumArtist.isEmpty ? artistNames : parseArtistNames(rawAlbumArtist)
+        // A compilation without an album artist groups under "Various
+        // Artists", as Apple Music does: keyed on each track's artist, every
+        // song of it became an album of its own (issue #118).
+        let albumArtistNames = !rawAlbumArtist.isEmpty ? parseArtistNames(rawAlbumArtist)
+            : metadata.isCompilation ? [Localized.variousArtists]
+            : artistNames
         let displayAlbumArtist = displayArtistName(from: albumArtistNames)
         print("🎤 Creating artist(s): '\(displayArtistName(from: artistNames))'")
 
@@ -2455,7 +2700,10 @@ class LibraryIndexer: NSObject, ObservableObject {
             replaygainAlbumGain: metadata.replaygainAlbumGain,
             replaygainTrackPeak: metadata.replaygainTrackPeak,
             replaygainAlbumPeak: metadata.replaygainAlbumPeak,
-            hasEmbeddedArt: metadata.hasEmbeddedArt
+            hasEmbeddedArt: metadata.hasEmbeddedArt,
+            genre: AudioMetadataParser.normalizedGenre(metadata.genre),
+            bpm: AudioMetadataParser.normalizedBPM(metadata.bpm),
+            year: AudioMetadataParser.normalizedYear(metadata.year)
         )
 
         return ParsedAudioFile(
@@ -2997,6 +3245,207 @@ class LibraryIndexer: NSObject, ObservableObject {
     }
 }
 
+// MARK: - Linked music folders and folder artwork
+
+extension LibraryIndexer {
+    /// Walks every linked music folder and indexes what changed in it.
+    ///
+    /// - Returns: the folders walked completely - the only ones deletions may
+    ///   be reconciled against. A folder whose bookmark no longer resolves, or
+    ///   that is unplugged or offline, is not walked and not returned, so its
+    ///   songs stay exactly as they are; Settings offers to reconnect it.
+    fileprivate func sweepLinkedFolders(generation: Int) async -> [URL] {
+        guard isActiveScan(generation) else { return [] }
+        if let cached = linkedFoldersSweptRoots { return cached }
+        guard !LinkedFolderStore.shared.folders.isEmpty else {
+            linkedFoldersSweptRoots = []
+            return []
+        }
+
+        // Resolving bookmarks can touch the file provider; keep it off the
+        // main actor.
+        let active = await Task.detached(priority: .utility) {
+            LinkedFolderStore.shared.activateAll()
+        }.value
+
+        var completeRoots: [URL] = []
+        for (folder, url) in active {
+            guard isActiveScan(generation) else { return [] }
+
+            // The folder was renamed or moved and its bookmark followed it.
+            // Move the rows first, so its songs keep their favourites and
+            // playlists instead of being indexed again as new ones.
+            for formerPath in folder.formerPaths {
+                do {
+                    let moved = try databaseManager.relocateTracks(fromRoot: formerPath, toRoot: folder.path)
+                    print("🔗 Moved \(moved) song(s) of \(folder.name) to its new location")
+                    // relocateTracks skips rows whose file is not at the new
+                    // place yet (still syncing, provider slow). Forgetting the
+                    // former path anyway unlinked those rows from the folder -
+                    // and from the protection it gives them - so keep it until
+                    // a later scan has moved every one.
+                    let remaining = try databaseManager.countTracks(underPath: formerPath)
+                    if remaining == 0 {
+                        LinkedFolderStore.shared.clearFormerPath(formerPath, of: folder.id)
+                    } else {
+                        print("🔗 \(remaining) song(s) of \(folder.name) not at the new location yet - keeping the old one for the next scan")
+                    }
+                } catch {
+                    print("⚠️ Could not move the songs of \(folder.name): \(error)")
+                }
+            }
+
+            let enumeration: MusicFileEnumeration
+            do {
+                enumeration = try await findMusicFiles(in: url)
+            } catch {
+                print("⚠️ Could not walk linked folder \(folder.name): \(error)")
+                recordScanRootFailure(forRootAt: url)
+                continue
+            }
+            guard isActiveScan(generation) else { return [] }
+
+            // A walk that found no song at all in a folder the library holds
+            // songs of is what a linked iCloud Drive folder that has not
+            // synced yet looks like - readable, enumerated without an error,
+            // empty. Not a failure, but no evidence any song was deleted
+            // either, so the folder is not reconciled this scan (scan
+            // reconciliation's mass rule would hold its rows anyway).
+            // Except a one-song folder on the device or a drive: an empty
+            // walk is also what deleting its only song looks like, and
+            // skipping it kept that song for ever. In iCloud Drive an empty
+            // walk stays no evidence (LinkedFolderAbsence.isUnsettled).
+            let foundNothingOfStoredSongs = enumeration.files.isEmpty
+                && (LinkedFolderAbsence.isInICloudDrive(folder.path)
+                    || ((try? databaseManager.countTracks(underPath: folder.path)) ?? 2) > 1)
+            if enumeration.isComplete {
+                clearScanRootFailure(forRootAt: url)
+                if foundNothingOfStoredSongs {
+                    print("🔗 🛡️ Linked folder \(folder.name) has no songs on the device yet - not reconciling it")
+                } else {
+                    completeRoots.append(url)
+                }
+            } else {
+                recordScanRootFailure(forRootAt: url)
+            }
+
+            scanCollectedFiles.append(contentsOf: enumeration.files)
+            let changed = await Self.filesNeedingIndex(enumeration.files, under: folder.path)
+            print("🔗 Linked folder \(folder.name): \(enumeration.files.count) file(s), \(changed.count) new or changed")
+            await indexFilesWithBoundedConcurrency(changed, generation: generation)
+
+            // Rows relocateTracks could not move because their file is at
+            // neither place would otherwise sit under the former path for
+            // ever (see reconcileFormerLinkedFolderPath). Only after a
+            // complete walk, and after indexing, so a song renamed inside the
+            // folder has its new row to hand its favourites to.
+            if enumeration.isComplete, !foundNothingOfStoredSongs, !folder.formerPaths.isEmpty {
+                for formerPath in folder.formerPaths {
+                    guard isActiveScan(generation) else { return [] }
+                    await FileCleanupManager.shared.reconcileFormerLinkedFolderPath(
+                        formerPath,
+                        folderId: folder.id,
+                        newRoot: url
+                    )
+                }
+            }
+        }
+
+        guard isActiveScan(generation) else { return [] }
+        linkedFoldersSweptRoots = completeRoots
+        return completeRoots
+    }
+
+    /// The linked folders' files this scan collected, for folder playlists in
+    /// the scans that keep their own file list. Only these: anything else in
+    /// `scanCollectedFiles` came from the metadata query, possibly spelled
+    /// differently from the same file in the direct scan's list.
+    fileprivate var linkedFolderFilesThisScan: [URL] {
+        let store = LinkedFolderStore.shared
+        return scanCollectedFiles.filter { store.folder(containing: $0.path) != nil }
+    }
+
+    /// The files of a linked folder that the per-file pipeline has to look
+    /// at: new ones, changed ones, and rows still owed a re-parse.
+    ///
+    /// One query for the whole folder and one stat per file, instead of the
+    /// pipeline's several database reads per file - what keeps a rescan of a
+    /// 15 000-song folder down to seconds. The rules mirror
+    /// `needsMetadataRefresh`, which still has the final word for every file
+    /// that gets through.
+    nonisolated private static func filesNeedingIndex(_ files: [URL], under rootPath: String) async -> [URL] {
+        guard !files.isEmpty else { return [] }
+        return await Task.detached(priority: .utility) {
+            guard let stored = try? DatabaseManager.shared.storedFingerprints(underPath: rootPath) else {
+                return files
+            }
+            return files.filter { url in
+                guard let row = stored[DatabaseManager.canonicalPath(url.path)] else { return true }
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
+                    return true
+                }
+                let unparsed = (row.durationMs ?? 0) == 0 && (row.sampleRate ?? 0) == 0 && (row.channels ?? 0) == 0
+                if row.tagRefreshPending
+                    || (unparsed && filenameParsedExtensions.contains(url.pathExtension.lowercased())) {
+                    return true
+                }
+                guard let storedDate = row.modificationDate,
+                      storedDate == modificationTimestamp(values.contentModificationDate) else {
+                    return true
+                }
+                if let size = values.fileSize, Int64(size) != row.fileSize {
+                    return true
+                }
+                return false
+            }
+        }.value
+    }
+
+    /// One file of a linked folder.
+    ///
+    /// A song in a linked iCloud Drive folder that is not on the device yet
+    /// is asked to download and picked up by the next scan - the live iCloud
+    /// query only watches the app's own container. It is not a scan failure,
+    /// for the same reason as `recordScanPendingDownload`.
+    nonisolated private func processLinkedFile(_ fileURL: URL, generation: Int) async {
+        if !CloudDownloadManager.isLocallyResident(fileURL),
+           (try? fileURL.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true {
+            do {
+                try FileManager.default.startDownloadingUbiquitousItem(at: fileURL)
+                print("⏳ Linked song is downloading, will be indexed next scan: \(fileURL.lastPathComponent)")
+            } catch {
+                print("⚠️ Could not start downloading linked song \(fileURL.lastPathComponent): \(error)")
+            }
+            await recordScanPendingDownload()
+            return
+        }
+        await processLocalFile(fileURL, generation: generation)
+    }
+
+    /// Updates folder covers for every song in the roots this app scans.
+    /// Off the main actor: it stats every folder of the library.
+    fileprivate func refreshFolderArtwork() async {
+        var roots = [Self.localDocumentsURL]
+        if AppCoordinator.shared.iCloudStatus == .available, let iCloudFolder = stateManager.getMusicFolderURL() {
+            roots.append(iCloudFolder)
+        }
+        let store = LinkedFolderStore.shared
+        roots.append(contentsOf: store.folders
+            .filter { !store.needsReconnect($0.id) }
+            .map { URL(fileURLWithPath: $0.path, isDirectory: true) })
+
+        let changes = await Task.detached(priority: .utility) {
+            FolderArtworkIndex.shared.refresh(roots: roots)
+        }.value
+        guard !changes.isEmpty else { return }
+
+        ArtworkManager.shared.adoptFolderArtwork(changes)
+        // Lists rebuild from fresh rows, so album and playlist cards that pick
+        // "a track with a cover" see the new ones.
+        hasPendingLibraryRefresh = true
+    }
+}
+
 extension LibraryIndexer: NSMetadataQueryDelegate {
     nonisolated func metadataQuery(_ query: NSMetadataQuery, replacementObjectForResultObject result: NSMetadataItem) -> Any {
         return result
@@ -3020,6 +3469,14 @@ struct AudioMetadata {
     let replaygainTrackPeak: Double?
     let replaygainAlbumPeak: Double?
     let hasEmbeddedArt: Bool
+    // Raw as read from the tag; parseAudioFile normalises them onto Track
+    // in one place so every format path gets the same rules. `var` with a
+    // default so parsers for formats that never carry them can leave them out.
+    var genre: String? = nil
+    var bpm: Double? = nil
+    /// The Compilation tag (iTunes cpil, ID3 TCMP, Vorbis COMPILATION).
+    /// Only consulted when the file has no album artist (issue #118).
+    var isCompilation: Bool = false
 }
 
 class AudioMetadataParser {
@@ -3067,6 +3524,7 @@ class AudioMetadataParser {
         var artist: String?
         var album: String?
         var albumArtist: String?
+        var isCompilation = false
         var trackNumber: Int?
         var discNumber: Int?
         var year: Int?
@@ -3079,6 +3537,8 @@ class AudioMetadataParser {
         var replaygainTrackPeak: Double?
         var replaygainAlbumPeak: Double?
         var hasEmbeddedArt = false
+        var genre: String?
+        var bpm: Double?
         
         // Check if file is actually readable first
         guard FileManager.default.isReadableFile(atPath: url.path) else {
@@ -3186,7 +3646,11 @@ class AudioMetadataParser {
                 title = metadata["TITLE"]
                 artist = metadata["ARTIST"] ?? metadata["ARTISTE"]
                 album = metadata["ALBUM"]
-                albumArtist = metadata["ALBUMARTIST"]
+                // ALBUMARTIST is the common spelling; some taggers write it
+                // with a space or an underscore, and Apple Music and TagLib
+                // players read those too (issue #118).
+                albumArtist = metadata["ALBUMARTIST"] ?? metadata["ALBUM ARTIST"] ?? metadata["ALBUM_ARTIST"]
+                isCompilation = metadata["COMPILATION"].map(Self.isCompilationFlag) ?? false
                 
                 // "1/12" for TRACKNUMBER/DISCNUMBER and a full "2024-05-01"
                 // for DATE are all ordinary in Vorbis comments; handing them
@@ -3199,6 +3663,12 @@ class AudioMetadataParser {
                 }
                 if let dateStr = metadata["DATE"] ?? metadata["YEAR"] {
                     year = parseYear(dateStr)
+                }
+                genre = metadata["GENRE"]
+                // BPM is the de facto field name; TEMPO is what some taggers
+                // (and the MusicBrainz mapping for older files) write instead.
+                if let bpmStr = metadata["BPM"] ?? metadata["TEMPO"] {
+                    bpm = parseBPM(bpmStr)
                 }
                 
                 if let gainStr = metadata["REPLAYGAIN_TRACK_GAIN"] {
@@ -3239,10 +3709,30 @@ class AudioMetadataParser {
             replaygainAlbumGain: replaygainAlbumGain,
             replaygainTrackPeak: replaygainTrackPeak,
             replaygainAlbumPeak: replaygainAlbumPeak,
-            hasEmbeddedArt: hasEmbeddedArt
+            hasEmbeddedArt: hasEmbeddedArt,
+            genre: genre,
+            bpm: bpm,
+            isCompilation: isCompilation
         )
     }
     
+    /// "1", "true" or "yes" - how taggers write the Compilation flag as text.
+    static func isCompilationFlag(_ value: String) -> Bool {
+        let flag = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return flag == "1" || flag == "true" || flag == "yes"
+    }
+
+    /// iTunes stores cpil as a number, ID3's TCMP is a text frame.
+    private static func compilationFlag(of item: AVMetadataItem) async -> Bool {
+        if let number = try? await item.load(.numberValue) {
+            return number.boolValue
+        }
+        if let text = try? await item.load(.stringValue) {
+            return isCompilationFlag(text)
+        }
+        return false
+    }
+
     private static func parseVorbisComments(_ data: Data) -> [String: String] {
         var comments: [String: String] = [:]
         var offset = 0
@@ -3274,9 +3764,13 @@ class AudioMetadataParser {
                     // the standard way to tag multiple artists. Accumulate
                     // them so they aren't silently overwritten (issue #16);
                     // parseArtistNames splits on ";" downstream
-                    let multiValueKeys: Set<String> = ["ARTIST", "ARTISTE", "ALBUMARTIST"]
+                    let multiValueKeys: Set<String> = ["ARTIST", "ARTISTE", "ALBUMARTIST", "ALBUM ARTIST", "ALBUM_ARTIST"]
                     if multiValueKeys.contains(key), let existing = comments[key], !existing.isEmpty {
                         comments[key] = existing + "; " + value
+                    } else if key == "GENRE", let existing = comments[key], !existing.isEmpty {
+                        // Repeated GENRE fields: the track keeps only the
+                        // first, so a later one must not overwrite it. (Not
+                        // `continue`: that would skip the offset advance.)
                     } else {
                         comments[key] = value
                     }
@@ -3298,12 +3792,130 @@ class AudioMetadataParser {
     /// starts with a four-digit year.
     private static func parseYear(_ value: String) -> Int? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let exact = Int(trimmed) { return exact }
 
-        let digits = trimmed.prefix { $0.isNumber }
-        guard digits.count == 4, let year = Int(digits) else { return nil }
+        // Only the leading run of digits: "2024", "2024-05-01", "2024/05",
+        // and the compact "20240501" some taggers write. A bare Int() of the
+        // whole string used to turn that last form into the year 20240501.
+        let digits = trimmed.prefix { $0.isASCII && $0.isNumber }
+        guard digits.count == 4 || digits.count == 8,
+              let year = Int(digits.prefix(4)) else { return nil }
         return year
     }
+
+    // MARK: Genre / BPM / year normalisation
+
+    /// What lands in `Track.year`: a plausible four-digit year or nothing.
+    /// Some parsers take `Int(prefix(4))` of whatever the date tag holds, so
+    /// "0000" placeholders and two-digit years have to be filtered here.
+    static func normalizedYear(_ year: Int?) -> Int? {
+        guard let year, (1000...9999).contains(year) else { return nil }
+        return year
+    }
+
+    /// Rounded BPM, dropping zero (a common "unknown" placeholder), negatives
+    /// and anything past 300, which is a mis-scaled or garbage frame rather
+    /// than a real tempo.
+    static func normalizedBPM(_ bpm: Double?) -> Int? {
+        guard let bpm, bpm.isFinite else { return nil }
+        let rounded = Int(bpm.rounded())
+        guard (1...300).contains(rounded) else { return nil }
+        return rounded
+    }
+
+    /// Reads "128", "127.98", "127,98" or "128 BPM" - taggers disagree on all of
+    /// them, and a decimal tempo is still a tempo.
+    static func parseBPM(_ value: String) -> Double? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let numeric = trimmed.prefix { ($0.isASCII && $0.isNumber) || $0 == "." || $0 == "," }
+        return Double(numeric.replacingOccurrences(of: ",", with: "."))
+    }
+
+    /// First genre of a possibly multi-valued tag, trimmed, with ID3 genre
+    /// references resolved. Nil when nothing usable remains.
+    ///
+    /// Separators: NUL is how ID3v2.4 and TagLib join multiple values, ";"
+    /// and "|" are what most taggers write by hand. "/" and "," are NOT
+    /// split on, because real single genres contain them ("Hip-Hop/Rap",
+    /// "R&B/Soul" in Apple's own catalogue, "Pop/Funk" in the ID3 list).
+    static func normalizedGenre(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimSet = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        for component in raw.components(separatedBy: CharacterSet(charactersIn: "\0;|")) {
+            let candidate = component.trimmingCharacters(in: trimSet)
+            guard !candidate.isEmpty else { continue }
+            if let resolved = resolveID3GenreReference(candidate)?.trimmingCharacters(in: trimSet),
+               !resolved.isEmpty {
+                return resolved
+            }
+        }
+        return nil
+    }
+
+    /// ID3 genre references: "(17)" or a bare "17" index the ID3v1 list,
+    /// "(17)Rock" is a reference plus a refinement (the text wins), "(RX)" and
+    /// "(CR)" are Remix and Cover, and "((" escapes a literal parenthesis.
+    /// AVFoundation hands some of these through unresolved, and so do old
+    /// ID3v2.3 files read by the DSF fallback. Anything else is returned as is.
+    private static func resolveID3GenreReference(_ value: String) -> String? {
+        if value.hasPrefix("((") {
+            return String(value.dropFirst())
+        }
+
+        if value.hasPrefix("("), let close = value.firstIndex(of: ")") {
+            let code = String(value[value.index(after: value.startIndex)..<close])
+            let refinement = String(value[value.index(after: close)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // "(17)(18)" is two references; keep the first. Any other trailing
+            // text is the refinement and is more specific than the code.
+            if !refinement.isEmpty, !refinement.hasPrefix("(") {
+                return refinement
+            }
+            switch code.uppercased() {
+            case "RX": return "Remix"
+            case "CR": return "Cover"
+            default:
+                if let index = Int(code) {
+                    return id3v1GenreName(index)
+                }
+                return value
+            }
+        }
+
+        if value.allSatisfy({ $0.isASCII && $0.isNumber }), let index = Int(value) {
+            // A bare number outside the list is not a genre anyone meant.
+            return id3v1GenreName(index)
+        }
+
+        return value
+    }
+
+    /// ID3v1 genre `index` (0-based), including the Winamp extensions up to 191.
+    static func id3v1GenreName(_ index: Int) -> String? {
+        id3v1Genres.indices.contains(index) ? id3v1Genres[index] : nil
+    }
+
+    private static let id3v1Genres: [String] = [
+        "Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge", "Hip-Hop", "Jazz", "Metal",
+        "New Age", "Oldies", "Other", "Pop", "R&B", "Rap", "Reggae", "Rock", "Techno", "Industrial",
+        "Alternative", "Ska", "Death Metal", "Pranks", "Soundtrack", "Euro-Techno", "Ambient", "Trip-Hop", "Vocal", "Jazz+Funk",
+        "Fusion", "Trance", "Classical", "Instrumental", "Acid", "House", "Game", "Sound Clip", "Gospel", "Noise",
+        "Alternative Rock", "Bass", "Soul", "Punk", "Space", "Meditative", "Instrumental Pop", "Instrumental Rock", "Ethnic", "Gothic",
+        "Darkwave", "Techno-Industrial", "Electronic", "Pop-Folk", "Eurodance", "Dream", "Southern Rock", "Comedy", "Cult", "Gangsta",
+        "Top 40", "Christian Rap", "Pop/Funk", "Jungle", "Native American", "Cabaret", "New Wave", "Psychedelic", "Rave", "Showtunes",
+        "Trailer", "Lo-Fi", "Tribal", "Acid Punk", "Acid Jazz", "Polka", "Retro", "Musical", "Rock & Roll", "Hard Rock",
+        "Folk", "Folk-Rock", "National Folk", "Swing", "Fast Fusion", "Bebop", "Latin", "Revival", "Celtic", "Bluegrass",
+        "Avantgarde", "Gothic Rock", "Progressive Rock", "Psychedelic Rock", "Symphonic Rock", "Slow Rock", "Big Band", "Chorus", "Easy Listening", "Acoustic",
+        "Humour", "Speech", "Chanson", "Opera", "Chamber Music", "Sonata", "Symphony", "Booty Bass", "Primus", "Porn Groove",
+        "Satire", "Slow Jam", "Club", "Tango", "Samba", "Folklore", "Ballad", "Power Ballad", "Rhythmic Soul", "Freestyle",
+        "Duet", "Punk Rock", "Drum Solo", "A Cappella", "Euro-House", "Dance Hall", "Goa", "Drum & Bass", "Club-House", "Hardcore",
+        "Terror", "Indie", "BritPop", "Afro-Punk", "Polsk Punk", "Beat", "Christian Gangsta Rap", "Heavy Metal", "Black Metal", "Crossover",
+        "Contemporary Christian", "Christian Rock", "Merengue", "Salsa", "Thrash Metal", "Anime", "JPop", "Synthpop", "Abstract", "Art Rock",
+        "Baroque", "Bhangra", "Big Beat", "Breakbeat", "Chillout", "Downtempo", "Dub", "EBM", "Eclectic", "Electro",
+        "Electroclash", "Emo", "Experimental", "Garage", "Global", "IDM", "Illbient", "Industro-Goth", "Jam Band", "Krautrock",
+        "Leftfield", "Lounge", "Math Rock", "New Romantic", "Nu-Breakz", "Post-Punk", "Post-Rock", "Psytrance", "Shoegaze", "Space Rock",
+        "Trop Rock", "World Music", "Neoclassical", "Audiobook", "Audio Theatre", "Neue Deutsche Welle", "Podcast", "Indie Rock", "G-Funk", "Dubstep",
+        "Garage Rock", "Psybient"
+    ]
 
     private static func parseSlashSeparatedNumber(_ value: String) -> Int? {
         let firstPart = value.components(separatedBy: "/").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? value
@@ -3352,6 +3964,80 @@ class AudioMetadataParser {
         return nil
     }
     
+    /// Genre, BPM and (as a fallback) year from AVFoundation's format-specific
+    /// items. None of the three has a usable common key, so they are matched
+    /// by identifier: ID3 for MP3 (and WAV files carrying an ID3 chunk),
+    /// iTunes atoms for AAC/M4A, QuickTime metadata for anything else
+    /// AVFoundation opens. Walks every item regardless of `commonKey`, unlike
+    /// the artist/track loop, because an item that has one would otherwise be
+    /// skipped there.
+    private static func extractGenreBPMYear(
+        from items: [AVMetadataItem]
+    ) async -> (genre: String?, bpm: Double?, year: Int?) {
+        let textGenreIdentifiers: Set<AVMetadataIdentifier> = [
+            .id3MetadataContentType,      // TCON - may still hold "(17)" codes
+            .iTunesMetadataUserGenre,     // ©gen
+            .quickTimeMetadataGenre,
+            .quickTimeUserDataGenre
+        ]
+        let bpmIdentifiers: Set<AVMetadataIdentifier> = [
+            .id3MetadataBeatsPerMinute,   // TBPM
+            .iTunesMetadataBeatsPerMin    // tmpo
+        ]
+        let yearIdentifiers: Set<AVMetadataIdentifier> = [
+            .id3MetadataRecordingTime,    // TDRC (ID3v2.4)
+            .id3MetadataYear,             // TYER (ID3v2.3)
+            .iTunesMetadataReleaseDate,   // ©day
+            .quickTimeMetadataYear
+        ]
+
+        var textGenre: String?
+        var predefinedGenre: String?
+        var bpm: Double?
+        var year: Int?
+
+        for item in items {
+            guard let identifier = item.identifier else { continue }
+
+            if textGenre == nil, textGenreIdentifiers.contains(identifier) {
+                textGenre = try? await item.load(.stringValue)
+            } else if predefinedGenre == nil, identifier == .iTunesMetadataPredefinedGenre {
+                // gnre stores the ID3v1 index plus one as a 16-bit integer.
+                if let code = await integerValue(of: item), code > 0 {
+                    predefinedGenre = id3v1GenreName(code - 1)
+                }
+            } else if bpm == nil, bpmIdentifiers.contains(identifier) {
+                if let string = try? await item.load(.stringValue), let parsed = parseBPM(string) {
+                    bpm = parsed
+                } else if let value = await integerValue(of: item) {
+                    bpm = Double(value)
+                }
+            } else if year == nil, yearIdentifiers.contains(identifier) {
+                if let string = try? await item.load(.stringValue) {
+                    year = parseYear(string)
+                } else if let value = try? await item.load(.numberValue) {
+                    year = value.intValue
+                }
+            }
+        }
+
+        // Free-text genre wins over gnre: it is what the user typed, gnre is
+        // limited to the ID3v1 list.
+        return (textGenre ?? predefinedGenre, bpm, year)
+    }
+
+    /// Integer payload of an iTunes atom such as gnre or tmpo, which
+    /// AVFoundation may surface as a number or only as raw big-endian bytes.
+    private static func integerValue(of item: AVMetadataItem) async -> Int? {
+        if let number = try? await item.load(.numberValue) {
+            return number.intValue
+        }
+        if let data = try? await item.load(.dataValue), !data.isEmpty, data.count <= 8 {
+            return data.reduce(0) { ($0 << 8) | Int($1) }
+        }
+        return nil
+    }
+
     /// Carries one coordinated parse's outcome out of the accessor block.
     /// Created, written and read by a single call; the semaphore below orders
     /// the one write against the one read.
@@ -3423,15 +4109,26 @@ class AudioMetadataParser {
         var artist: String?
         var album: String?
         var albumArtist: String?
+        var isCompilation = false
         var trackNumber: Int?
         var discNumber: Int?
         var year: Int?
         var hasEmbeddedArt = false
+        var genre: String?
+        var bpm: Double?
+        var yearFallback: Int?
+        var replayGain = ReplayGainTags()
         
         // Parse ID3 metadata using async API
         do {
             let commonMetadata = try await asset.load(.commonMetadata)
             let allMetadata = try await asset.load(.metadata)
+
+            let extraTags = await extractGenreBPMYear(from: allMetadata)
+            genre = extraTags.genre
+            bpm = extraTags.bpm
+            yearFallback = extraTags.year
+            replayGain = await extractReplayGain(from: allMetadata)
             
             // Parse common metadata
             for item in commonMetadata {
@@ -3499,6 +4196,14 @@ class AudioMetadataParser {
                     case "id3/TPE2":
                         albumArtist = try? await metadata.load(.stringValue)
                         print("🎤 Found album artist in TPE2: \(albumArtist ?? "nil")")
+                    case "itsk/aART":
+                        // The album artist of an M4A (what Apple Music writes).
+                        // It has no common key, so it was only ever logged as
+                        // unhandled below and every album in M4A split by the
+                        // track artist (issue #118).
+                        albumArtist = try? await metadata.load(.stringValue)
+                    case "itsk/cpil", "id3/TCMP":
+                        isCompilation = await compilationFlag(of: metadata)
                     case "id3/TPE1":
                         // Fallback for main artist if not found in common metadata
                         if artist == nil {
@@ -3541,6 +4246,12 @@ class AudioMetadataParser {
             }
         } catch {
             print("Failed to load asset metadata: \(error)")
+        }
+
+        // Some files only carry the date in a format-specific frame that
+        // AVFoundation does not promote to commonKeyCreationDate.
+        if year == nil {
+            year = yearFallback
         }
         
         // Get actual audio format info
@@ -3607,12 +4318,70 @@ class AudioMetadataParser {
             sampleRate: sampleRate,
             bitDepth: nil, // MP3 is lossy, bit depth doesn't apply
             channels: channels,
-            replaygainTrackGain: nil,
-            replaygainAlbumGain: nil,
-            replaygainTrackPeak: nil,
-            replaygainAlbumPeak: nil,
-            hasEmbeddedArt: hasEmbeddedArt
+            replaygainTrackGain: replayGain.trackGain,
+            replaygainAlbumGain: replayGain.albumGain,
+            replaygainTrackPeak: replayGain.trackPeak,
+            replaygainAlbumPeak: replayGain.albumPeak,
+            hasEmbeddedArt: hasEmbeddedArt,
+            genre: genre,
+            bpm: bpm,
+            isCompilation: isCompilation
         )
+    }
+
+    struct ReplayGainTags {
+        var trackGain: Double?
+        var albumGain: Double?
+        var trackPeak: Double?
+        var albumPeak: Double?
+    }
+
+    /// ReplayGain from MP3 and M4A tags, which AVFoundation does not name:
+    /// in ID3 they are TXXX frames whose description is the field name
+    /// ("REPLAYGAIN_TRACK_GAIN"), in M4A iTunes freeform atoms
+    /// ("----:com.apple.iTunes:replaygain_track_gain", surfaced in the
+    /// iTunes long-form key space). Names are matched without regard to
+    /// case - taggers disagree. Only FLAC and the SFB formats were read
+    /// before, so volume levelling did nothing for MP3/AAC. iTunNORM (Sound
+    /// Check) is a different measure and deliberately ignored.
+    private static func extractReplayGain(from items: [AVMetadataItem]) async -> ReplayGainTags {
+        var tags = ReplayGainTags()
+        for item in items {
+            guard let identifier = item.identifier else { continue }
+            let name: String
+            if identifier == .id3MetadataUserText {
+                // TXXX: the field name is the frame's description.
+                guard let attributes = try? await item.load(.extraAttributes),
+                      let description = attributes[.info] as? String else { continue }
+                name = description.lowercased()
+            } else if identifier.rawValue.lowercased().contains("replaygain") {
+                // M4A freeform atoms come as "itlk/com.apple.iTunes.<name>".
+                name = identifier.rawValue.lowercased()
+            } else {
+                continue
+            }
+            guard name.contains("replaygain"),
+                  let value = try? await item.load(.stringValue) else { continue }
+            if name.hasSuffix("replaygain_track_gain") {
+                tags.trackGain = tags.trackGain ?? parseLooseReplayGain(value)
+            } else if name.hasSuffix("replaygain_album_gain") {
+                tags.albumGain = tags.albumGain ?? parseLooseReplayGain(value)
+            } else if name.hasSuffix("replaygain_track_peak") {
+                tags.trackPeak = tags.trackPeak ?? Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            } else if name.hasSuffix("replaygain_album_peak") {
+                tags.albumPeak = tags.albumPeak ?? Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        return tags
+    }
+
+    /// "-6.48 dB", "+1.2 dB", "-6.48dB" or a bare number, in dB.
+    private static func parseLooseReplayGain(_ value: String) -> Double? {
+        var trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasSuffix("db") {
+            trimmed = String(trimmed.dropLast(2)).trimmingCharacters(in: .whitespaces)
+        }
+        return Double(trimmed)
     }
 
     private static func parseWavMetadataSync(from url: URL) async throws -> AudioMetadata {
@@ -3631,6 +4400,8 @@ class AudioMetadataParser {
         var discNumber: Int?
         var year: Int?
         var hasEmbeddedArt = false
+        var genre: String?
+        var bpm: Double?
 
         // Get audio format info
         do {
@@ -3674,6 +4445,15 @@ class AudioMetadataParser {
                 default:
                     break
                 }
+            }
+
+            // Only reachable for WAV files with an ID3 chunk; RIFF INFO
+            // genre (IGNR) is not surfaced by AVFoundation at all.
+            let extraTags = await extractGenreBPMYear(from: try await asset.load(.metadata))
+            genre = extraTags.genre
+            bpm = extraTags.bpm
+            if year == nil {
+                year = extraTags.year
             }
         } catch {
             print("⚠️ Failed to read WAV metadata: \(error)")
@@ -3720,7 +4500,9 @@ class AudioMetadataParser {
             replaygainAlbumGain: nil,
             replaygainTrackPeak: nil,
             replaygainAlbumPeak: nil,
-            hasEmbeddedArt: hasEmbeddedArt
+            hasEmbeddedArt: hasEmbeddedArt,
+            genre: genre,
+            bpm: bpm
         )
     }
 
@@ -3837,7 +4619,7 @@ class AudioMetadataParser {
             let albumArtist = metadata.albumArtist
             let trackNumber = metadata.trackNumber
             let discNumber = metadata.discNumber
-            let year = metadata.releaseDate?.components(separatedBy: "-").first.flatMap { Int($0) }
+            let year = metadata.releaseDate.flatMap(parseYear)
 
             print("🎵 SFBAudioEngine metadata for \(url.lastPathComponent):")
             print("   Title: \(title ?? "nil")")
@@ -3862,7 +4644,11 @@ class AudioMetadataParser {
                 replaygainAlbumGain: metadata.replayGainAlbumGain,
                 replaygainTrackPeak: metadata.replayGainTrackPeak,
                 replaygainAlbumPeak: metadata.replayGainAlbumPeak,
-                hasEmbeddedArt: await checkForEmbeddedArtwork(url: url)  // Check for embedded artwork in SFBAudioEngine files
+                hasEmbeddedArt: await checkForEmbeddedArtwork(url: url),  // Check for embedded artwork in SFBAudioEngine files
+                genre: metadata.genre,
+                bpm: metadata.bpm.map(Double.init),
+                // NS_REFINED_FOR_SWIFT; its Swift accessor is not visible here.
+                isCompilation: metadata.__compilation?.boolValue ?? false
             )
 
         } catch {
@@ -4025,7 +4811,9 @@ class AudioMetadataParser {
                 replaygainAlbumGain: tagged.replaygainAlbumGain,
                 replaygainTrackPeak: tagged.replaygainTrackPeak,
                 replaygainAlbumPeak: tagged.replaygainAlbumPeak,
-                hasEmbeddedArt: tagged.hasEmbeddedArt
+                hasEmbeddedArt: tagged.hasEmbeddedArt,
+                genre: tagged.genre,
+                bpm: tagged.bpm
             )
         }
         print("⚠️ TagLib could not read DSD tags - falling back to the ID3/filename path: \(url.lastPathComponent)")
@@ -4038,6 +4826,8 @@ class AudioMetadataParser {
         var discNumber: Int?
         var year: Int?
         var hasEmbeddedArt = false
+        var genre: String?
+        var bpm: Double?
         var sampleRate = 0
         var channels = 0
         let bitDepth = 1  // DSD is always 1-bit
@@ -4054,6 +4844,8 @@ class AudioMetadataParser {
                 discNumber = metadata.discNumber
                 year = metadata.year
                 hasEmbeddedArt = metadata.hasEmbeddedArt
+                genre = metadata.genre
+                bpm = metadata.bpm
                 sampleRate = metadata.sampleRate
                 channels = metadata.channels
                 print("✅ Successfully extracted DSF metadata for: \(url.lastPathComponent)")
@@ -4105,18 +4897,20 @@ class AudioMetadataParser {
             replaygainAlbumGain: nil,
             replaygainTrackPeak: nil,
             replaygainAlbumPeak: nil,
-            hasEmbeddedArt: hasEmbeddedArt
+            hasEmbeddedArt: hasEmbeddedArt,
+            genre: genre,
+            bpm: bpm
         )
     }
 
     // Extract metadata from DSF file using DSF format specification and ID3v2 tags
-    private static func extractDSFMetadata(from url: URL) async throws -> (title: String?, artist: String?, album: String?, albumArtist: String?, trackNumber: Int?, discNumber: Int?, year: Int?, hasEmbeddedArt: Bool, sampleRate: Int, channels: Int) {
+    private static func extractDSFMetadata(from url: URL) async throws -> (title: String?, artist: String?, album: String?, albumArtist: String?, trackNumber: Int?, discNumber: Int?, year: Int?, hasEmbeddedArt: Bool, sampleRate: Int, channels: Int, genre: String?, bpm: Double?) {
 
         // Add memory safety check - avoid large file loading during startup if low memory
         let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
         if fileSize > 50_000_000 { // Skip files larger than 50MB to prevent memory pressure
             print("⚠️ Skipping large DSF file during startup: \(url.lastPathComponent) (\(fileSize) bytes)")
-            return (nil, nil, nil, nil, nil, nil, nil, false, 0, 0)
+            return (nil, nil, nil, nil, nil, nil, nil, false, 0, 0, nil, nil)
         }
 
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
@@ -4174,6 +4968,8 @@ class AudioMetadataParser {
         var discNumber: Int?
         var year: Int?
         var hasEmbeddedArt = false
+        var genre: String?
+        var bpm: Double?
 
         if metadataPointer > 0 && metadataPointer < data.count {
             let metadataOffset = Int(metadataPointer)
@@ -4195,6 +4991,8 @@ class AudioMetadataParser {
                 discNumber = parsedTags.discNumber
                 year = parsedTags.year
                 hasEmbeddedArt = parsedTags.hasArtwork
+                genre = parsedTags.genre
+                bpm = parsedTags.bpm
             }
         }
 
@@ -4208,14 +5006,16 @@ class AudioMetadataParser {
             year: year,
             hasEmbeddedArt: hasEmbeddedArt,
             sampleRate: sampleRate,
-            channels: channels
+            channels: channels,
+            genre: genre,
+            bpm: bpm
         )
     }
 
     // Parse ID3v2 tags from binary data
-    private static func parseID3v2Tags(from data: Data) -> (title: String?, artist: String?, album: String?, albumArtist: String?, trackNumber: Int?, discNumber: Int?, year: Int?, hasArtwork: Bool) {
+    private static func parseID3v2Tags(from data: Data) -> (title: String?, artist: String?, album: String?, albumArtist: String?, trackNumber: Int?, discNumber: Int?, year: Int?, hasArtwork: Bool, genre: String?, bpm: Double?) {
 
-        guard data.count >= 10 else { return (nil, nil, nil, nil, nil, nil, nil, false) }
+        guard data.count >= 10 else { return (nil, nil, nil, nil, nil, nil, nil, false, nil, nil) }
 
         // Read ID3v2 header
         let majorVersion = data[3]
@@ -4235,6 +5035,8 @@ class AudioMetadataParser {
         var discNumber: Int?
         var year: Int?
         var hasArtwork = false
+        var genre: String?
+        var bpm: Double?
 
         // Parse frames (starting from offset 10)
         var offset = 10
@@ -4286,6 +5088,10 @@ class AudioMetadataParser {
                 if let yearString = parseTextFrame(frameData) {
                     year = Int(String(yearString.prefix(4)))
                 }
+            case "TCON": // Genre - raw; may be an ID3v1 "(17)" reference
+                genre = parseTextFrame(frameData)
+            case "TBPM": // Beats per minute
+                bpm = parseTextFrame(frameData).flatMap(parseBPM)
             case "APIC": // Attached picture
                 hasArtwork = true
                 print("🎨 Found embedded artwork in ID3v2 tag")
@@ -4305,7 +5111,7 @@ class AudioMetadataParser {
         print("   Year: \(year?.description ?? "nil")")
         print("   Has Artwork: \(hasArtwork)")
 
-        return (title, artist, album, albumArtist, trackNumber, discNumber, year, hasArtwork)
+        return (title, artist, album, albumArtist, trackNumber, discNumber, year, hasArtwork, genre, bpm)
     }
 
     // Parse text frame data handling different encodings

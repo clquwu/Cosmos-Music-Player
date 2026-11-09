@@ -7,6 +7,11 @@ struct ArtistsScreen: View {
     @State private var artists: [Artist] = []
     @State private var settings = DeleteSettings.load()
     @StateObject private var search = LibrarySearchState()
+    /// One song per artist to take a picture from, built once per library.
+    @State private var artworkTrackByArtist: [Int64: Track] = [:]
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var isRegular: Bool { horizontalSizeClass == .regular }
 
     private var visibleArtists: [Artist] {
         let terms = LibrarySearch.terms(in: search.text)
@@ -15,181 +20,111 @@ struct ArtistsScreen: View {
     }
 
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .artists)
-            
-            VStack {
-                if visibleArtists.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: artists.isEmpty ? "person.2" : "magnifyingglass")
-                            .font(.system(size: 40))
-                            .foregroundColor(.secondary)
-                        
-                        Text(artists.isEmpty ? Localized.noArtistsFound : Localized.noResultsFound)
-                            .font(.headline)
-                        
-                        Text(artists.isEmpty ? Localized.artistsWillAppear : Localized.tryDifferentKeywords)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if visibleArtists.isEmpty {
+                if artists.isEmpty {
+                    CosmosEmptyState(
+                        systemImage: "music.microphone",
+                        title: Localized.noArtistsFound,
+                        message: Localized.artistsWillAppear
+                    )
                 } else {
-                    List(visibleArtists, id: \.id) { artist in
-                        ZStack {
-                            NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allTracks)) {
-                                EmptyView()
-                            }
-                            .opacity(0.0)
-                            
-                            HStack {
-                                Image(systemName: "person")
-                                    .foregroundColor(.purple)
-                                    .frame(width: 24, height: 24)
-                                
-                                VStack(alignment: .leading, spacing: 4) {
+                    ContentUnavailableView.search(text: search.text)
+                }
+            } else {
+                // Portraits in a grid, as Music and Spotify show artists:
+                // a face is quicker to find than a name in a long list.
+                ScrollView {
+                    TileGrid(minimum: isRegular ? 150 : 100, maximum: 200, spacing: isRegular ? Design.Spacing.xl : Design.Spacing.l, rowSpacing: isRegular ? Design.Spacing.xl : Design.Spacing.l) {
+                        ForEach(visibleArtists, id: \.id) { artist in
+                            NavigationLink(value: LibraryRoute.artist(id: artist.id, name: artist.name)) {
+                                VStack(spacing: Design.Spacing.s) {
+                                    ArtistAvatar(name: artist.name, artworkTrack: artist.id.flatMap { artworkTrackByArtist[$0] })
+                                        .aspectRatio(1, contentMode: .fit)
+                                        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
                                     Text(artist.name)
-                                        .font(.headline)
-                                    
-                                    Text(Localized.artist)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.center)
+                                        .lineLimit(2)
                                 }
-                                
-                                Spacer()
-                                
-                                Image(systemName: "chevron.right")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                .accessibilityElement(children: .combine)
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(.ultraThinMaterial)
-                                    .opacity(0.7)
-                            )
+                            .buttonStyle(PressableButtonStyle())
                         }
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                        .listRowBackground(Color.clear)
                     }
-                    .listStyle(PlainListStyle())
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 8)
-                    .safeAreaInset(edge: .bottom) {
-                        Color.clear.frame(height: 100) // Space for mini player
-                    }
+                    // The same side margin as Albums and Playlists.
+                    .pagePadding()
+                    .padding(.vertical, Design.Spacing.m)
                 }
-            }
-            .navigationTitle(settings.artistListMode.displayName)
-            .navigationBarTitleDisplayMode(.inline)
-            .librarySearchField(search, prompt: Localized.searchArtists)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 0) {
-                        LibrarySearchButton(state: search)
-                        artistModeMenu
-                    }
-                }
-            }
-            .onAppear {
-                loadArtists()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
-                loadArtists()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
-                let previousMode = settings.artistListMode
-                settings = DeleteSettings.load()
-                if settings.artistListMode != previousMode { loadArtists() }
+                .debugScrollToBottom()
             }
         }
+        .background(ScreenSpecificBackgroundView(screen: .artists))
+        .navigationTitle(settings.artistListMode.displayName)
+        .navigationBarTitleDisplayMode(.large)
+        .librarySearchField(search, prompt: Localized.searchArtists)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                LibrarySearchButton(state: search)
+                artistModeMenu
+            }
+            .cosmosPlainBackground()
+        }
+        .onAppear {
+            loadArtists()
+        }
+        .task(id: TrackSearchIndex.identity(for: allTracks)) {
+            var index: [Int64: Track] = [:]
+            for track in allTracks where track.hasArtwork {
+                if let artistId = track.artistId, index[artistId] == nil {
+                    index[artistId] = track
+                }
+            }
+            artworkTrackByArtist = index
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            loadArtists()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
+            let previousMode = settings.artistListMode
+            settings = DeleteSettings.load()
+            if settings.artistListMode != previousMode { loadArtists() }
+        }
     } // end body
-    
+
     /// Switches between listing album artists and every credited artist.
     /// It lives in the toolbar rather than in Settings because the difference
     /// is only meaningful while looking at this list.
     private var artistModeMenu: some View {
         Menu {
-            ForEach(ArtistListMode.allCases, id: \.self) { mode in
-                Button {
+            Picker(selection: Binding(
+                get: { settings.artistListMode },
+                set: { mode in
                     settings.artistListMode = mode
                     settings.save()
                     loadArtists()
-                } label: {
-                    HStack {
-                        Text(mode.displayName)
-                        if settings.artistListMode == mode { Image(systemName: "checkmark") }
-                    }
                 }
+            )) {
+                ForEach(ArtistListMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            } label: {
+                EmptyView()
             }
+            .pickerStyle(.inline)
         } label: {
-            Image(systemName: "line.3.horizontal.decrease.circle")
-                .font(.title3)
-                .foregroundColor(settings.backgroundColorChoice.color)
-                .padding(4)
-                .contentShape(Rectangle())
+            Label(settings.artistListMode.displayName, systemImage: "line.3.horizontal.decrease")
         }
     }
 
     private func loadArtists() {
+        let signpost = Perf.begin("Artists load")
+        defer { Perf.end("Artists load", signpost) }
         do {
             artists = try appCoordinator.databaseManager.getBrowsableArtists(mode: settings.artistListMode)
         } catch {
             print("Failed to load artists: \(error)")
-        }
-    }
-}
-
-struct ArtistListView: View {
-    let artists: [Artist]
-    let onArtistTap: (Artist) -> Void
-    
-    var body: some View {
-        if artists.isEmpty {
-            VStack(spacing: 16) {
-                Image(systemName: "person.2")
-                    .font(.system(size: 40))
-                    .foregroundColor(.secondary)
-                
-                Text(Localized.noArtistsFound)
-                    .font(.headline)
-                
-                Text(Localized.artistsWillAppear)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            List(artists, id: \.id) { artist in
-                HStack {
-                    Image(systemName: "person")
-                        .foregroundColor(.purple)
-                        .frame(width: 24, height: 24)
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(artist.name)
-                            .font(.headline)
-                        
-                        Text(Localized.artist)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .frame(height: 66)
-                .padding(.horizontal, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    onArtistTap(artist)
-                }
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets())
-            }
-            .listStyle(PlainListStyle())
         }
     }
 }
@@ -200,22 +135,28 @@ struct ArtistDetailScreen: View {
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
     @StateObject private var hybridAPI = HybridMusicAPIService.shared
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var unifiedArtist: UnifiedArtist?
     @State private var isLoading = false
     @State private var artistImage: UIImage?
     @State private var showFullProfile = false
-    @State private var hasTriedAlternatives = false
-    @State private var hasShownWrongArtistButton = false
     @State private var settings = DeleteSettings.load()
     @State private var isBulkMode = false
     @State private var selectedTracks: Set<String> = []
+    /// Loaded once per appearance and library change. This was a computed
+    /// property that queried the database every time it was read - several
+    /// times per render.
+    @State private var loadedTracks: [Track] = []
+    @State private var artistAlbums: [Album] = []
+    @State private var artworkTrackByAlbum: [Int64: Track] = [:]
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var isRegular: Bool { horizontalSizeClass == .regular }
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
     }
 
-    /// Resolving this costs a database query, so callers that need it more
-    /// than once bind it to a local first.
     // Subscribed, not merely read: the list has to be rebuilt when the route
     // changes. Reading the singleton without subscribing meant connecting could
     // leave incompatible formats on screen and disconnecting left Opus/DSD
@@ -228,51 +169,126 @@ struct ArtistDetailScreen: View {
     @ObservedObject private var carPlayState = CarPlayRouteState.shared
 
     private var artistTracks: [Track] {
-        let tracks: [Track]
-        if let artistId = artist.id,
-           let databaseTracks = try? appCoordinator.databaseManager.getTracksByArtistId(artistId) {
-            tracks = databaseTracks
-        } else {
-            tracks = allTracks.filter { $0.artistId == artist.id }
-        }
-
         // Filter out incompatible formats when connected to CarPlay
-        if carPlayState.isConnected {
-            return tracks.filter { track in
-                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
-                let incompatibleFormats = ["ogg", "oga", "opus", "dsf", "dff"]
-                return !incompatibleFormats.contains(ext)
-            }
+        guard carPlayState.isConnected else { return loadedTracks }
+        return loadedTracks.filter { track in
+            let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+            let incompatibleFormats = ["ogg", "oga", "opus", "dsf", "dff"]
+            return !incompatibleFormats.contains(ext)
         }
+    }
 
-        return tracks
+    private var hasRichHeader: Bool {
+        unifiedArtist != nil && !isLoading
     }
-    
-    private var artistAlbums: [Album] {
-        guard let artistId = artist.id else { return [] }
-        return (try? appCoordinator.databaseManager.getAlbumsByArtistId(artistId)) ?? []
+
+    private var rowContextIdentity: String {
+        "\(artistTracks.count)-\(artistTracks.first?.stableId ?? "")|\(isBulkMode)"
     }
-    
+
     var body: some View {
-        ZStack {
-            ScreenSpecificBackgroundView(screen: .artistDetail)
-            
-            Group {
-                if let unifiedArtist = unifiedArtist, !isLoading {
-                    richArtistView(unifiedArtist)
-                } else {
-                    simpleView
+        let tracks = artistTracks
+
+        List {
+            Section {
+                Group {
+                    if let unifiedArtist, !isLoading {
+                        richHeader(unifiedArtist)
+                    } else {
+                        simpleHeader
+                    }
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
+
+            if !artistAlbums.isEmpty {
+                Section {
+                    albumsShelf
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                } header: {
+                    // On the shelf's and the Songs title's margin; the
+                    // header's own sat a few points further in on iPad.
+                    SectionTitle(Localized.albums)
+                        .pageRowInsets(top: Design.Spacing.s, bottom: Design.Spacing.s, isActive: isRegular)
+                }
+                .headerProminence(.increased)
+            }
+
+            if !tracks.isEmpty {
+                Section {
+                    // A row, not the pinned section header: see PlaylistDetailView.
+                    SectionTitle(title: Localized.songs) {
+                        Text(Localized.songsCount(tracks.count))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .songsTitleRow()
+                    ForEach(tracks, id: \.stableId) { track in
+                        HStack(spacing: 0) {
+                            if isBulkMode {
+                                TrackSelectionIndicator(
+                                    isSelected: selectedTracks.contains(track.stableId),
+                                    accentColor: settings.backgroundColorChoice.color,
+                                    onTap: { toggleSelection(track) }
+                                )
+                                .padding(.leading, Design.Spacing.s)
+                            }
+
+                            LiveTrackRow(
+                                track: track,
+                                artistName: nil,
+                                showsDuration: true,
+                                showsArtistLink: false,
+                                showsArtist: false,
+                                onEnterBulkMode: { beginSelection(with: track) },
+                                contextIdentity: rowContextIdentity
+                            ) {
+                                // While selecting, a tap toggles instead of playing.
+                                if isBulkMode {
+                                    toggleSelection(track)
+                                } else {
+                                    Task { await playerEngine.playTrack(track, queue: tracks) }
+                                }
+                            }
+                            .onLongPressGesture(minimumDuration: 0.5) {
+                                beginSelection(with: track)
+                            }
+                        }
+                        .songListRow(
+                            track,
+                            separatorLeading: (isBulkMode ? Design.Size.minTouch + Design.Spacing.s : 0)
+                                + Design.Spacing.l + Design.Size.rowArtwork + Design.Spacing.m,
+                            swipeActionsEnabled: !isBulkMode
+                        )
+                    }
                 }
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(ScreenSpecificBackgroundView(screen: .artistDetail))
+        // The photo runs up under the navigation bar, as it always has - on
+        // a phone. iPad's bar is two rows (tab bar, then title) and hid the
+        // top third of the photo, the face with it, under a white fade.
+        .ignoresSafeArea(.container, edges: hasRichHeader && !isRegular ? .top : [])
+        .navigationTitle(artist.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarTitleDisplayMode(.inline)
         .trackBulkActions(
             tracks: artistTracks,
             isBulkMode: $isBulkMode,
             selectedTracks: $selectedTracks
         )
         .onAppear {
+            loadLocalData()
             loadArtistData()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LibraryNeedsRefresh"))) { _ in
+            loadLocalData()
         }
         .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
             settings = DeleteSettings.load()
@@ -287,426 +303,330 @@ struct ArtistDetailScreen: View {
         }
     }
 
-    @ViewBuilder
-    private func richArtistView(_ unifiedArtist: UnifiedArtist) -> some View {
-        GeometryReader { geometry in
-            ScrollView {
-                VStack(spacing: 0) {
-                    headerSection(geometry: geometry)
-                    let tracks = artistTracks
-                    VStack(spacing: 20) {
-                        if !artistAlbums.isEmpty { albumsSection }
-                        if !tracks.isEmpty { songsSection(tracks) }
-                    }
-                    .padding(.top, 20)
-                    .padding(.bottom, 100) // Add padding for mini player
-                }
-            }
-        }
-        .ignoresSafeArea(.all, edges: .top)
+    private func beginSelection(with track: Track) {
+        guard !isBulkMode else { return }
+        isBulkMode = true
+        selectedTracks.insert(track.stableId)
     }
-    
-    @ViewBuilder
-    private var simpleView: some View {
-        ScrollView {
-            let tracks = artistTracks
-            VStack(spacing: 20) {
-                simpleHeader
-                if !artistAlbums.isEmpty { albumsSection }
-                if !tracks.isEmpty { songsSection(tracks) }
-            }
-            .padding(.bottom, 100) // Add padding for mini player
-        }
-    }
-    
-    // MARK: - Subsections
-    
-    @ViewBuilder
-    private func headerSection(geometry: GeometryProxy) -> some View {
-        let safeAreaTop = geometry.safeAreaInsets.top
-        let imageHeight: CGFloat = 300 + safeAreaTop
-        
-        VStack(spacing: 16) {
-            ZStack {
-                Rectangle()
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: geometry.size.width, height: imageHeight)
-                    .clipped()
-                    .overlay {
-                        if let image = artistImage {
-                            Image(uiImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: geometry.size.width, height: imageHeight)
-                                .clipped()
-                        } else {
-                            Image(systemName: "person.circle")
+
+    // MARK: - Headers
+
+    private func richHeader(_ unifiedArtist: UnifiedArtist) -> some View {
+        VStack(spacing: Design.Spacing.l) {
+            // iPad: taller, and cropped from the top. A screen-wide band
+            // 340 high showed a portrait photo's chest, the face cut off.
+            Color.clear
+                .frame(height: isRegular ? 420 : 340)
+                .overlay {
+                    if let artistImage {
+                        Image(uiImage: artistImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: isRegular ? .top : .center)
+                    } else {
+                        ZStack {
+                            theme.accent.opacity(0.18)
+                            Image(systemName: "music.microphone")
                                 .font(.system(size: 60))
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(theme.accent.opacity(0.6))
                         }
-                    }
-                    .overlay(
-                        LinearGradient(
-                            colors: [
-                                Color.clear,
-                                Color.clear,
-                                Color.black.opacity(0.3),
-                                Color.black.opacity(0.6)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                VStack {
-                    HStack {
-                        Spacer()
-                        if let unifiedArtist = unifiedArtist, unifiedArtist.source == .spotify {
-                            Image("SpotifyWhite")
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 21, height: 21)
-                                .padding(.top, 16)
-                                .padding(.trailing, 20)
-                        }
-                    }
-                    Spacer()
-                    HStack {
-                        Text(artist.name)
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                            .shadow(color: .black.opacity(0.8), radius: 2, x: 0, y: 1)
-                            .padding(.leading, 20)
-                            .padding(.bottom, 20)
-                        Spacer()
                     }
                 }
-            }
-            .overlay(
-                VStack {
-                    Spacer()
+                .clipped()
+                .overlay(
                     LinearGradient(
-                        colors: [
-                            Color.clear,
-                            Color(UIColor.systemBackground).opacity(0.3),
-                            Color(UIColor.systemBackground).opacity(0.7),
-                            Color(UIColor.systemBackground)
-                        ],
+                        colors: [.clear, .clear, .black.opacity(0.35), .black.opacity(0.7)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
-                    .frame(height: 20)
+                )
+                .overlay(alignment: .bottomLeading) {
+                    Text(artist.name)
+                        .font(.largeTitle.weight(.bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.6)
+                        .shadow(color: .black.opacity(0.5), radius: 4, y: 1)
+                        .padding(.horizontal, Design.Spacing.l + 4)
+                        .padding(.bottom, Design.Spacing.l)
+                        .accessibilityAddTraits(.isHeader)
                 }
-            )
-            .frame(maxWidth: .infinity)
-            
-            VStack(spacing: 16) {
-                if let unifiedArtist = unifiedArtist, !unifiedArtist.profile.isEmpty {
+                .overlay(alignment: .topTrailing) {
+                    if unifiedArtist.source == .spotify {
+                        Image("SpotifyWhite")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 21, height: 21)
+                            // Clear of the bar the photo runs under on a phone.
+                            .padding(.top, isRegular ? Design.Spacing.l : 60)
+                            .padding(.trailing, 20)
+                            .accessibilityLabel(Localized.dataProvidedBy("Spotify"))
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: Design.Spacing.l) {
+                // A photo credit alone still needs somewhere to be shown.
+                if !unifiedArtist.profile.isEmpty || unifiedArtist.imagePageURL != nil {
                     profileSection(unifiedArtist)
                 }
-                
-                playButtons
+
+                // The width they have on an album page; screen-wide on
+                // iPad they were two long bars.
+                PlayShuffleButtons(isDisabled: artistTracks.isEmpty, onPlay: playAll, onShuffle: shuffleAll)
+                    .frame(maxWidth: isRegular ? 380 : .infinity)
             }
-            .padding(.horizontal)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .pagePadding()
+            .padding(.bottom, Design.Spacing.s)
         }
     }
-    
-    @ViewBuilder
+
     private var simpleHeader: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: Design.Spacing.l) {
+            ArtistAvatar(name: artist.name, artworkTrack: loadedTracks.first)
+                .frame(width: 160, height: 160)
+                .shadow(color: .black.opacity(0.2), radius: 14, y: 8)
+                .overlay {
+                    if isLoading {
+                        ProgressView()
+                            .offset(y: 90)
+                    }
+                }
+
             Text(artist.name)
-                .font(.largeTitle)
-                .fontWeight(.bold)
+                .font(.title.weight(.bold))
                 .multilineTextAlignment(.center)
-                .padding(.horizontal)
-            if isLoading {
-                ProgressView("Fetching artist info...")
-            }
-            playButtons
+                .accessibilityAddTraits(.isHeader)
+
+            PlayShuffleButtons(isDisabled: artistTracks.isEmpty, onPlay: playAll, onShuffle: shuffleAll)
+                .frame(maxWidth: isRegular ? 380 : .infinity)
         }
-        .padding(.horizontal)
+        .frame(maxWidth: .infinity)
+        .pagePadding()
+        .padding(.vertical, Design.Spacing.l)
     }
-    
-    @ViewBuilder
+
     private func profileSection(_ unifiedArtist: UnifiedArtist) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if unifiedArtist.source == .spotify {
-                // Spotify content with attribution
-                Text(unifiedArtist.profile)
+        VStack(alignment: .leading, spacing: Design.Spacing.s) {
+            if !unifiedArtist.profile.isEmpty {
+                // Expanded, an on-device summary gives way to the full text
+                // it was made from.
+                Text(showFullProfile ? (unifiedArtist.fullBio ?? unifiedArtist.profile) : unifiedArtist.profile)
                     .font(.body)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(showFullProfile ? nil : 3)
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.3)) { showFullProfile.toggle() }
                     }
-                
-                if showFullProfile {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 4) {
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint(showFullProfile ? "" : Localized.seeAll)
+
+                // Wikipedia's licence asks for its text to be credited with a
+                // link, so the credit stays visible while the bio is collapsed.
+                bioCredit(unifiedArtist)
+            }
+
+            if showFullProfile || unifiedArtist.profile.isEmpty {
+                VStack(alignment: .leading, spacing: Design.Spacing.s) {
+                    if let photoCredit = photoCredit(unifiedArtist) {
+                        photoCredit
+                    }
+
+                    if unifiedArtist.source == .spotify {
+                        HStack(spacing: Design.Spacing.xs) {
                             Text(Localized.dataProvidedBy("Spotify"))
                                 .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            if let spotifyArtist = unifiedArtist.spotifyArtist,
-                               let spotifyURL = spotifyArtist.externalUrls.spotify {
-                                Button(Localized.openSpotify) {
-                                    if let url = URL(string: spotifyURL) {
-#if os(macOS)
-                                        NSWorkspace.shared.open(url)
-#else
-                                        UIApplication.shared.open(url)
-#endif
-                                    }
-                                }
-                                .font(.caption)
-                                .foregroundColor(settings.backgroundColorChoice.color)
+                                .foregroundStyle(.secondary)
+
+                            if let spotifyURL = unifiedArtist.spotifyURL ?? unifiedArtist.spotifyArtist?.externalUrls.spotify,
+                               let url = URL(string: spotifyURL) {
+                                Link(Localized.openSpotify, destination: url)
+                                    .font(.caption)
+                                    .foregroundStyle(theme.accent)
                             }
-                        }
-                        
-                        // Show "Wrong artist?" button in expanded profile
-                        Button(action: {
-                            Task {
-                                await searchAlternativeArtistAutomatically()
-                            }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "questionmark.circle")
-                                Text(Localized.wrongArtist)
-                            }
-                            .font(.caption)
-                            .foregroundColor(.orange)
                         }
                     }
-                    .padding(.top, 4)
+
+                    // Show "Wrong artist?" button in expanded profile
+                    Button {
+                        Task {
+                            await searchAlternativeArtistAutomatically()
+                        }
+                    } label: {
+                        Label(Localized.wrongArtist, systemImage: "questionmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    .buttonStyle(.plain)
                 }
-            } else {
-                // Discogs or other source content
-                Text(unifiedArtist.profile)
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .lineLimit(showFullProfile ? nil : 3)
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.3)) { showFullProfile.toggle() }
-                    }
-                
-                if showFullProfile {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(Localized.dataProvidedBy(unifiedArtist.source.rawValue.capitalized))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        // Show "Wrong artist?" button in expanded profile
-                        Button(action: {
-                            Task {
-                                await searchAlternativeArtistAutomatically()
-                            }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "questionmark.circle")
-                                Text(Localized.wrongArtist)
-                            }
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                        }
-                    }
-                    .padding(.top, 4)
+                .padding(.top, Design.Spacing.xs)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bioCredit(_ unifiedArtist: UnifiedArtist) -> some View {
+        // Spotify's sentence is credited with its logo and "Data provided by".
+        if let source = unifiedArtist.bioSource, source != .spotify {
+            HStack(spacing: Design.Spacing.xs) {
+                let label = String(format: Localized.artistInfoSource, source.displayName)
+                if let page = unifiedArtist.bioURL, let url = URL(string: page) {
+                    Link(label, destination: url)
+                        .font(.caption)
+                        .foregroundStyle(theme.accent)
+                } else {
+                    Text(label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if unifiedArtist.bioIsSummarized {
+                    Text("· \(Localized.artistBioSummarized)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
     }
-    
-    private var playButtons: some View {
-        HStack(spacing: 20) {
-            Button {
-                // Bound to a local because resolving artistTracks costs a
-                // database query.
-                let queue = artistTracks
-                guard let first = queue.first else { return }
-                Task { await playerEngine.playTrack(first, queue: queue) }
-            } label: {
-                HStack { Image(systemName: "play.fill"); Text(Localized.play).lineLimit(1).minimumScaleFactor(0.6) }
-                    .font(.title3).fontWeight(.semibold)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 50)
-                    .background(settings.backgroundColorChoice.color)
-                    .cornerRadius(25)
-            }
-            Button {
-                let shuffled = artistTracks.shuffled()
-                guard let first = shuffled.first else { return }
-                Task { await playerEngine.playTrack(first, queue: shuffled) }
-            } label: {
-                HStack { Image(systemName: "shuffle"); Text(Localized.shuffle).lineLimit(1).minimumScaleFactor(0.6) }
-                    .font(.title3).fontWeight(.semibold)
-                    .foregroundColor(settings.backgroundColorChoice.color)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 50)
-                    .background(settings.backgroundColorChoice.color.opacity(0.1))
-                    .cornerRadius(25)
-            }
-        }
+
+    /// Commons photos are CC BY-SA too; the credit links the file page,
+    /// which names the photographer and licence.
+    private func photoCredit(_ unifiedArtist: UnifiedArtist) -> AnyView? {
+        guard let source = unifiedArtist.imageSource, source != .spotify,
+              let page = unifiedArtist.imagePageURL, let url = URL(string: page) else { return nil }
+        let name = source == .wikipedia ? "Wikimedia Commons" : source.displayName
+        return AnyView(
+            Link(String(format: Localized.artistPhotoSource, name), destination: url)
+                .font(.caption)
+                .foregroundStyle(theme.accent)
+        )
     }
-    
-    private func songsSection(_ tracks: [Track]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(Localized.songs).font(.title3).fontWeight(.bold)
-                Spacer()
-                Text(Localized.songsCount(tracks.count))
-                    .font(.body).foregroundColor(.secondary)
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 12)
-            LazyVStack(spacing: 0) {
-                ForEach(tracks.indices, id: \.self) { index in
-                    let track = tracks[index]
-                    HStack(spacing: 12) {
-                        if isBulkMode {
-                            TrackSelectionIndicator(
-                                isSelected: selectedTracks.contains(track.stableId),
-                                accentColor: settings.backgroundColorChoice.color,
-                                onTap: { toggleSelection(track) }
+
+    private var albumsShelf: some View {
+        ShelfScrollView {
+            LazyHStack(alignment: .top, spacing: Design.Spacing.l) {
+                ForEach(artistAlbums, id: \.id) { album in
+                    if let albumId = album.id {
+                        NavigationLink(value: LibraryRoute.album(id: albumId)) {
+                            AlbumTileView(
+                                album: album,
+                                artworkTrack: artworkTrackByAlbum[albumId],
+                                subtitle: album.year.flatMap { $0 > 0 ? String($0) : nil }
                             )
-                            .padding(.leading)
+                            // Home's shelf size on iPad.
+                            .frame(width: isRegular ? 180 : 140)
                         }
-
-                        ArtistTrackRowView(track: track) {
-                            // While selecting, a tap toggles instead of playing.
-                            if isBulkMode {
-                                toggleSelection(track)
-                            } else {
-                                Task { await playerEngine.playTrack(track, queue: tracks) }
-                            }
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .onLongPressGesture(minimumDuration: 0.5) {
-                        guard !isBulkMode else { return }
-                        isBulkMode = true
-                        selectedTracks.insert(track.stableId)
-                    }
-
-                    if index < tracks.count - 1 {
-                        Divider().padding(.leading, 20)
+                        .buttonStyle(.plain)
                     }
                 }
             }
+            .pagePadding()
+            .padding(.vertical, Design.Spacing.xs)
         }
+        .clipsShelfSides()
     }
-    
-    private var albumsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(Localized.albums).font(.title3).fontWeight(.bold)
-                Spacer()
-                Text(Localized.albumsCount(artistAlbums.count))
-                    .font(.body).foregroundColor(.secondary)
-            }
-            .padding(.horizontal)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(artistAlbums, id: \.id) { album in
-                        NavigationLink {
-                            AlbumDetailScreen(album: album, allTracks: allTracks)
-                        } label: {
-                            ArtistAlbumCardView(album: album, tracks: allTracks)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-                }
-                .padding(.horizontal)
-            }
-        }
+
+    // MARK: - Actions
+
+    private func playAll() {
+        let queue = artistTracks
+        guard let first = queue.first else { return }
+        Task { await playerEngine.playTrack(first, queue: queue) }
     }
-    
+
+    private func shuffleAll() {
+        let shuffled = artistTracks.shuffled()
+        guard let first = shuffled.first else { return }
+        Task { await playerEngine.playTrack(first, queue: shuffled) }
+    }
+
     // MARK: - Data Loading
+
+    private func loadLocalData() {
+        let signpost = Perf.begin("Artist page load")
+        defer { Perf.end("Artist page load", signpost) }
+        if let artistId = artist.id,
+           let databaseTracks = try? appCoordinator.databaseManager.getTracksByArtistId(artistId) {
+            loadedTracks = databaseTracks
+        } else {
+            loadedTracks = allTracks.filter { $0.artistId == artist.id }
+        }
+
+        guard let artistId = artist.id else {
+            artistAlbums = []
+            return
+        }
+        artistAlbums = (try? appCoordinator.databaseManager.getAlbumsByArtistId(artistId)) ?? []
+
+        // Album covers come from the album's own songs, which on a
+        // compilation need not be by this artist.
+        var index: [Int64: Track] = [:]
+        for album in artistAlbums {
+            guard let albumId = album.id else { continue }
+            if let track = loadedTracks.first(where: { $0.albumId == albumId })
+                ?? (try? appCoordinator.databaseManager.getTracksByAlbumId(albumId))?.first {
+                index[albumId] = track
+            }
+        }
+        artworkTrackByAlbum = index
+    }
+
     private func loadArtistData() {
         guard unifiedArtist == nil && !isLoading else { return }
         isLoading = true
         Task { @MainActor in
             do {
-                let fetchedArtist = try await HybridMusicAPIService.shared.searchArtist(name: artist.name)
+                // The library's album titles tell namesakes apart.
+                let albumHints = artistAlbums.map(\.title)
+                let fetchedArtist = try await HybridMusicAPIService.shared.searchArtist(name: artist.name, albumHints: albumHints)
                 self.unifiedArtist = fetchedArtist
                 self.isLoading = false
-                if let fetchedArtist = fetchedArtist { await loadArtistImage(from: fetchedArtist.images) }
+                if let fetchedArtist = fetchedArtist {
+                    await loadArtistImage(from: fetchedArtist.images)
+                    await refineArtistData(fetchedArtist, albumHints: albumHints)
+                }
             } catch {
                 self.isLoading = false
                 print("❌ Failed to load artist data: \(error)")
             }
         }
     }
-    
-    private func searchAlternativeArtist() async {
-        isLoading = true
-        
-        Task { @MainActor in
-            do {
-                let currentSource = unifiedArtist?.source
-                let fetchedArtist = try await HybridMusicAPIService.shared.searchAlternativeArtist(name: artist.name, currentSource: currentSource)
-                
-                if let fetchedArtist = fetchedArtist {
-                    self.unifiedArtist = fetchedArtist
-                    self.artistImage = nil // Clear old image
-                    await loadArtistImage(from: fetchedArtist.images)
-                    print("✅ Found alternative artist: \(fetchedArtist.name) from \(fetchedArtist.source.rawValue)")
-                } else {
-                    print("❌ No alternative artist found")
-                }
-                
-                self.isLoading = false
-            } catch {
-                self.isLoading = false
-                print("❌ Failed to find alternative artist: \(error)")
-            }
+
+    /// With Apple Intelligence, a second look that may settle namesakes or
+    /// shorten the bio. The page already shows the result above, so this
+    /// only ever replaces it in place, and does nothing without the model.
+    private func refineArtistData(_ current: UnifiedArtist, albumHints: [String]) async {
+        guard let refined = await HybridMusicAPIService.shared.refineWithOnDeviceModel(
+            name: artist.name, artist: current, albumHints: albumHints, userInitiated: true
+        ) else { return }
+        // "Wrong artist?" may have replaced the artist in the meantime.
+        guard unifiedArtist?.id == current.id, unifiedArtist?.musicBrainzID == current.musicBrainzID else { return }
+        let photoChanged = refined.images.first?.url != current.images.first?.url
+        withAnimation(.easeInOut(duration: 0.3)) { unifiedArtist = refined }
+        if photoChanged {
+            artistImage = nil
+            await loadArtistImage(from: refined.images)
         }
     }
-    
-    private func searchSimilarArtist() async {
-        isLoading = true
-        hasTriedAlternatives = true
-        
-        Task { @MainActor in
-            do {
-                let currentSource = unifiedArtist?.source
-                let fetchedArtist = try await HybridMusicAPIService.shared.searchSimilarArtist(originalName: artist.name, currentSource: currentSource)
-                
-                if let fetchedArtist = fetchedArtist {
-                    self.unifiedArtist = fetchedArtist
-                    self.artistImage = nil // Clear old image
-                    await loadArtistImage(from: fetchedArtist.images)
-                    print("✅ Found similar artist: \(fetchedArtist.name) from \(fetchedArtist.source.rawValue)")
-                } else {
-                    print("❌ No similar artist found")
-                }
-                
-                self.isLoading = false
-            } catch {
-                self.isLoading = false
-                print("❌ Failed to find similar artist: \(error)")
-            }
-        }
-    }
-    
+
     private func searchAlternativeArtistAutomatically() async {
         isLoading = true
-        
+
         Task { @MainActor in
             do {
-                let currentSource = unifiedArtist?.source
-                
+                let current = unifiedArtist
+                let albumHints = artistAlbums.map(\.title)
+
                 // First try different source with same name
                 print("🔄 Trying different source for: \(artist.name)")
-                var fetchedArtist = try await HybridMusicAPIService.shared.searchAlternativeArtist(name: artist.name, currentSource: currentSource)
-                
+                var fetchedArtist = try await HybridMusicAPIService.shared.searchAlternativeArtist(name: artist.name, current: current, albumHints: albumHints)
+
                 // If that fails, try similar names with different sources
                 if fetchedArtist == nil {
                     print("🔄 Trying similar names for: \(artist.name)")
-                    fetchedArtist = try await HybridMusicAPIService.shared.searchSimilarArtist(originalName: artist.name, currentSource: currentSource)
+                    fetchedArtist = try await HybridMusicAPIService.shared.searchSimilarArtist(originalName: artist.name, current: current)
                 }
-                
+
                 if let fetchedArtist = fetchedArtist {
                     self.unifiedArtist = fetchedArtist
                     self.artistImage = nil // Clear old image
@@ -715,7 +635,7 @@ struct ArtistDetailScreen: View {
                 } else {
                     print("❌ No alternative artist found with different source or similar names")
                 }
-                
+
                 self.isLoading = false
             } catch {
                 self.isLoading = false
@@ -723,7 +643,7 @@ struct ArtistDetailScreen: View {
             }
         }
     }
-    
+
     private func loadArtistImage(from images: [UnifiedImage]) async {
         let sortedImages = images.sorted { a, b in
             let aSize = (a.width ?? 0) * (a.height ?? 0)
@@ -735,250 +655,11 @@ struct ArtistDetailScreen: View {
             let (data, _) = try await URLSession.shared.data(from: url)
             if let img = UIImage(data: data) {
                 await MainActor.run { self.artistImage = img }
+                // So Search and the lists show the same photo.
+                await ArtistPhotoStore.shared.store(data, for: artist.name)
             }
         } catch {
             print("❌ Failed to load artist image: \(error)")
-        }
-    }
-}
-
-struct ArtistTrackRowView: View {
-    let track: Track
-    let onTap: () -> Void
-    @EnvironmentObject private var appCoordinator: AppCoordinator
-    @State private var isFavorite = false
-    @State private var showPlaylistDialog = false
-    @State private var showDeleteConfirmation = false
-    @State private var deleteSettings = DeleteSettings.load()
-    @State private var artworkImage: UIImage?
-    @State private var isPressed = false
-    @State private var isMenuInteracting = false
-    
-    var body: some View {
-        HStack {
-            // Album artwork thumbnail
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: 60, height: 60)
-                
-                if let image = artworkImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 60, height: 60)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else {
-                    Image(systemName: "music.note")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                }
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text(track.title)
-                    .font(.title3)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-                
-                if let duration = track.durationMs {
-                    Text(formatDuration(duration))
-                        .font(.body)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            
-            Spacer()
-            
-            Menu {
-                    Button(action: {
-                        do {
-                            try appCoordinator.toggleFavorite(trackStableId: track.stableId)
-                            isFavorite.toggle()
-                        } catch {
-                            print("Failed to toggle favorite: \(error)")
-                        }
-                    }) {
-                        HStack {
-                            Image(systemName: isFavorite ? "heart.slash" : "heart")
-                                .foregroundColor(isFavorite ? .red : .primary)
-                            Text(isFavorite ? Localized.removeFromLikedSongs : Localized.addToLikedSongs)
-                                .foregroundColor(.primary)
-                        }
-                    }
-                    
-                    if let artistId = track.artistId,
-                       let artist = try? DatabaseManager.shared.read({ db in
-                           try Artist.fetchOne(db, key: artistId)
-                       }),
-                       let allArtistTracks = try? DatabaseManager.shared.getTracksByArtistId(artistId) {
-                        NavigationLink(destination: ArtistDetailScreen(artist: artist, allTracks: allArtistTracks)) {
-                            Label(Localized.showArtistPage, systemImage: "person.circle")
-                        }
-                    }
-                    
-                    Button(action: {
-                        showPlaylistDialog = true
-                    }) {
-                        Label(Localized.addToPlaylistEllipsis, systemImage: "rectangle.stack.badge.plus")
-                    }
-                    
-                    Button(action: {
-                        showDeleteConfirmation = true
-                    }) {
-                        Label(Localized.deleteFile, systemImage: "trash")
-                    }
-                    .foregroundColor(.red)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .foregroundColor(.secondary)
-                    .frame(width: 30, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(PlainButtonStyle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        isMenuInteracting = true
-                    }
-                    .onEnded { _ in
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            isMenuInteracting = false
-                        }
-                    }
-            )
-        }
-        .frame(height: 80)
-        .padding(.horizontal, 12)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if !isMenuInteracting {
-                withAnimation(.easeOut(duration: 0.1)) {
-                    isPressed = true
-                }
-                onTap()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-                    withAnimation(.easeOut(duration: 0.08)) {
-                        isPressed = false
-                    }
-                }
-            }
-        }
-        .onAppear {
-            checkFavoriteStatus()
-            loadArtwork()
-        }
-        .sheet(isPresented: $showPlaylistDialog) {
-            PlaylistSelectionView(track: track)
-                .accentColor(deleteSettings.backgroundColorChoice.color)
-        }
-        .alert(Localized.deleteFile, isPresented: $showDeleteConfirmation) {
-            Button(Localized.delete, role: .destructive) {
-                deleteFile()
-            }
-            Button(Localized.cancel, role: .cancel) { }
-        } message: {
-            Text(Localized.deleteFileConfirmation(track.title))
-        }
-        .reloadsArtwork(for: track.stableId) { loadArtwork() }
-    }
-    
-    private func checkFavoriteStatus() {
-        do {
-            isFavorite = try DatabaseManager.shared.isFavorite(trackStableId: track.stableId)
-        } catch {
-            print("Failed to check favorite status: \(error)")
-        }
-    }
-    
-    private func loadArtwork() {
-        Task {
-            artworkImage = await ArtworkManager.shared.getThumbnail(for: track)
-        }
-    }
-    
-    private func formatDuration(_ milliseconds: Int) -> String {
-        let seconds = milliseconds / 1000
-        let minutes = seconds / 60
-        let remainingSeconds = seconds % 60
-        return String(format: "%d:%02d", minutes, remainingSeconds)
-    }
-    
-    private func deleteFile() {
-        Task {
-            do {
-                let settings = DeleteSettings.load()
-                if settings.deleteFromLibraryOnly {
-                    DeleteSettings.addExcludedTrack(track.stableId, path: track.path, modificationDate: track.modificationDate)
-                } else {
-                    do {
-                        try FileManager.default.removeItem(at: URL(fileURLWithPath: track.path))
-                    } catch {
-                        print("⚠️ Could not remove file from disk: \(error.localizedDescription)")
-                    }
-                }
-
-                try await DatabaseManager.shared.deleteTrack(byStableId: track.stableId)
-                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
-            } catch {
-                print("❌ Failed to delete track: \(error)")
-            }
-        }
-    }
-}
-
-struct ArtistAlbumCardView: View {
-    let album: Album
-    let tracks: [Track]
-    @State private var artworkImage: UIImage?
-    
-    private var albumTracks: [Track] {
-        tracks.filter { $0.albumId == album.id }
-    }
-    
-    var body: some View {
-        VStack(spacing: 8) {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.gray.opacity(0.2))
-                .frame(width: 120, height: 120)
-                .overlay {
-                    if let image = artworkImage {
-                        Image(uiImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 120, height: 120)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    } else {
-                        Image(systemName: "music.note")
-                            .font(.title2)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            
-            Text(album.title)
-                .font(.caption)
-                .fontWeight(.medium)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(width: 120)
-                .frame(minHeight: 32) // Min height for 2 lines alignment
-                .foregroundColor(.primary)
-        }
-        .onAppear {
-            loadAlbumArtwork()
-        }
-        .reloadsArtwork(for: albumTracks.first?.stableId) { loadAlbumArtwork() }
-    }
-    
-    private func loadAlbumArtwork() {
-        guard let firstTrack = albumTracks.first else { return }
-
-        Task {
-            let image = await ArtworkManager.shared.getThumbnail(for: firstTrack, maxPixelSize: 384)
-            await MainActor.run {
-                self.artworkImage = image
-            }
         }
     }
 }

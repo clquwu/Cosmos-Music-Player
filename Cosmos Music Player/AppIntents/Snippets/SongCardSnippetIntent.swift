@@ -33,12 +33,25 @@ struct SongCardSnippetIntent: SnippetIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ShowsSnippetView {
-        guard let track = try playback.tracks(forStableIds: [trackStableId]).first,
-              let song = try store.songEntities(from: [track]).first else {
-            throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
+        let track: Track
+        let song: SongEntity
+        let isLiked: Bool
+        do {
+            guard let foundTrack = try playback.tracks(forStableIds: [trackStableId]).first,
+                  let foundSong = try store.songEntities(from: [foundTrack]).first else {
+                throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
+            }
+            track = foundTrack
+            song = foundSong
+            isLiked = (try? playback.isFavorite(trackStableId: track.stableId)) ?? false
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "SongCardSnippetIntent")
         }
-        let isLiked = try playback.isFavorite(trackStableId: track.stableId)
-        let artwork = await ArtworkManager.shared.getThumbnail(for: track, maxPixelSize: 256)
+        // The card renders inside Siri's response; never let a cover that
+        // is still downloading from iCloud hold it up.
+        let artwork = await IntentRuntime.withDeadline(1.5) {
+            await ArtworkManager.shared.getThumbnail(for: track, maxPixelSize: 256)
+        } ?? nil
 
         return .result(view: SongCardSnippetView(
             trackStableId: track.stableId,

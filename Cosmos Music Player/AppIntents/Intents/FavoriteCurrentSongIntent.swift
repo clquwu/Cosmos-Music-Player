@@ -23,22 +23,31 @@ struct FavoriteCurrentSongIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        guard let track = playback.currentTrack else {
-            throw FavoriteCurrentSongError.nothingPlaying
-        }
+        IntentRuntime.begin("FavoriteCurrentSongIntent")
+        defer { IntentRuntime.end("FavoriteCurrentSongIntent") }
+        do {
+            // A cold launch has no current track until the saved session is
+            // back; "this song" means the one the person last listened to.
+            await IntentRuntime.restoreSavedSessionIfNeeded()
+            guard let track = playback.currentTrack else {
+                throw FavoriteCurrentSongError.nothingPlaying
+            }
 
-        SiriDiag.log("APP FavoriteCurrentSongIntent.perform track=\(track.title)")
+            SiriDiag.log("APP FavoriteCurrentSongIntent.perform track=\(track.title)")
 
-        if try playback.isFavorite(trackStableId: track.stableId) {
+            if try playback.isFavorite(trackStableId: track.stableId) {
+                return .result(dialog: IntentDialog(
+                    "\(track.title) is already in your Liked Songs."
+                ))
+            }
+
+            try playback.setFavorite(trackStableId: track.stableId, isFavorite: true)
             return .result(dialog: IntentDialog(
-                "\(track.title) is already in your Liked Songs."
+                "Added \(track.title) to your Liked Songs."
             ))
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "FavoriteCurrentSongIntent")
         }
-
-        try playback.setFavorite(trackStableId: track.stableId, isFavorite: true)
-        return .result(dialog: IntentDialog(
-            "Added \(track.title) to your Liked Songs."
-        ))
     }
 }
 

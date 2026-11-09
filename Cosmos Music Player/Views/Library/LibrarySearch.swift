@@ -133,36 +133,17 @@ extension View {
 
 /// The magnifying glass that opens a screen's search field.
 ///
-/// Deliberately a view rather than something `librarySearchField` adds on its
-/// own: the navigation bar spreads separate `ToolbarItem`s apart and tints them
-/// independently, so a button added that way sat away from each screen's sort,
-/// shuffle and overflow controls and did not match them. Placed *inside* a
-/// screen's existing trailing item - the same `HStack(spacing: 0)` those
-/// controls already share - it reads as one group with them.
-///
-/// The styling below is the one these bars already use: `.title3`, the chosen
-/// accent, and 4pt of padding for the hit area.
+/// A plain toolbar button: placed in a screen's `ToolbarItemGroup` it sits in
+/// the same group as that screen's sort, shuffle and overflow controls, takes
+/// the app's tint from the root, and gets the system's touch target.
 struct LibrarySearchButton: View {
     @ObservedObject var state: LibrarySearchState
-    @State private var settings = DeleteSettings.load()
 
     var body: some View {
         Button {
             state.isPresented = true
         } label: {
-            Image(systemName: "magnifyingglass")
-                .font(.title3)
-                .foregroundColor(settings.backgroundColorChoice.color)
-                .padding(4)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Localized.search)
-        .onReceive(NotificationCenter.default.publisher(for: .cosmosSettingsDidChange)) { _ in
-            settings = DeleteSettings.load()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("BackgroundColorChanged"))) { _ in
-            settings = DeleteSettings.load()
+            Label(Localized.search, systemImage: "magnifyingglass")
         }
     }
 }

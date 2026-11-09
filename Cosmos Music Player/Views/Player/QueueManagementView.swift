@@ -23,87 +23,26 @@ struct QueueManagementView: View {
         return rows[playerEngine.currentIndex].rowId
     }
 
+    /// Shown inside the player, which supplies the title and background.
+    var isEmbedded: Bool = false
+
     var body: some View {
-        NavigationView {
-            ZStack {
-                ScreenSpecificBackgroundView(screen: .player)
-
-                VStack(spacing: 20) {
-                    // Header
-                    HStack {
-                        Button(Localized.done) {
-                            dismiss()
-                        }
-                        .font(.headline)
-                        .frame(minWidth: 64, alignment: .leading)
-
-                        Spacer()
-
-                        Text(Localized.playingQueue)
-                            .font(.title2)
-                            .fontWeight(.semibold)
-
-                        Spacer()
-
-                        // Empty counterweight so the title stays centred
-                        // against the leading Done button.
-                        Color.clear.frame(width: 64, height: 0)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 10)
-                    
-                    if playerEngine.playbackQueue.isEmpty {
-                        VStack(spacing: 16) {
-                            Image(systemName: "music.note.list")
-                                .font(.system(size: 60))
-                                .foregroundColor(.secondary)
-                            
-                            Text(Localized.noSongsInQueue)
-                                .font(.headline)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        ScrollViewReader { proxy in
-                            List {
-                                ForEach(queueRows, id: \.rowId) { row in
-                                    let index = row.index
-                                    let track = row.track
-                                    QueueTrackRow(
-                                        track: track,
-                                        index: index,
-                                        isCurrentTrack: index == playerEngine.currentIndex,
-                                        isDragging: draggedTrack?.stableId == track.stableId,
-                                        artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
-                                        onTap: {
-                                            jumpToTrack(at: index)
-                                        }
-                                    )
-                                    .listRowBackground(Color.clear)
-                                    .listRowSeparator(.hidden)
-                                    .listRowInsets(EdgeInsets())
+        Group {
+            if isEmbedded {
+                queueContent
+            } else {
+                NavigationStack {
+                    queueContent
+                        .background(ScreenSpecificBackgroundView(screen: .player))
+                        .navigationTitle(Localized.playingQueue)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button(Localized.done) {
+                                    dismiss()
                                 }
-                                .onMove(perform: moveItems)
-                                .onDelete(perform: deleteItems)
-                            }
-                            .listStyle(PlainListStyle())
-                            .scrollContentBackground(.hidden)
-                            .padding(.horizontal, 16)
-                            .task {
-                                // Open on the song that is playing rather than
-                                // at the top - after an hour of listening the
-                                // current track is hundreds of rows down. The
-                                // list has to lay out before it can resolve an
-                                // off-screen row id, and the sheet is still
-                                // animating in on the first frames, hence the
-                                // short wait.
-                                guard !hasScrolledToCurrent else { return }
-                                hasScrolledToCurrent = true
-                                try? await Task.sleep(for: .milliseconds(150))
-                                scrollToCurrentTrack(with: proxy)
                             }
                         }
-                    }
                 }
             }
         }
@@ -115,6 +54,51 @@ struct QueueManagementView: View {
         }
         .onAppear {
             loadArtistNameCache()
+        }
+    }
+
+    @ViewBuilder
+    private var queueContent: some View {
+        if playerEngine.playbackQueue.isEmpty {
+            CosmosEmptyState(systemImage: "music.note.list", title: Localized.noSongsInQueue)
+        } else {
+            ScrollViewReader { proxy in
+                List {
+                    ForEach(queueRows, id: \.rowId) { row in
+                        let index = row.index
+                        let track = row.track
+                        QueueTrackRow(
+                            track: track,
+                            index: index,
+                            isCurrentTrack: index == playerEngine.currentIndex,
+                            isDragging: draggedTrack?.stableId == track.stableId,
+                            artistName: (try? DatabaseManager.shared.getArtistDisplayName(forTrackStableId: track.stableId, fallbackArtistId: track.artistId)) ?? track.artistId.flatMap { artistNameCache[$0] },
+                            onTap: {
+                                jumpToTrack(at: index)
+                            }
+                        )
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets())
+                    }
+                    .onMove(perform: moveItems)
+                    .onDelete(perform: deleteItems)
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, isEmbedded ? Design.Spacing.s : Design.Spacing.l)
+                .task {
+                    // Open on the song that is playing rather than at the
+                    // top - after an hour of listening the current track is
+                    // hundreds of rows down. The list has to lay out before it
+                    // can resolve an off-screen row id, and the panel is still
+                    // animating in on the first frames, hence the short wait.
+                    guard !hasScrolledToCurrent else { return }
+                    hasScrolledToCurrent = true
+                    try? await Task.sleep(for: .milliseconds(150))
+                    scrollToCurrentTrack(with: proxy)
+                }
+            }
         }
     }
 
@@ -212,23 +196,8 @@ struct QueueTrackRow: View {
     var body: some View {
         HStack(spacing: 12) {
             // Album artwork
-            ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: 50, height: 50)
-                
-                if let image = artworkImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 50, height: 50)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                } else {
-                    Image(systemName: "music.note")
-                        .font(.title3)
-                        .foregroundColor(.secondary)
-                }
-            }
+            ArtworkView(image: artworkImage, cornerRadius: Design.Radius.thumbnail)
+                .frame(width: 48, height: 48)
             
             // Track info
             VStack(alignment: .leading, spacing: 2) {
@@ -236,20 +205,23 @@ struct QueueTrackRow: View {
                     Text(track.title)
                         .font(.headline)
                         .fontWeight(isCurrentTrack ? .bold : .medium)
-                        .foregroundColor(isCurrentTrack ? settings.backgroundColorChoice.color : .primary)
+                        .foregroundColor(.primary)
                         .lineLimit(1)
                     
                     if isCurrentTrack {
                         Image(systemName: "speaker.wave.2.fill")
                             .font(.caption)
-                            .foregroundColor(settings.backgroundColorChoice.color)
+                            .foregroundColor(.primary)
+                            .accessibilityHidden(true)
                     }
                 }
                 
                 if let artistName, !artistName.isEmpty {
                     Text(artistName)
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        // Not .secondary (about 0.6): the player's shade on
+                        // light covers is worked out for this opacity.
+                        .foregroundColor(.primary.opacity(PlayerPalette.secondaryTextOpacity))
                         .lineLimit(1)
                 }
             }
@@ -259,14 +231,19 @@ struct QueueTrackRow: View {
             // Drag indicator only
             Image(systemName: "line.3.horizontal")
                 .font(.caption)
-                .foregroundColor(.secondary.opacity(0.6))
+                .foregroundColor(.primary.opacity(0.5))
+                .accessibilityHidden(true)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
+        .frame(minHeight: 60)
         .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(isCurrentTrack ? settings.backgroundColorChoice.color.opacity(0.15) : Color.clear)
+            RoundedRectangle(cornerRadius: Design.Radius.artwork, style: .continuous)
+                .fill(isCurrentTrack ? Color.primary.opacity(0.12) : Color.clear)
         )
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(isCurrentTrack ? Localized.nowPlaying : "")
+        .accessibilityAddTraits(.isButton)
         .opacity(isDragging ? 0.8 : 1.0)
         .scaleEffect(isDragging ? 1.05 : 1.0)
         .animation(.easeInOut(duration: 0.2), value: isDragging)

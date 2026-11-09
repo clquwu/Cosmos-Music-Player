@@ -20,3 +20,38 @@
 "Make me a mix in ${applicationName}" = "Make me a mix in ${applicationName}";
 "Generate a mix in ${applicationName}" = "Generate a mix in ${applicationName}";
 "Play me something new in ${applicationName}" = "Play me something new in ${applicationName}";
+
+"Play my liked songs in ${applicationName}" = "Play my liked songs in ${applicationName}";
+"Play my favorites in ${applicationName}" = "Play my favorites in ${applicationName}";
+"Play my favourite songs in ${applicationName}" = "Play my favourite songs in ${applicationName}";
+"Shuffle my liked songs in ${applicationName}" = "Shuffle my liked songs in ${applicationName}";
+
+/* Voice coverage pass: mixes, song radio, player commands, sleep timer, shuffle, add to playlist */
+"Play my loved songs in ${applicationName}" = "Play my loved songs in ${applicationName}";
+"Play the songs I like in ${applicationName}" = "Play the songs I like in ${applicationName}";
+"Play ${mix} in ${applicationName}" = "Play ${mix} in ${applicationName}";
+"Play the ${mix} mix in ${applicationName}" = "Play the ${mix} mix in ${applicationName}";
+"Play my mix ${mix} in ${applicationName}" = "Play my mix ${mix} in ${applicationName}";
+"Play a mix made for me in ${applicationName}" = "Play a mix made for me in ${applicationName}";
+"Play my mixes in ${applicationName}" = "Play my mixes in ${applicationName}";
+"Play a mix like this song in ${applicationName}" = "Play a mix like this song in ${applicationName}";
+"Play more like this in ${applicationName}" = "Play more like this in ${applicationName}";
+"Start a radio from this song in ${applicationName}" = "Start a radio from this song in ${applicationName}";
+"Play similar songs in ${applicationName}" = "Play similar songs in ${applicationName}";
+"Play songs like this one in ${applicationName}" = "Play songs like this one in ${applicationName}";
+"${command} in ${applicationName}" = "${command} in ${applicationName}";
+"${command} on ${applicationName}" = "${command} on ${applicationName}";
+"${applicationName} ${command}" = "${applicationName} ${command}";
+"Set a sleep timer in ${applicationName}" = "Set a sleep timer in ${applicationName}";
+"Set a sleep timer for ${duration} in ${applicationName}" = "Set a sleep timer for ${duration} in ${applicationName}";
+"Stop the music in ${duration} with ${applicationName}" = "Stop the music in ${duration} with ${applicationName}";
+"Sleep timer ${duration} in ${applicationName}" = "Sleep timer ${duration} in ${applicationName}";
+"Shuffle my music in ${applicationName}" = "Shuffle my music in ${applicationName}";
+"Shuffle my library in ${applicationName}" = "Shuffle my library in ${applicationName}";
+"Shuffle all my songs in ${applicationName}" = "Shuffle all my songs in ${applicationName}";
+"Shuffle ${artist} in ${applicationName}" = "Shuffle ${artist} in ${applicationName}";
+"Play ${artist} shuffled in ${applicationName}" = "Play ${artist} shuffled in ${applicationName}";
+"Shuffle songs by ${artist} in ${applicationName}" = "Shuffle songs by ${artist} in ${applicationName}";
+"Add this song to ${playlist} in ${applicationName}" = "Add this song to ${playlist} in ${applicationName}";
+"Add this song to my ${playlist} playlist in ${applicationName}" = "Add this song to my ${playlist} playlist in ${applicationName}";
+"Add the current song to ${playlist} in ${applicationName}" = "Add the current song to ${playlist} in ${applicationName}";

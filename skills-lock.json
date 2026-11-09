@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "app-ui-design": {
+      "source": "majiayu000/claude-arsenal",
+      "sourceType": "github",
+      "skillPath": "skills/app-ui-design/SKILL.md",
+      "computedHash": "ae4f711bfa8461c43f64bc2db31266fdf8d0585d20f23f42ee3e18b3eee41d5b"
+    }
+  }
+}

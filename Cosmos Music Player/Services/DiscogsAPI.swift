@@ -188,6 +188,37 @@ class DiscogsAPIService: ObservableObject, @unchecked Sendable {
         return artist
     }
     
+    /// An artist by Discogs id, as MusicBrainz links it. Going by id avoids
+    /// a name search picking a namesake.
+    func artist(id: Int) async throws -> DiscogsArtist {
+        let cacheName = "id:\(id)"
+        if let cached = getCachedArtist(name: cacheName), !cached.isExpired {
+            return cached.discogsArtist
+        }
+        let artist = try await getArtistDetails(from: "\(baseURL)/artists/\(id)")
+        cacheArtist(name: cacheName, artist: artist)
+        return artist
+    }
+
+    /// Discogs profiles are written in its own markup: "[a=Kurt Cobain]"
+    /// links an artist, "[l=Sub Pop]" a label, "[a123456]" an artist by id,
+    /// "[b]...[/b]" bolds. Shown as is it reads as noise, so links keep
+    /// their name, bare id links are dropped and formatting tags removed.
+    static func cleanProfile(_ profile: String) -> String {
+        var text = profile
+        let rules: [(String, String)] = [
+            (#"\[(?:a|l|m|r)=([^\]]+)\]"#, "$1"),
+            (#"\[(?:a|l|m|r)\d+\]"#, ""),
+            (#"\[url=[^\]]*\]([^\[]*)\[/url\]"#, "$1"),
+            (#"\[/?(?:b|i|u)\]"#, ""),
+            (#"[ \t]{2,}"#, " ")
+        ]
+        for (pattern, template) in rules {
+            text = text.replacingOccurrences(of: pattern, with: template, options: .regularExpression)
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Private Methods
     
     private func performSearch(query: String, type: String) async throws -> [DiscogsSearchResult] {

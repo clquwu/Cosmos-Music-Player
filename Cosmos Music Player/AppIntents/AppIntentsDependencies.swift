@@ -12,6 +12,7 @@ import AppIntents
 enum AppIntentsDependencies {
     @MainActor
     static func register() {
+        SiriDiag.log("APP AppIntentsDependencies.register")
         AppDependencyManager.shared.add(dependency: IntentPlaybackService())
         #if canImport(MediaIntents)
         if #available(iOS 27.0, *) {

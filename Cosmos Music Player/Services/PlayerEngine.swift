@@ -17,7 +17,106 @@ import WidgetKit
 /// PlayerEngine itself must not subscribe views to these updates.
 @MainActor
 final class PlaybackProgress: ObservableObject {
-    @Published var playbackTime: TimeInterval = 0
+    @Published var playbackTime: TimeInterval = 0 {
+        didSet { noteReportedTime(playbackTime) }
+    }
+
+    /// Where playback was at a known host instant, so a view can extrapolate
+    /// the position every frame instead of stepping with the 4Hz timer above.
+    /// Only republished on play/pause, a seek or track change, or when the
+    /// extrapolation has drifted from the engine - never per tick - so it costs
+    /// the progress-bar views nothing extra.
+    @Published private(set) var anchor = PlaybackAnchor()
+
+    /// Time between a sample leaving the engine and reaching the ears.
+    /// Bluetooth and AirPlay routes add hundreds of milliseconds here, and every
+    /// position the engines report is a render position, so anything drawn in
+    /// time with the music (synced lyrics) runs early by this much without it.
+    /// Deliberately not @Published: it only changes with the route.
+    private(set) var outputDelay: TimeInterval = 0
+
+    /// A jump bigger than this between the extrapolation and a reported
+    /// position is a seek or a track change, not drift. Comfortably above the
+    /// staleness of the cached SFB position (one 0.1s poll plus a main-actor
+    /// hop), so a late report is never mistaken for a jump backwards.
+    private static let discontinuityThreshold: TimeInterval = 0.35
+    /// Drift a fresh reading must exceed before the anchor moves. Smaller
+    /// corrections would just make the extrapolated clock jitter.
+    private static let driftThreshold: TimeInterval = 0.05
+
+    /// Starts or freezes the extrapolated clock. Called whenever the engine's
+    /// playing state flips.
+    func setPlaying(_ playing: Bool) {
+        let rate: Double = playing ? 1 : 0
+        guard rate != anchor.rate else { return }
+        let now = CACurrentMediaTime()
+        if playing {
+            refreshOutputDelay()
+            // A (re)start is a discontinuity: nothing is heard until the output
+            // pipeline fills, so the floor holds the clock at the start point.
+            anchor = PlaybackAnchor(mediaTime: playbackTime, hostTime: now, rate: 1, floorTime: playbackTime)
+        } else {
+            // Freeze where the extrapolation had got to rather than at the last
+            // (up to a quarter-second stale) tick, so a pause never steps back.
+            // The engine's own paused position, published next, re-anchors.
+            let frozen = anchor.rate > 0 ? anchor.mediaTime(at: now) : playbackTime
+            anchor = PlaybackAnchor(mediaTime: frozen, hostTime: now, rate: 0, floorTime: frozen)
+        }
+    }
+
+    /// Corrects the clock from a *fresh* engine reading - one taken straight
+    /// from the render timeline, not a cached copy - when it has drifted.
+    func refineAnchor(reportedTime: TimeInterval) {
+        guard anchor.rate > 0 else { return }
+        let now = CACurrentMediaTime()
+        guard abs(reportedTime - anchor.mediaTime(at: now)) > Self.driftThreshold else { return }
+        anchor = PlaybackAnchor(mediaTime: reportedTime, hostTime: now, rate: anchor.rate, floorTime: anchor.floorTime)
+    }
+
+    func refreshOutputDelay() {
+        let session = AVAudioSession.sharedInstance()
+        // AirPlay can legitimately report seconds; anything beyond that is a
+        // bogus reading, not a route.
+        outputDelay = min(max(session.outputLatency + session.ioBufferDuration, 0), 3)
+    }
+
+    /// Every write to `playbackTime` passes through here, which is what makes
+    /// seeks, track changes and restores move the clock immediately without
+    /// each call site having to remember to.
+    private func noteReportedTime(_ time: TimeInterval) {
+        let now = CACurrentMediaTime()
+        if anchor.rate == 0 {
+            guard anchor.mediaTime != time else { return }
+            anchor = PlaybackAnchor(mediaTime: time, hostTime: now, rate: 0, floorTime: time)
+            return
+        }
+        guard abs(time - anchor.mediaTime(at: now)) > Self.discontinuityThreshold else { return }
+        anchor = PlaybackAnchor(mediaTime: time, hostTime: now, rate: anchor.rate, floorTime: time)
+    }
+}
+
+/// A playback position pinned to a host-clock instant (`CACurrentMediaTime`).
+struct PlaybackAnchor: Equatable {
+    var mediaTime: TimeInterval = 0
+    var hostTime: CFTimeInterval = 0
+    /// 1 while playing, 0 while paused.
+    var rate: Double = 0
+    /// The media time of the last discontinuity (start, seek, track change).
+    /// After one, the output pipeline is refilling and nothing new is heard
+    /// for `outputDelay`, so the heard position holds here rather than
+    /// reading `outputDelay` behind the point that was just jumped to.
+    var floorTime: TimeInterval = 0
+
+    /// The engine's render position at `host`.
+    func mediaTime(at host: CFTimeInterval) -> TimeInterval {
+        mediaTime + max(0, host - hostTime) * rate
+    }
+
+    /// What is reaching the listener at `host`.
+    func heardTime(at host: CFTimeInterval, outputDelay: TimeInterval) -> TimeInterval {
+        guard rate > 0 else { return mediaTime }
+        return max(mediaTime(at: host) - outputDelay, floorTime)
+    }
 }
 
 @MainActor
@@ -28,6 +127,7 @@ class PlayerEngine: NSObject, ObservableObject {
     @Published var isPlaying = false {
         didSet {
             DatabaseSuspensionCoordinator.shared.setPlaybackActivityActive(keepsDatabaseActive)
+            progress.setPlaying(isPlaying)
         }
     }
     let progress = PlaybackProgress()
@@ -39,9 +139,15 @@ class PlayerEngine: NSObject, ObservableObject {
     @Published var playbackState: PlaybackState = .stopped
     @Published var playbackQueue: [Track] = []
     @Published var currentIndex = 0
-    @Published var isRepeating = false
-    @Published var isShuffled = false
-    @Published var isLoopingSong = false
+    // Repeat and shuffle are written to the saved state the moment they
+    // change. They were only saved with the rest of the session, every so
+    // often or when the app went to the background - so when iOS ended the
+    // app in between, the next launch (the "Resume Playback" shortcut, Siri,
+    // CarPlay) read the old mode back: Repeat One or Repeat All came back as
+    // play once, and playback stopped at the end of the song.
+    @Published var isRepeating = false { didSet { persistPlaybackModesIfChanged(oldValue != isRepeating) } }
+    @Published var isShuffled = false { didSet { persistPlaybackModesIfChanged(oldValue != isShuffled) } }
+    @Published var isLoopingSong = false { didSet { persistPlaybackModesIfChanged(oldValue != isLoopingSong) } }
     /// Why the selected track is not playing, when the reason is something the
     /// user can act on. `playbackState` alone was not enough: no view reads it,
     /// so a track that could not be fetched simply sat there doing nothing.
@@ -104,6 +210,15 @@ class PlayerEngine: NSObject, ObservableObject {
     // EQ integration
     let eqManager = EQManager.shared
 
+    /// The volume-levelling (ReplayGain) factor the native graph plays at, as
+    /// the main mixer's output volume. Remembered here rather than read back
+    /// because every rebuilt engine brings a new mixer; see setupAudioEngine().
+    private var nativeLevellingGain: Float = 1
+    /// Waits for the render clock to reach a scheduled gapless boundary, then
+    /// moves the mixer to the successor's factor. See armNativeLevellingSwitch().
+    private var nativeLevellingSwitchTask: Task<Void, Never>?
+    private var nativeLevellingSwitchGeneration: UInt64 = 0
+
     /// How long a load may wait inline for an iCloud file before it hands the
     /// track to `schedulePendingCloudPlayback`. Long enough for a file that is
     /// nearly there, short enough that the user is not left in silence.
@@ -159,6 +274,16 @@ class PlayerEngine: NSObject, ObservableObject {
         isPlaying || isLoadingTrack || isAdvancingTrack
     }
     private var currentLoadTask: Task<Bool, Never>?
+    /// Whether the latest transport decision was "play" - a song was picked,
+    /// Play was pressed, or Next/Previous was used while playing - as opposed
+    /// to Pause or Stop.
+    ///
+    /// Next and Previous used to infer that from `isPlaying` alone. But a load
+    /// clears `isPlaying` while it swaps decoders, so a second skip landing
+    /// during the first one's load read "not playing" and parked the new song
+    /// paused. Two or three quick song changes therefore stopped playback,
+    /// even though nobody had pressed Pause.
+    private var transportWantsPlayback = false
     private var loadGeneration: UInt64 = 0
     /// True from the moment `loadTrack` is entered until its load settles.
     ///
@@ -178,15 +303,28 @@ class PlayerEngine: NSObject, ObservableObject {
     /// loadGeneration, this spans an entire queue walk, so a cancelled load
     /// cannot let its stale caller continue through a newly-selected queue.
     private var playbackIntentGeneration: UInt64 = 0
+    /// Bumped only when the listener picks what plays: a song, album or
+    /// queue row, Next or Previous. A mix still being built compares it to
+    /// know whether it may still replace what is playing. The intent
+    /// generation above cannot stand for that: pause, play, recovery and
+    /// end-of-queue all bump it, while the queue itself also changes under
+    /// restore, reshaping and bookmark migration without anyone choosing.
+    private(set) var listenerChoiceGeneration: UInt64 = 0
     /// A cloud-only selection remains selected while iCloud materialises it.
     /// The generation prevents an older download from starting after the user
     /// has selected, stopped, or paused something else.
     private var pendingCloudPlaybackTask: Task<Void, Never>?
+    /// Whether the current selection is still waiting on iCloud - lets Siri
+    /// tell a song that is downloading from one that failed to load (both
+    /// leave it current but not playing).
+    var isWaitingForCloudPlayback: Bool { pendingCloudPlaybackTask != nil }
     private var pendingCloudPlaybackGeneration: UInt64 = 0
     /// Whether the pending cloud wait should start playing when its bytes
     /// land. Mutable so `pause()` can demote a wait rather than cancel it.
     private var pendingCloudPlaybackShouldAutoplay = false
     private var hasRestoredState = false
+    /// The one restoration of the saved session; see ensureSavedStateRestored().
+    private var savedStateRestoreTask: Task<Void, Never>?
     private var hasSetupAudioEngine = false
     /// Set when AVAudioEngine reported a configuration change at a moment we
     /// could not act on - paused, or mid-interruption. The graph then describes
@@ -346,6 +484,122 @@ class PlayerEngine: NSObject, ObservableObject {
         // Don't set up remote commands immediately - defer until first playback
         // setupRemoteCommands()
         setupPeriodicStateSaving()
+        restoreSavedPlaybackModes()
+    }
+
+    /// Repeat, song loop and shuffle are preferences, not part of the session.
+    ///
+    /// They used to come back only with the full saved session, which only the
+    /// phone UI restored. A launch from the "Resume Playback" shortcut or from
+    /// CarPlay started playback before that - or without it ever happening -
+    /// so the modes stayed at their defaults, and the next periodic save wrote
+    /// those defaults over the user's choice for good. A synchronous read here
+    /// cannot lose that race, and deliberately ignores the session's age limit.
+    private func persistPlaybackModesIfChanged(_ changed: Bool) {
+        guard changed else { return }
+        var saved = UserDefaults.standard.dictionary(forKey: "CosmosPlayerState") ?? [:]
+        saved["isRepeating"] = isRepeating
+        saved["isShuffled"] = isShuffled
+        saved["isLoopingSong"] = isLoopingSong
+        UserDefaults.standard.set(saved, forKey: "CosmosPlayerState")
+    }
+
+    private func restoreSavedPlaybackModes() {
+        guard let saved = UserDefaults.standard.dictionary(forKey: "CosmosPlayerState") else { return }
+        isRepeating = saved["isRepeating"] as? Bool ?? false
+        isShuffled = saved["isShuffled"] as? Bool ?? false
+        isLoopingSong = saved["isLoopingSong"] as? Bool ?? false
+    }
+
+    /// Restores the saved session (track, queue, position) once, whichever
+    /// entry point gets there first: the phone UI, CarPlay connecting, or an
+    /// App Intent. Only the phone UI used to, so a CarPlay or shortcut launch
+    /// with the app closed had nothing loaded - a blank Now Playing screen, or
+    /// the library played from its first song instead of where the user was.
+    ///
+    /// A CarPlay or Shortcuts cold launch runs in the background with nothing
+    /// playing - exactly when DatabaseSuspensionCoordinator suspends GRDB - and
+    /// can arrive while the database is still opening. The read used to fail
+    /// there, the failed attempt was cached, and nothing ever tried again: the
+    /// car showed a blank Now Playing screen and "Resume Playback" played the
+    /// library from its first song. The database is now held awake for the
+    /// restore, a failed read is retried, and a failure is never cached.
+    func ensureSavedStateRestored() async {
+        if let savedStateRestoreTask {
+            await savedStateRestoreTask.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let suspension = DatabaseSuspensionCoordinator.shared
+            suspension.beginHold()
+            var outcome = SavedSessionRestoreOutcome.failed
+            for attempt in 1...4 {
+                outcome = await self.restoreUIStateOnly()
+                guard outcome == .failed, attempt < 4 else { break }
+                print("🔁 Saved session could not be read yet - retrying (\(attempt))")
+                try? await Task.sleep(for: .milliseconds(400 * attempt))
+            }
+            self.lastSavedSessionRestoreOutcome = outcome
+            // Keep the hold until the restored song's artwork and names are
+            // in Now Playing; both read the database.
+            let artwork = self.artworkLoadTask
+            Task { @MainActor in
+                await artwork?.value
+                suspension.endHold()
+            }
+        }
+        savedStateRestoreTask = task
+        await task.value
+        // A failure is never cached. Neither is an attempt that ended with no
+        // song at all - superseded by a selection that then never loaded, or
+        // nothing to restore yet: caching it kept Resume Playback reporting
+        // the session as pending forever, and a later restore could not run.
+        let outcome = lastSavedSessionRestoreOutcome
+        let endedEmpty = currentTrack == nil && (outcome == .superseded || outcome == .nothingSaved)
+        if savedStateRestoreTask == task, outcome == .failed || endedEmpty {
+            savedStateRestoreTask = nil
+        }
+    }
+
+    enum SavedSessionRestoreOutcome {
+        case restored
+        /// No saved song, or the saved song is no longer in the library.
+        case nothingSaved
+        /// A newer selection got there first.
+        case superseded
+        /// The database could not be read. Worth trying again.
+        case failed
+    }
+
+    private var lastSavedSessionRestoreOutcome: SavedSessionRestoreOutcome?
+
+    /// A song was saved from an earlier session.
+    var hasSavedSession: Bool {
+        UserDefaults.standard.dictionary(forKey: "CosmosPlayerState")?["currentTrackStableId"] is String
+    }
+
+    /// The saved session exists but has not been restored yet - it is still
+    /// being read, or the library could not be read. Callers that would
+    /// otherwise start something else (Resume Playback falling back to the
+    /// whole library) must not replace the user's queue while this holds.
+    var savedSessionIsPendingRestore: Bool {
+        guard currentTrack == nil, hasSavedSession else { return false }
+        return lastSavedSessionRestoreOutcome != .nothingSaved
+    }
+
+    /// Settings > "Resume when CarPlay connects".
+    static let resumeOnCarPlayConnectKey = "resumeOnCarPlayConnect"
+
+    /// Puts the restored song on the CarPlay Now Playing screen - title,
+    /// artwork, position - with working transport buttons before any audio
+    /// has loaded. Remote commands are otherwise only installed by the first
+    /// playback, so the car's Play button had nothing to talk to.
+    func prepareNowPlayingForCarPlay() {
+        guard currentTrack != nil else { return }
+        ensureRemoteCommandsSetup()
+        lastControlCenterUpdate = 0
+        updateNowPlayingInfoEnhanced()
     }
 
     private func ensureAudioEngineSetup(with format: AVAudioFormat? = nil) {
@@ -403,6 +657,11 @@ class PlayerEngine: NSObject, ObservableObject {
         context: String
     ) -> Bool {
         let format = file.processingFormat
+
+        // Every fresh schedule plays the current track, so it plays at the
+        // current track's level - including a seek back into a song whose
+        // successor's level had already been switched in at the boundary.
+        setNativeLevellingGain(levellingGain(for: currentTrack))
 
         // A configuration change we could not act on when it arrived means the
         // first attempt is certain to fail. Skip it rather than paying for a
@@ -570,13 +829,70 @@ class PlayerEngine: NSObject, ObservableObject {
             return
         }
 
-        playerNode.play()
+        guard startPlayerNode() else {
+            isPlaying = false
+            playbackState = .paused
+            continuePlaybackAfterAutomaticAction()
+            return
+        }
         isPlaying = true
         playbackState = .playing
         startPlaybackTimer()
         updateNowPlayingInfoEnhanced()
         preloadAndScheduleNextIfNeeded()
         print("✅ Rebuilt the EQ node and resumed at \(resumeTime)s")
+    }
+
+    /// Starts the native player node without letting AVFAudio abort the app.
+    /// `-[AVAudioPlayerNode play]` raises an Objective-C exception (which Swift
+    /// cannot catch) when the node's engine is not running - a route or
+    /// configuration change can stop the engine between start() and play().
+    /// That killed 1.2.4 from playTrack. Returns false when the node could not
+    /// be started; callers take their existing recoverable-pause path.
+    private func startPlayerNode() -> Bool {
+        guard playerNode.engine === audioEngine else {
+            print("❌ Player node is not attached to the engine - not starting it")
+            return false
+        }
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+            } catch {
+                print("❌ Engine was stopped before play() and failed to restart: \(error)")
+                return false
+            }
+        }
+        do {
+            try ObjCExceptionCatcher.tryCatch({ [playerNode] in
+                playerNode.play()
+            })
+            return true
+        } catch {
+            print("❌ AVAudioPlayerNode.play() raised: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// `startPlayerNode()` for an explicit Play, with one escalation: when the
+    /// node will not start on the current graph (it belongs to an engine that
+    /// was replaced, or the engine stops itself again straight away), build a
+    /// fresh engine, re-schedule from `startFrame` and try once more. Without
+    /// this the failure left the transport paused on the same dead graph, and
+    /// every later Play took the same path and failed the same way.
+    private func startPlayerNodeRebuildingIfNeeded(
+        file: AVAudioFile,
+        from startFrame: AVAudioFramePosition,
+        context: String
+    ) -> Bool {
+        if startPlayerNode() { return true }
+        print("♻️ \(context): player node would not start - rebuilding the audio engine and retrying once")
+        cancelPendingCompletions()
+        resetAudioEngineForNative()
+        ensureAudioEngineSetup(with: file.processingFormat)
+        guard startEngineAndScheduleSegment(from: startFrame, file: file, context: context) else {
+            return false
+        }
+        return startPlayerNode()
     }
 
     private func setupAudioEngine(with format: AVAudioFormat? = nil) {
@@ -589,6 +905,10 @@ class PlayerEngine: NSObject, ObservableObject {
         // output node can raise an Objective-C exception when CarPlay is fixed
         // at a different sample rate from the source file.
         eqManager.insertEQIntoAudioGraph(between: playerNode, and: audioEngine.mainMixerNode, format: format)
+        // Every engine this class builds - a route recovery, a CarPlay
+        // takeover, a media-services reset - comes with a fresh mixer at
+        // unity, so volume levelling has to be put back on it here.
+        audioEngine.mainMixerNode.outputVolume = nativeLevellingGain
         // CRITICAL: Prepare the engine to guarantee render loop activity
         audioEngine.prepare()
         // Building the graph is a configuration change of our own making too.
@@ -1013,6 +1333,8 @@ class PlayerEngine: NSObject, ObservableObject {
         previousOutputPortTypes: Set<String> = []
     ) {
         handleCarPlayStatusChange()
+        // A new route brings its own output latency (Bluetooth, AirPlay).
+        progress.refreshOutputDelay()
 
         let outputFingerprint = currentOutputRouteFingerprint()
         print("""
@@ -1850,6 +2172,9 @@ class PlayerEngine: NSObject, ObservableObject {
     }
 
     private func activateAudioSession() throws {
+        // Before the category is touched too: a stop()'s release still in
+        // flight would otherwise deactivate the session this call activates.
+        Self.cancelPendingAudioSessionRelease()
         let s = AVAudioSession.sharedInstance()
         let isCarPlayEnvironment = sfbAudioManager.isCarPlayEnvironment
             || s.currentRoute.outputs.contains { $0.portType == .carAudio }
@@ -1935,6 +2260,8 @@ class PlayerEngine: NSObject, ObservableObject {
         cancelOutputRouteRecovery: Bool = true,
         cancelPendingCloudRetry: Bool = true
     ) async -> Bool {
+        let loadSignpost = Perf.begin("Track load")
+        defer { Perf.end("Track load", loadSignpost) }
         // Observe route loss for the entire asynchronous load. Installing these
         // only after the decoder opened missed an unplug during first-ever
         // playback and then baselined the speaker route as if nothing changed.
@@ -2222,6 +2549,13 @@ class PlayerEngine: NSObject, ObservableObject {
         // placeholder.
         print("📀 loadTrack called for: \(track.title) (format: \(url.pathExtension.uppercased()))")
 
+        // A load can be superseded before its Task ever runs - skipping songs
+        // quickly while paused cancels each one almost immediately. Starting
+        // anyway raised isLoadingTrack after the newer load had already
+        // cleared it, and nothing cleared it again: every later Play hit the
+        // isLoadInFlight guard and did nothing. It also ran cleanup against
+        // the transport state the newer selection now owns.
+        guard isCurrentLoad(generation) else { return false }
         isLoadingTrack = true
         print("🔄 Starting load process for: \(track.title)")
 
@@ -2284,7 +2618,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 print("🔐 Started accessing security-scoped resource for external file")
             } else {
                 // No bookmark - use path from database
-                url = URL(fileURLWithPath: track.path)
+                url = DatabaseManager.localFileURL(forStoredPath: track.path)
             }
 
             // Deliberately a short wait, not ensureLocal's 20s default. Anything
@@ -2335,7 +2669,14 @@ class PlayerEngine: NSObject, ObservableObject {
                     // intentionally silent; the caller decides whether to play.
                     try await sfbAudioManager.load(url: url)
                     guard isCurrentLoad(generation) else {
-                        sfbAudioManager.stop()
+                        // Release only the decoder this load put there. With
+                        // fast skips the newer load may already have enqueued
+                        // its own on the shared player, and stopping that left
+                        // the selected song with nothing loaded.
+                        if sfbAudioManager.loadedURL?.standardizedFileURL == url.standardizedFileURL,
+                           !playbackIdentity(currentTrack?.stableId, matches: track.stableId) {
+                            sfbAudioManager.stop()
+                        }
                         return false
                     }
                     usingSFBEngine = true
@@ -2451,6 +2792,9 @@ class PlayerEngine: NSObject, ObservableObject {
 
             guard isCurrentLoad(generation) else { return false }
 
+            // Before any caller can start it, on whichever backend took it.
+            applyVolumeLevelling(for: currentTrack ?? track)
+
             // Ensure remote commands are set up for Control Center
             ensureRemoteCommandsSetup()
 
@@ -2491,6 +2835,14 @@ class PlayerEngine: NSObject, ObservableObject {
                 // never play from one whose bytes are simply still arriving.
                 if case CloudDownloadError.downloadPending = error {
                     lastLoadFailureWasTransient = true
+                }
+                // The file is gone (deleted from iCloud Drive / Files): have
+                // the deletion monitor confirm and drop the ghost row now,
+                // instead of it failing on every tap until a later scan.
+                if case CloudDownloadError.fileNotFound = error {
+                    ICloudDeletionMonitor.shared.reportMissingFile(path: track.path)
+                } else if case PlayerError.fileNotFound = error {
+                    ICloudDeletionMonitor.shared.reportMissingFile(path: track.path)
                 }
                 sfbAudioManager.stop()
                 usingSFBEngine = false
@@ -2597,6 +2949,9 @@ class PlayerEngine: NSObject, ObservableObject {
         seekTimeOffset = resumeTime
         playbackTime = resumeTime
         nodeTimelineStartSampleTime = 0
+        // The dropped successor's level may already have been switched in at
+        // its boundary; the remainder being re-scheduled is the current song.
+        setNativeLevellingGain(levellingGain(for: currentTrack))
 
         // The node has already been stopped, so every path out of here must
         // leave playback in a state the user can recover from. Bailing out
@@ -2616,8 +2971,9 @@ class PlayerEngine: NSObject, ObservableObject {
             return
         }
 
-        if wasPlaying {
-            playerNode.play()
+        if wasPlaying, !startPlayerNode() {
+            print("♻️ Player node failed to restart after re-scheduling - restarting playback from \(resumeTime)s")
+            continuePlaybackAfterAutomaticAction()
         }
     }
 
@@ -2657,6 +3013,37 @@ class PlayerEngine: NSObject, ObservableObject {
             }
             originalQueue = remaining
         }
+        queueDidChange()
+    }
+
+    /// Reorders or trims the songs after the next one. The current song and
+    /// the next - which may already be preloaded for gapless playback - stay
+    /// as they are. Song mixes use it to react to skips. Left alone while
+    /// shuffle is on, when the order is the shuffle's.
+    func reshapeUpcoming(_ transform: ([Track]) -> [Track]) {
+        guard !isShuffled else { return }
+        let start = currentIndex + 2
+        guard start < playbackQueue.count else { return }
+        let head = Array(playbackQueue[..<start])
+        let tail = transform(Array(playbackQueue[start...]))
+        playbackQueue = head + tail
+        originalQueue = playbackQueue.map { $0.stableId }
+        queueDidChange()
+    }
+
+    /// Keeps the current song playing where it is and replaces everything
+    /// after it - a song mix started from the player. Shuffle and Repeat One
+    /// are turned off: the mix has its own order.
+    func replaceQueueAfterCurrent(with tracks: [Track]) {
+        guard playbackQueue.indices.contains(currentIndex) else { return }
+        isShuffled = false
+        // Repeat One would keep replaying the seed and the mix would never
+        // be heard.
+        isLoopingSong = false
+        let current = playbackQueue[currentIndex]
+        playbackQueue = Array(playbackQueue.prefix(currentIndex + 1))
+            + tracks.filter { $0.stableId != current.stableId }
+        originalQueue = playbackQueue.map { $0.stableId }
         queueDidChange()
     }
 
@@ -2725,6 +3112,7 @@ class PlayerEngine: NSObject, ObservableObject {
     /// must not reconfigure the category out from under SFBAudioEngine, which
     /// sets up its own session moments later.
     private func reclaimSessionAfterMissedInterruptionEnd() {
+        Self.cancelPendingAudioSessionRelease()
         do {
             try AVAudioSession.sharedInstance().setActive(true, options: [])
         } catch {
@@ -2747,6 +3135,7 @@ class PlayerEngine: NSObject, ObservableObject {
         // decoder is being rebuilt, that explicit request owns the final
         // transport state instead of the recovery path forcing it back to pause.
         beginPlaybackIntent()
+        transportWantsPlayback = true
         outputDeviceBecameUnavailable = false
         // This request supersedes any resume that was waiting on the route.
         cancelOutputRouteSettleResume()
@@ -2760,6 +3149,14 @@ class PlayerEngine: NSObject, ObservableObject {
     private func playRespectingOutputRoute() {
         print("▶️ play() called - state: \(playbackState), loading: \(isLoadingTrack), usingSFBEngine: \(usingSFBEngine)")
 
+        if isLoadingTrack, currentLoadTask == nil {
+            // Nothing is loading and nothing ever will clear this: a load was
+            // orphaned by a newer intent. Every isLoadInFlight check below
+            // then turned Play into a silent no-op for the rest of the session.
+            print("⚠️ Clearing a loading flag left behind by a superseded load")
+            isLoadingTrack = false
+        }
+
         // The latch records an event; the route answers whether it still holds.
         refreshOutputDeviceAvailability()
 
@@ -2772,6 +3169,23 @@ class PlayerEngine: NSObject, ObservableObject {
             endBackgroundMonitoring()
             updateNowPlayingInfoEnhanced()
             updateWidgetData()
+            return
+        }
+
+        // Play right after a stop(): the audio-session release stop() handed
+        // to a background queue may be inside setActive(false) right now, and
+        // every activation below has to wait it out. Waiting here on the main
+        // thread froze the UI for 0.55-0.6 s, so wait off it and come back.
+        // If anything newer (pause, stop, another song) arrives meanwhile, its
+        // intent wins and this request is dropped.
+        if Self.audioSessionRelease.isReleasing {
+            let expectedIntent = playbackIntentGeneration
+            print("▶️ Play waits for the audio session release in progress (off the main thread)")
+            Task { @MainActor [weak self] in
+                await Self.audioSessionRelease.waitForRunningRelease()
+                guard let self, self.playbackIntentGeneration == expectedIntent else { return }
+                self.playRespectingOutputRoute()
+            }
             return
         }
 
@@ -2810,6 +3224,8 @@ class PlayerEngine: NSObject, ObservableObject {
         // route, which discards its decoder queue. Falling through to the
         // reload-and-seek branch below is exactly the right recovery.
         if usingSFBEngine, !isLoadInFlight, sfbAudioManager.hasLoadedDecoder {
+            // SFBAudioEngineManager.play() activates the session itself.
+            Self.cancelPendingAudioSessionRelease()
             do {
                 try sfbAudioManager.play()
                 isPlaying = true
@@ -3042,7 +3458,19 @@ class PlayerEngine: NSObject, ObservableObject {
                 return
             }
 
-            playerNode.play()
+            guard startPlayerNodeRebuildingIfNeeded(
+                file: audioFile,
+                from: framePosition,
+                context: "resume"
+            ) else {
+                isPlaying = false
+                playbackState = .paused
+                stopPlaybackTimer()
+                endBackgroundMonitoring()
+                updateNowPlayingInfoEnhanced()
+                updateWidgetData()
+                return
+            }
             isPlaying = true
             playbackState = .playing
             startPlaybackTimer()
@@ -3127,7 +3555,18 @@ class PlayerEngine: NSObject, ObservableObject {
         // Set up remote commands only when needed
         ensureRemoteCommandsSetup()
 
-        playerNode.play()
+        // The decoder and schedule are in place, so a failed start is left
+        // paused - the next play/resume re-schedules from seekTimeOffset.
+        guard startPlayerNodeRebuildingIfNeeded(
+            file: audioFile,
+            from: startFrame,
+            context: "start"
+        ) else {
+            isPlaying = false
+            playbackState = .paused
+            updateNowPlayingInfoEnhanced()
+            return
+        }
         isPlaying = true
         playbackState = .playing
         startPlaybackTimer()
@@ -3153,6 +3592,7 @@ class PlayerEngine: NSObject, ObservableObject {
         // stopped SFBAudioEngine and nilled audioFile/usingSFBEngine, so a
         // lock-screen pause during a load left nothing to resume.
         beginPlaybackIntent()
+        transportWantsPlayback = false
         cancelEngineConfigurationRecovery()
         cancelOutputRouteRecovery()
         cancelOutputRouteSettleResume()
@@ -3224,6 +3664,7 @@ class PlayerEngine: NSObject, ObservableObject {
     }
 
     func stop() {
+        transportWantsPlayback = false
         wasPlayingBeforeInterruption = false
         playWasDeferredByInterruption = false
         beginPlaybackIntent(cancelActiveLoad: true)
@@ -3281,19 +3722,27 @@ class PlayerEngine: NSObject, ObservableObject {
     }
 
     private func releaseAudioSessionAfterTerminalStop() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(
-                false,
-                options: .notifyOthersOnDeactivation
-            )
-            hasSetupAudioSession = false
-            print("🎧 Released audio session after terminal stop")
-        } catch {
-            // Keep the transport stopped even if mediaserverd is temporarily
-            // unavailable. A later activation always retries setup.
-            hasSetupAudioSession = false
-            print("⚠️ Could not release audio session after terminal stop: \(error)")
-        }
+        // Cleared now, whatever the release turns out to do: a later
+        // activation then always re-establishes the category, which is what
+        // both outcomes of the old synchronous call left behind.
+        hasSetupAudioSession = false
+        // Off the main thread: setActive(false) is a blocking round trip to
+        // the audio server that held the UI for 0.55 s on every end of queue
+        // and every Next on the last song (pause() takes 0.01-0.03 s).
+        Self.audioSessionRelease.scheduleRelease()
+    }
+
+    /// Terminal-stop release of the audio session. Every path that activates
+    /// the session calls `cancelPendingAudioSessionRelease()` first.
+    nonisolated private static let audioSessionRelease = AudioSessionReleaseGate()
+
+    /// Call before anything that activates the audio session (or starts the
+    /// SFB player, which activates it itself). A release stop() queued that
+    /// has not started is dropped; one already talking to the audio server is
+    /// waited out, so the activation always lands after it and Play right
+    /// after a stop is never silenced by a late deactivation.
+    nonisolated private static func cancelPendingAudioSessionRelease() {
+        audioSessionRelease.cancelPending()
     }
 
     private func cleanupCurrentPlayback(resetTime: Bool = false) async {
@@ -3466,7 +3915,15 @@ class PlayerEngine: NSObject, ObservableObject {
         }
 
         if wasPlaying {
-            playerNode.play()
+            guard startPlayerNode() else {
+                isPlaying = false
+                playbackState = .paused
+                stopPlaybackTimer()
+                endBackgroundMonitoring()
+                updateNowPlayingInfoEnhanced()
+                updateWidgetData()
+                return false
+            }
             isPlaying = true
             playbackState = .playing
             startPlaybackTimer()
@@ -3491,6 +3948,135 @@ class PlayerEngine: NSObject, ObservableObject {
     // handled by MPRemoteCommandCenter, which iOS resumes us to service.
     // stopSilentPlaybackForPause() is retained so a player left running by a
     // previously-installed build is torn down on the next pause/stop.
+
+    // MARK: - Volume Levelling
+    //
+    // ReplayGain is applied as the output volume of the main mixer, on both
+    // backends. The mixer comes after the EQ in every graph either one builds,
+    // so levelling holds with EQ on or off and never fights its preamp; it
+    // takes values above 1 for boosts; and it smooths each change over a few
+    // milliseconds by itself, so a change under a playing song does not click.
+    // The system volume is a separate stage after it and is never touched.
+
+    /// Called by Settings when the levelling mode changes. Applies to the song
+    /// already playing, not from the next one, and re-arms the successor.
+    func volumeLevellingModeDidChange() {
+        applyVolumeLevelling(for: currentTrack)
+        if usingSFBEngine {
+            if let sfbNextTrack {
+                sfbAudioManager.setSuccessorVolumeLevelling(levellingGain(for: sfbNextTrack))
+            }
+        } else {
+            armNativeLevellingSwitch()
+        }
+    }
+
+    private func levellingGain(for track: Track?) -> Float {
+        guard let track else { return 1 }
+        return VolumeLevellingMode.current.gain(for: track).linear
+    }
+
+    /// Puts `track`'s levelling factor on whichever backend is live.
+    private func applyVolumeLevelling(for track: Track?) {
+        let mode = VolumeLevellingMode.current
+        let gain = track.map { mode.gain(for: $0) } ?? (db: 0, linear: 1, source: "nothing loaded")
+        if usingSFBEngine {
+            sfbAudioManager.setVolumeLevelling(gain.linear)
+        } else {
+            setNativeLevellingGain(gain.linear)
+        }
+        print(String(
+            format: "🎚️ Volume levelling [%@] %@: %+.2f dB (×%.3f, %@) on %@",
+            mode.rawValue, track?.title ?? "-", gain.db, gain.linear, gain.source,
+            usingSFBEngine ? "SFBAudioEngine" : "AVAudioEngine"
+        ))
+    }
+
+    private func setNativeLevellingGain(_ gain: Float) {
+        nativeLevellingGain = gain
+        // Before the first native playback there is no graph yet, and touching
+        // mainMixerNode would build one; setupAudioEngine() applies it then.
+        guard hasSetupAudioEngine else { return }
+        let mixer = audioEngine.mainMixerNode
+        if mixer.outputVolume != gain {
+            mixer.outputVolume = gain
+        }
+    }
+
+    /// Moves the native mixer to the gapless successor's factor when the
+    /// render clock reaches the track boundary.
+    ///
+    /// Both songs are queued on the one player node, so there is no
+    /// per-segment volume to give the successor. And the completion handler
+    /// that promotes it is `.dataPlayedBack`, which fires once the old song's
+    /// last frame has been *heard*: by then the mixer has been rendering the
+    /// new song for the whole output latency - well over 100 ms on Bluetooth -
+    /// at the old song's level. So this follows the render timeline instead.
+    /// `nextTimelineStartSampleTime` is where the successor starts in player
+    /// time; once the latest render cycle contains it, the change lands on the
+    /// next cycle. The successor therefore plays at most one I/O buffer at the
+    /// old level, inside the mixer's few-millisecond ramp. Not sample-exact,
+    /// but nothing clicks, and the old song's tail keeps its own level.
+    ///
+    /// Gives up on anything unexpected - a pause, an engine restart, a
+    /// dropped successor - rather than guessing. scheduleGaplessNextIfPossible()
+    /// arms it, checkIfTrackEnded()'s 0.5s tick re-arms it while a switch is
+    /// still owed, and the promotion applies the factor regardless.
+    private func armNativeLevellingSwitch() {
+        nativeLevellingSwitchTask?.cancel()
+        nativeLevellingSwitchTask = nil
+        nativeLevellingSwitchGeneration &+= 1
+
+        guard !usingSFBEngine,
+              gaplessScheduled,
+              isPlaying,
+              let next = nextTrack,
+              let boundary = nextTimelineStartSampleTime,
+              let sampleRate = audioFile?.processingFormat.sampleRate,
+              sampleRate > 0 else { return }
+        let target = levellingGain(for: next)
+        // Same level - typical for Per Album through an album - nothing to do.
+        guard target != nativeLevellingGain else { return }
+
+        let generation = nativeLevellingSwitchGeneration
+        nativeLevellingSwitchTask = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.nativeLevellingSwitchGeneration == generation {
+                    self.nativeLevellingSwitchTask = nil
+                }
+            }
+            while !Task.isCancelled {
+                guard let self,
+                      self.nativeLevellingSwitchGeneration == generation,
+                      self.gaplessScheduled,
+                      self.isPlaying,
+                      self.nextTimelineStartSampleTime == boundary,
+                      let rendered = self.currentNodeSampleTime() else { return }
+                // `rendered` is where the latest render cycle began, and a
+                // cycle is one I/O buffer long. Re-read on every wake - only a
+                // few per boundary - because iOS enlarges the buffer when the
+                // screen locks, and a stale, smaller figure would hold the
+                // switch back a whole extra cycle.
+                let cycleFrames = AVAudioFramePosition(
+                    max(AVAudioSession.sharedInstance().ioBufferDuration, 0.002) * sampleRate
+                )
+                let framesLeft = boundary - rendered
+                if framesLeft <= cycleFrames {
+                    self.setNativeLevellingGain(target)
+                    print(String(
+                        format: "🎚️ Volume levelling switched at the gapless boundary for %@: ×%.3f (%+.2f dB), %lld frames from the boundary",
+                        next.title, target, 20 * log10(Double(target)), framesLeft
+                    ))
+                    return
+                }
+                // Each wake re-reads the render clock, so a pause that is over
+                // by then costs only another sleep; one still going ends the
+                // watch above, and the 0.5s tick re-arms it after Play.
+                let wait = Double(framesLeft - cycleFrames) / sampleRate
+                try? await Task.sleep(for: .seconds(max(wait, 0.002)), tolerance: .milliseconds(2))
+            }
+        }
+    }
 
     // MARK: - SFBAudioEngine Integration
     // SFBAudioEngine now handles playback directly via SFBAudioEngineManager
@@ -3640,7 +4226,9 @@ class PlayerEngine: NSObject, ObservableObject {
         isPreloadingNext = true
         preloadNextTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let url = URL(fileURLWithPath: candidate.path)
+            let preloadSignpost = Perf.begin("Track preload")
+            defer { Perf.end("Track preload", preloadSignpost) }
+            let url = DatabaseManager.localFileURL(forStoredPath: candidate.path)
 
             guard !SFBAudioEngineManager.canHandle(url: url) else {
                 self.isPreloadingNext = false
@@ -3704,7 +4292,7 @@ class PlayerEngine: NSObject, ObservableObject {
         }
 
         let candidate = playbackQueue[nextIndex]
-        let url = URL(fileURLWithPath: candidate.path)
+        let url = DatabaseManager.localFileURL(forStoredPath: candidate.path)
 
         // Only another SFB-native track can continue on the same player; a
         // FLAC or MP3 successor belongs to AVAudioEngine and needs the normal
@@ -3716,6 +4304,8 @@ class PlayerEngine: NSObject, ObservableObject {
         let taskGeneration = sfbPreloadGeneration
         sfbPreloadNextTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            let preloadSignpost = Perf.begin("Track preload")
+            defer { Perf.end("Track preload", preloadSignpost) }
             defer {
                 // Only release the handle if it is still this task's. A
                 // cancelled run finishes after its replacement has started.
@@ -3737,7 +4327,10 @@ class PlayerEngine: NSObject, ObservableObject {
             guard await self.successorIsLocal(url) else { return }
 
             do {
-                let enqueued = try await self.sfbAudioManager.enqueueGaplessNext(url: url)
+                let enqueued = try await self.sfbAudioManager.enqueueGaplessNext(
+                    url: url,
+                    levellingGain: self.levellingGain(for: candidate)
+                )
                 guard enqueued else { return }
 
                 guard self.loadGeneration == preloadGeneration,
@@ -3792,6 +4385,10 @@ class PlayerEngine: NSObject, ObservableObject {
         currentTrack = playbackQueue[index]
         sfbNextTrack = nil
         sfbNextTrackIndex = nil
+        // The manager already switched to the factor captured at enqueue;
+        // this re-derives it from the track now current, which is the same
+        // unless the queue was edited underneath the transition.
+        applyVolumeLevelling(for: currentTrack)
 
         duration = sfbAudioManager.duration
         playbackTime = 0
@@ -3857,6 +4454,7 @@ class PlayerEngine: NSObject, ObservableObject {
         nextTimelineStartSampleTime = nodeTimelineStartSampleTime + remainingFrames
         gaplessScheduled = true
         print("✅ Gapless next track scheduled: \(nextTrack.title)")
+        armNativeLevellingSwitch()
     }
 
     private func promoteGaplessNextIfAvailable() -> Bool {
@@ -3896,6 +4494,11 @@ class PlayerEngine: NSObject, ObservableObject {
         nextTimelineStartSampleTime = nil
         gaplessScheduled = false
         isPreloadingNext = false
+        // Normally already on the mixer, switched at the render boundary by
+        // armNativeLevellingSwitch(); this completion fires only once the old
+        // song has been heard out. Set before the successor's successor is
+        // scheduled, which compares its own level against this one.
+        applyVolumeLevelling(for: next)
 
         resetNowPlayingCachesForTrackChange()
         lastControlCenterUpdate = 0
@@ -3910,13 +4513,27 @@ class PlayerEngine: NSObject, ObservableObject {
         // the node is detached or the engine is torn down mid-query (App Store
         // crash group spanning 1.0.6-1.2.2), so check attachment and engine
         // state before asking.
+        //
+        // Those checks were not enough: 1.2.5 still crashed on this call from
+        // a lock-screen Play (iOS 26.7), the engine passing both checks and
+        // the assertion firing anyway - the graph can change between the
+        // checks and the call. So the call itself is guarded too: a time we
+        // cannot read is no time, and the caller keeps the last known one.
         guard audioEngine.attachedNodes.contains(playerNode),
               audioEngine.isRunning,
-              let nodeTime = playerNode.lastRenderTime,
-              let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
+              let nodeTime = playerNode.lastRenderTime else {
             return nil
         }
-        return playerTime.sampleTime
+        var playerTime: AVAudioTime?
+        do {
+            try ObjCExceptionCatcher.tryCatch({ [playerNode] in
+                playerTime = playerNode.playerTime(forNodeTime: nodeTime)
+            })
+        } catch {
+            print("⚠️ AVAudioPlayerNode.playerTime(forNodeTime:) raised: \(error.localizedDescription)")
+            return nil
+        }
+        return playerTime?.sampleTime
     }
 
     private func currentTimeForCurrentNativeFile() -> TimeInterval {
@@ -3974,6 +4591,9 @@ class PlayerEngine: NSObject, ObservableObject {
                 await self?.checkIfTrackEnded()
             }
         }
+        // Background wake-ups are what screen-off battery is made of; let
+        // iOS batch this one with the audio session's own.
+        backgroundCheckTimer?.tolerance = 0.1
     }
 
     private func endBackgroundMonitoring() {
@@ -4032,6 +4652,13 @@ class PlayerEngine: NSObject, ObservableObject {
         // app was backgrounded soon after playback started.
         if audioFile != nil, audioEngine.isRunning {
             playbackTime = currentTimeForCurrentNativeFile()
+        }
+
+        // A level switch still owed to a scheduled successor whose watcher
+        // gave up - it stops on a pause or an engine restart rather than
+        // guessing - is re-armed from here once playback runs again.
+        if gaplessScheduled, nativeLevellingSwitchTask == nil {
+            armNativeLevellingSwitch()
         }
 
         // Check if player node has stopped naturally (reached end).
@@ -4224,6 +4851,12 @@ class PlayerEngine: NSObject, ObservableObject {
             }
 
             currentIndex = candidate
+            // Moved together, before the load suspends. performLoadTrack only
+            // sets currentTrack after its cleanup await, so a second Next in
+            // that window saw the new index next to the old track, and
+            // normalizeIndexAndTrack snapped back - fast skips replayed the
+            // same song instead of advancing.
+            currentTrack = track
 
             if await loadTrack(track, preservePlaybackTime: false) {
                 guard playbackIntentGeneration == intentGeneration else {
@@ -4236,8 +4869,11 @@ class PlayerEngine: NSObject, ObservableObject {
                     // ends mid-album instead of pausing on the track that was
                     // loaded. Only claim it when this load is still the one
                     // that matters; a newer selection owns its own state.
+                    // Not while playing: a Play pressed during the load waits
+                    // on it and may already have started this very track.
                     if playbackIdentity(currentTrack?.stableId, matches: track.stableId),
                        !isLoadingTrack,
+                       !isPlaying,
                        usingSFBEngine || audioFile != nil {
                         markLoadedTrackPaused()
                     }
@@ -4359,8 +4995,10 @@ class PlayerEngine: NSObject, ObservableObject {
 
     // MARK: - Queue Management
 
-    func playTrack(_ track: Track, queue: [Track] = []) async {
-        await playTrack(track, queue: queue, preferredIndex: nil)
+    /// `countsAsListenerChoice` is false only for a mix starting its own
+    /// songs, which must not read as the listener having moved on from it.
+    func playTrack(_ track: Track, queue: [Track] = [], countsAsListenerChoice: Bool = true) async {
+        await playTrack(track, queue: queue, preferredIndex: nil, countsAsListenerChoice: countsAsListenerChoice)
     }
 
     /// Starts an exact occurrence from a queue that can contain duplicate
@@ -4373,12 +5011,15 @@ class PlayerEngine: NSObject, ObservableObject {
     private func playTrack(
         _ track: Track,
         queue: [Track],
-        preferredIndex: Int?
+        preferredIndex: Int?,
+        countsAsListenerChoice: Bool = true
     ) async {
         print("🎵 Playing track: \(track.title)")
+        if countsAsListenerChoice { listenerChoiceGeneration &+= 1 }
         outputDeviceBecameUnavailable = false
         cancelOutputRouteSettleResume()
         let intentGeneration = beginPlaybackIntent()
+        transportWantsPlayback = true
 
         // An explicit selection replaces the restored queue, so loading the old
         // restored track first only adds latency (and used to audibly start an
@@ -4443,9 +5084,11 @@ class PlayerEngine: NSObject, ObservableObject {
     /// that normal pending state as an unplayable track and skipping it.
     func playQueueTrack(at index: Int) async {
         guard playbackQueue.indices.contains(index) else { return }
+        listenerChoiceGeneration &+= 1
         outputDeviceBecameUnavailable = false
         cancelOutputRouteSettleResume()
         let intentGeneration = beginPlaybackIntent()
+        transportWantsPlayback = true
 
         currentIndex = index
         let track = playbackQueue[index]
@@ -4468,9 +5111,13 @@ class PlayerEngine: NSObject, ObservableObject {
 
     func nextTrack(autoplay: Bool? = nil) async {
         guard !playbackQueue.isEmpty else { return }
+        // Only ever asked for (buttons, remote commands, intents); a song
+        // ending on its own advances through handleTrackEnd instead.
+        listenerChoiceGeneration &+= 1
         let intentGeneration = beginPlaybackIntent()
         normalizeIndexAndTrack()
-        let shouldAutoplay = autoplay ?? isPlaying
+        let shouldAutoplay = autoplay ?? isPlayingOrAboutToPlay
+        transportWantsPlayback = shouldAutoplay
 
         // Stop at the end of the queue unless queue loop is on, matching what
         // happens when a track finishes on its own. This used to wrap with an
@@ -4516,10 +5163,12 @@ class PlayerEngine: NSObject, ObservableObject {
 
     func previousTrack(autoplay: Bool? = nil) async {
         guard !playbackQueue.isEmpty else { return }
+        listenerChoiceGeneration &+= 1
         let intentGeneration = beginPlaybackIntent()
         normalizeIndexAndTrack()
 
-        let wasPlaying = autoplay ?? isPlaying
+        let wasPlaying = autoplay ?? isPlayingOrAboutToPlay
+        transportWantsPlayback = wasPlaying
 
         if playbackTime > 3.0 {
             await seek(to: 0)
@@ -4578,7 +5227,17 @@ class PlayerEngine: NSObject, ObservableObject {
         }
     }
 
+    /// What Next/Previous should preserve: playing now, or in the middle of
+    /// switching to a song that is meant to play. See `transportWantsPlayback`.
+    private var isPlayingOrAboutToPlay: Bool {
+        if isPlaying { return true }
+        guard transportWantsPlayback else { return false }
+        return isLoadInFlight || isAdvancingTrack || playbackState == .loading
+            || (pendingCloudPlaybackTask != nil && pendingCloudPlaybackShouldAutoplay)
+    }
+
     private func markLoadedTrackPaused() {
+        transportWantsPlayback = false
         cancelPendingCompletions()
         if !usingSFBEngine {
             playerNode.stop()
@@ -4762,6 +5421,9 @@ class PlayerEngine: NSObject, ObservableObject {
         // run them off the main thread so the UI never freezes
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
+                // Here rather than on main: any wait for a stop()'s release
+                // in flight is spent off the main thread too.
+                PlayerEngine.cancelPendingAudioSessionRelease()
                 do {
                     let session = AVAudioSession.sharedInstance()
 
@@ -4806,6 +5468,8 @@ class PlayerEngine: NSObject, ObservableObject {
         let carPlaySceneIsActive = sfbAudioManager.isCarPlayEnvironment
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
+                // May activate below; see resetAudioSessionForNative().
+                PlayerEngine.cancelPendingAudioSessionRelease()
                 do {
                     let session = AVAudioSession.sharedInstance()
                     let isCarPlayEnvironment = carPlaySceneIsActive
@@ -4865,6 +5529,9 @@ class PlayerEngine: NSObject, ObservableObject {
                 await self?.updatePlaybackTime()
             }
         }
+        // Slack lets iOS coalesce this wake-up with others; a label that
+        // updates a few ms late is invisible.
+        playbackTimer?.tolerance = 0.05
     }
 
     private var lastControlCenterUpdate: TimeInterval = 0
@@ -4873,6 +5540,11 @@ class PlayerEngine: NSObject, ObservableObject {
         // Handle SFBAudioEngine timing
         if usingSFBEngine {
             playbackTime = sfbAudioManager.currentTime
+            // The cached value above can be a full 0.1s poll old; correct the
+            // lyrics clock from the player itself.
+            if isPlaying, let live = sfbAudioManager.livePlaybackTime {
+                progress.refineAnchor(reportedTime: live)
+            }
 
             // Check for completion - but see checkIfTrackEnded(): a queued
             // gapless successor owns this transition.
@@ -4898,6 +5570,7 @@ class PlayerEngine: NSObject, ObservableObject {
         // Only update playback time if we're actually playing (prevents drift during pause/resume)
         if isPlaying {
             playbackTime = calculatedTime
+            progress.refineAnchor(reportedTime: calculatedTime)
         }
 
         // Remove this duplicate detection - it's handled by checkIfTrackEnded()
@@ -5006,12 +5679,14 @@ class PlayerEngine: NSObject, ObservableObject {
     func suspendUITimersForBackground() {
         isInBackground = true
         stopPlaybackTimer()
+        sfbAudioManager.setBackgroundPolling(true)
         print("⏸️ Suspended UI timers for background")
     }
 
     /// Restart UI timers when returning to foreground.
     func resumeUITimersForForeground() {
         isInBackground = false
+        sfbAudioManager.setBackgroundPolling(false)
         if isPlaying {
             startPlaybackTimer()
         }
@@ -5113,7 +5788,7 @@ class PlayerEngine: NSObject, ObservableObject {
         }
 
         do {
-            let url = URL(fileURLWithPath: track.path)
+            let url = DatabaseManager.localFileURL(forStoredPath: track.path)
             // Artwork is cosmetic: request the download but do not sit waiting
             // on it. The track's own load already waits where it matters.
             try await cloudDownloadManager.ensureLocal(url, downloadTimeout: 0)
@@ -5640,6 +6315,7 @@ class PlayerEngine: NSObject, ObservableObject {
             print("🎧 Audio session interrupted (alarm/call) - skipping Siri background session keepalive")
             return
         }
+        Self.cancelPendingAudioSessionRelease()
         do {
             // Don't call setCategory here - changing category/options on a live
             // session forces a hardware reconfiguration that stops playback
@@ -5744,37 +6420,33 @@ class PlayerEngine: NSObject, ObservableObject {
         }
     }
 
-    func restoreUIStateOnly() async {
+    @discardableResult
+    private func restoreUIStateOnly() async -> SavedSessionRestoreOutcome {
         guard !hasRestoredState else {
             print("⏭️ Player state already restored or replaced by an explicit selection")
-            return
+            return currentTrack == nil ? .nothingSaved : .superseded
         }
         let expectedPlaybackIntentGeneration = playbackIntentGeneration
 
         guard let playerStateDict = UserDefaults.standard.dictionary(forKey: "CosmosPlayerState") else {
             print("📭 No saved player state found in UserDefaults")
-            return
+            return .nothingSaved
         }
 
-        guard let lastSavedAt = playerStateDict["lastSavedAt"] as? Date else {
-            print("🚫 Invalid saved state format")
-            return
-        }
-
-        print("🔄 Restoring UI state only from \(lastSavedAt)")
-
-        // Don't restore if the saved state is too old (more than 7 days)
-        let daysSinceLastSave = Date().timeIntervalSince(lastSavedAt) / (24 * 60 * 60)
-        if daysSinceLastSave > 7 {
-            print("⏰ Saved state is too old (\(Int(daysSinceLastSave)) days), skipping restore")
-            return
-        }
-
-        // Find the current track by stable ID
+        // The dictionary can also hold only the repeat/shuffle modes, which are
+        // saved the moment they change (persistPlaybackModesIfChanged) - before
+        // any session was ever saved. That is "nothing to restore", not an
+        // invalid state.
         guard let currentTrackStableId = playerStateDict["currentTrackStableId"] as? String else {
-            print("🚫 No current track in saved state")
-            return
+            print("📭 No saved song in the player state")
+            return .nothingSaved
         }
+
+        // No age limit any more. Seven days dropped the session of anyone who
+        // only listens in the car at the weekend, so CarPlay and "Resume
+        // Playback" started the library from the top instead.
+        let lastSavedAt = playerStateDict["lastSavedAt"] as? Date
+        print("🔄 Restoring UI state only from \(lastSavedAt.map { "\($0)" } ?? "an undated save")")
 
         do {
             let track = try DatabaseManager.shared.read { db in
@@ -5783,7 +6455,7 @@ class PlayerEngine: NSObject, ObservableObject {
 
             guard let restoredTrack = track else {
                 print("🚫 Could not find saved track with ID: \(currentTrackStableId)")
-                return
+                return .nothingSaved
             }
 
             // Restore queue by finding tracks with stable IDs
@@ -5794,14 +6466,14 @@ class PlayerEngine: NSObject, ObservableObject {
             let originalQueueTracks = try DatabaseManager.shared.getTracksByStableIdsPreservingOrder(originalQueueTrackIds)
 
             // Restore UI state only - no audio loading
-            await MainActor.run {
+            return await MainActor.run { () -> SavedSessionRestoreOutcome in
                 // Database reads may take long enough for Siri, CarPlay or the UI
                 // to install a newer selection. Restoration must never overwrite
                 // that intent when it finally reaches the main actor again.
                 guard !self.hasRestoredState,
                       self.playbackIntentGeneration == expectedPlaybackIntentGeneration else {
                     print("⏭️ Saved player state was superseded while it was being read")
-                    return
+                    return .superseded
                 }
                 self.hasRestoredState = true
 
@@ -5859,10 +6531,16 @@ class PlayerEngine: NSObject, ObservableObject {
 
                 // Normalize index and track after restoration
                 self.normalizeIndexAndTrack()
+
+                // Lock screen and CarPlay otherwise stay blank until audio
+                // loads, with nothing for their Play button to resume.
+                self.updateNowPlayingInfoEnhanced()
+                return .restored
             }
 
         } catch {
             print("❌ Failed to restore UI state: \(error)")
+            return .failed
         }
     }
 
@@ -5995,4 +6673,83 @@ enum PlayerError: Error {
     case invalidAudioFile
     case audioEngineError
     case configurationError
+}
+
+/// Deactivates the audio session after a terminal stop on a serial utility
+/// queue, without ever letting that deactivation undo a newer activation.
+///
+/// Moving `setActive(false)` off the main thread opens exactly one hazard:
+/// Play pressed while the release is still queued or running activates the
+/// session on another thread, and a deactivation landing after that would
+/// leave the new song with an inactive session - silence, or the route handed
+/// to another app under it. So releases carry a generation token and
+/// `cancelPending()` bumps it: a release that has not started sees a newer
+/// token and does nothing; one already inside `setActive(false)` is waited out
+/// (`queue.sync`) so the caller's activation comes after it. Play checks
+/// `isReleasing` first and waits with `waitForRunningRelease()` instead, off
+/// the main thread, so the blocking wait remains only as a backstop for the
+/// other activation paths (and the load paths already call it off main).
+///
+/// No deadlock: the queue runs nothing but these releases, and nothing a
+/// release can set off waits for the main thread - PlayerEngine's audio
+/// session observers run on the posting thread and only hop to main
+/// asynchronously, and SFBAudioPlayer's notification callbacks take only its
+/// own engine lock (its delegate hops to main with a Task).
+/// `cancelPending()` must not be called from the queue itself.
+private final class AudioSessionReleaseGate: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "dev.clq.Cosmos.audioSessionRelease", qos: .utility)
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var releasing = false
+
+    func scheduleRelease() {
+        let token: UInt64 = lock.withLock {
+            generation &+= 1
+            return generation
+        }
+        queue.async { [self] in
+            // Checked and marked under one lock, so cancelPending() either
+            // stops this release or knows it has to wait for it.
+            let proceed: Bool = lock.withLock {
+                guard generation == token else { return false }
+                releasing = true
+                return true
+            }
+            guard proceed else {
+                print("🎧 Audio session release skipped - playback started again first")
+                return
+            }
+            defer { lock.withLock { releasing = false } }
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                print("🎧 Released audio session after terminal stop")
+            } catch {
+                // Keep the transport stopped even if mediaserverd is
+                // temporarily unavailable. A later activation retries setup.
+                print("⚠️ Could not release audio session after terminal stop: \(error)")
+            }
+        }
+    }
+
+    /// True while a release is inside `setActive(false)`.
+    var isReleasing: Bool { lock.withLock { releasing } }
+
+    /// Returns once the release running now (if any) has finished, without
+    /// blocking the caller's thread: the queue is serial, so this block runs
+    /// after it.
+    func waitForRunningRelease() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { continuation.resume() }
+        }
+    }
+
+    func cancelPending() {
+        let mustWait: Bool = lock.withLock {
+            generation &+= 1
+            return releasing
+        }
+        guard mustWait else { return }
+        print("🎧 Waiting for the audio session release in progress before activating")
+        queue.sync {}
+    }
 }

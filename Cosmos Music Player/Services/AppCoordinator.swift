@@ -76,7 +76,21 @@ class AppCoordinator: ObservableObject {
     }
     
     func initialize() async {
+        let signpost = Perf.begin("AppCoordinator.initialize")
+        defer { Perf.end("AppCoordinator.initialize", signpost) }
         print("🚀 AppCoordinator.initialize() started")
+
+        // Started before the iCloud work below, which can take seconds: a
+        // Play from the lock screen or CarPlay in that window should resume
+        // the saved song, not find nothing loaded. Not awaited: when the
+        // database cannot be read yet the restore retries for ~2.4 s, and
+        // waiting for it here (and again at the end, which started a second
+        // round of retries) delayed every launch step behind it by up to
+        // ~5 s. Nothing below needs the restored session; CarPlay and the
+        // intents await ensureSavedStateRestored() themselves.
+        Task { @MainActor [playerEngine] in
+            await playerEngine.ensureSavedStateRestored()
+        }
 
         // Resolve the iCloud container once, off the main actor, before
         // anything asks for it. Everything downstream then hits the cache.
@@ -152,10 +166,18 @@ class AppCoordinator: ObservableObject {
             print("App initialized in offline mode")
         }
 
-        // Finish state restoration before publishing initialization. The player
-        // also guards this work with its playback-intent generation so an
-        // already-arrived Siri or CarPlay selection still wins.
-        await playerEngine.restoreUIStateOnly()
+        // A restore that failed at the start (database still opening) gets
+        // one more try now that startup work is done; one still in flight is
+        // simply joined. Again not awaited - publishing initialization does
+        // not depend on it, and the player's playback-intent generation keeps
+        // an already-arrived Siri or CarPlay selection winning.
+        Task { @MainActor [playerEngine] in
+            await playerEngine.ensureSavedStateRestored()
+        }
+
+        // Notices songs deleted from iCloud Drive / Documents without waiting
+        // for the next scheduled scan (which may be a day or a week away).
+        ICloudDeletionMonitor.shared.activate()
 
         isInitialized = true
     }
@@ -454,7 +476,9 @@ class AppCoordinator: ObservableObject {
     private func runPostIndexMaintenance() async {
         print("🔄 AppCoordinator: Starting deferred post-index maintenance...")
         await verifyDatabaseRelationships()
-        await fileCleanupManager.checkForOrphanedFiles()
+        await fileCleanupManager.checkForOrphanedFiles(
+            skippingIncompleteRoots: libraryIndexer.lastCompletedScanIncompleteRoots
+        )
         await pruneCachesForDeletedContent()
         print("✅ AppCoordinator: Deferred post-index maintenance completed")
     }
@@ -1151,6 +1175,16 @@ class AppCoordinator: ObservableObject {
             return
         }
 
+        // Siri reaches a backgrounded app whose database may be suspended;
+        // keep it awake for this request (SiriPlayRouter owns the newer
+        // identifiers: liked songs, mixes, radios, albums, queue options).
+        DatabaseSuspensionCoordinator.shared.beginHold()
+        defer { DatabaseSuspensionCoordinator.shared.endHold() }
+        let completion = SiriPlayRouter.applyingPlaybackOptions(of: intent, to: completion)
+        if await SiriPlayRouter.handle(intent, identifier: identifier, completion: completion) {
+            return
+        }
+
         do {
             if identifier.hasPrefix("search_song_") {
                 let songName = String(identifier.dropFirst(12)) // Remove "search_song_" prefix
@@ -1261,15 +1295,13 @@ class AppCoordinator: ObservableObject {
             } else if identifier.hasPrefix("search_artist_") {
                 let artistName = String(identifier.dropFirst(14))
                 print("🎤 Searching for artist: '\(artistName)'")
-                let artists = try databaseManager.searchArtists(query: artistName)
-                if let artist = artists.first, let artistId = artist.id {
-                    let tracks = try databaseManager.getTracksByArtistId(artistId)
-                    if let firstTrack = tracks.first {
-                        await prepareSiriAudioSession()
-                        await playerEngine.playTrack(firstTrack, queue: tracks)
-                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
-                        return
-                    }
+                let tracks = try databaseManager.tracksForSpokenArtist(artistName)
+                SiriDiag.log("APP artist '\(artistName)' matched \(tracks.count) songs")
+                if let firstTrack = tracks.first {
+                    await prepareSiriAudioSession()
+                    await playerEngine.playTrack(firstTrack, queue: tracks)
+                    completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    return
                 }
                 completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
             } else if identifier.hasPrefix("search_any_") {
@@ -1294,14 +1326,12 @@ class AppCoordinator: ObservableObject {
                         return
                     }
                 }
-                if let artist = try databaseManager.searchArtists(query: name).first, let artistId = artist.id {
-                    let artistTracks = try databaseManager.getTracksByArtistId(artistId)
-                    if let firstTrack = artistTracks.first {
-                        await prepareSiriAudioSession()
-                        await playerEngine.playTrack(firstTrack, queue: artistTracks)
-                        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
-                        return
-                    }
+                let artistTracks = try databaseManager.tracksForSpokenArtist(name)
+                if let firstTrack = artistTracks.first {
+                    await prepareSiriAudioSession()
+                    await playerEngine.playTrack(firstTrack, queue: artistTracks)
+                    completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+                    return
                 }
                 if let playlist = try databaseManager.searchPlaylists(query: name).first, let playlistId = playlist.id {
                     let items = try databaseManager.getPlaylistItems(playlistId: playlistId)
@@ -1342,6 +1372,7 @@ class AppCoordinator: ObservableObject {
                         // This is a favorite track - queue all favorites
                         print("🎵 Playing favorite track with favorites queue")
                         let favoritesTracks = try databaseManager.getTracksByStableIdsPreservingOrder(favoriteIds)
+                        await prepareSiriAudioSession()
                         await playerEngine.playTrack(track, queue: favoritesTracks)
                     } else {
                         // Regular track - queue all tracks
@@ -1368,8 +1399,20 @@ class AppCoordinator: ObservableObject {
         let identifier = intent.mediaItems?.first?.identifier ?? "current_track"
         SiriDiag.log("APP handleSiriAddMediaIntent id=\(identifier) destination=\(String(describing: intent.mediaDestination))")
 
+        // Siri usually reaches a backgrounded app with playback paused, where
+        // DatabaseSuspensionCoordinator has GRDB suspended: every write below
+        // failed with "Database is suspended" and Siri answered with a generic
+        // failure. The system keeps the process running while it handles the
+        // intent, so writes are safe until the coordinator is re-synced.
+        DatabaseSuspensionCoordinator.shared.beginHold()
+        defer { DatabaseSuspensionCoordinator.shared.endHold() }
+
         let track: Track?
         if identifier == "current_track" {
+            // A cold launch has nothing loaded until the saved session is back.
+            if playerEngine.currentTrack == nil {
+                await playerEngine.ensureSavedStateRestored()
+            }
             track = playerEngine.currentTrack
         } else {
             track = try? databaseManager.getTrack(byStableId: identifier)

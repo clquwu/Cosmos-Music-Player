@@ -60,6 +60,37 @@ struct Track: Codable, FetchableRecord, PersistableRecord, Equatable {
     var replaygainTrackPeak: Double?
     var replaygainAlbumPeak: Double?
     var hasEmbeddedArt: Bool = false
+    /// First genre when the tag holds several, trimmed, with ID3v1 numeric
+    /// codes such as "(17)" resolved to their names. Nil when untagged.
+    /// Like `modificationDate`, these three default to nil so rows from older
+    /// databases decode before their one-time tag refresh fills them in.
+    var genre: String? = nil
+    /// Rounded tempo. Nil when untagged, non-positive or implausible (> 300),
+    /// which is what a mis-scaled or garbage BPM frame usually looks like.
+    var bpm: Int? = nil
+    /// Four-digit year from the track's own date/year tag. Nil when unknown.
+    var year: Int? = nil
+    /// What on-device listening to ten seconds from the middle of the file
+    /// found (`AudioAnalyzer`), for songs whose tags say nothing about how
+    /// they sound. Loudness, 0 quiet ... 1 loud.
+    var analyzedEnergy: Double? = nil
+    /// Where the sound's weight sits in the spectrum, 0 dark ... 1 bright.
+    var analyzedBrightness: Double? = nil
+    /// A tempo estimate in BPM from how regularly notes start. Nil when the
+    /// analysis was not sure of it - rubato, ambient, speech.
+    var analyzedTempo: Double? = nil
+    /// When the file was analysed, in seconds since 1970; nil until it is.
+    /// Set even when the file could not be read, so it is not tried again
+    /// until it changes: a changed file is re-parsed into a row without it.
+    var analyzedAt: Int64? = nil
+    /// A cover image found next to the file (cover.jpg, folder.png...) for a
+    /// song with no embedded art; nil when it has its own or none was found.
+    /// Set by the scan (`FolderArtworkIndex`) and read by ArtworkManager.
+    var artworkPath: String? = nil
+
+    /// Whether the song has a cover of any kind - embedded or from its folder.
+    /// What every "pick a track whose cover to show" check should ask.
+    var hasArtwork: Bool { hasEmbeddedArt || artworkPath != nil }
     
     static let databaseTableName = "track"
     
@@ -83,6 +114,12 @@ struct Track: Codable, FetchableRecord, PersistableRecord, Equatable {
         case replaygainTrackPeak = "replaygain_track_peak"
         case replaygainAlbumPeak = "replaygain_album_peak"
         case hasEmbeddedArt = "has_embedded_art"
+        case genre, bpm, year
+        case analyzedEnergy = "analyzed_energy"
+        case analyzedBrightness = "analyzed_brightness"
+        case analyzedTempo = "analyzed_tempo"
+        case analyzedAt = "analyzed_at"
+        case artworkPath = "artwork_path"
     }
 }
 

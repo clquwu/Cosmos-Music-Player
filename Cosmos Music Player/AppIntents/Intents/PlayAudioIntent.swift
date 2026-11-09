@@ -48,6 +48,8 @@ struct PlayAudioIntent: AudioPlaybackIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ShowsSnippetIntent {
+        IntentRuntime.begin("PlayAudioIntent")
+        defer { IntentRuntime.end("PlayAudioIntent") }
         SiriDiag.log("APP PlayAudioIntent.perform entity=\(audioEntity.title) attrs=\(playbackAttributes) queueLocation=\(String(describing: queueLocation))")
         let tracks: [Track]
         do {
@@ -60,7 +62,9 @@ struct PlayAudioIntent: AudioPlaybackIntent {
                 }
                 tracks = try playback.tracks(forAlbumId: albumId)
             case .artist(let artist):
-                tracks = try playback.tracks(forArtistName: artist.name)
+                // The entity is already resolved: play exactly that artist.
+                // Matching its name loosely again pulled in similar names.
+                tracks = try playback.tracks(forExactArtistName: artist.name)
             case .playlist(let playlist):
                 guard let playlistId = Int64(playlist.id) else {
                     throw AudioIntentError.noAudioEntity
@@ -84,9 +88,11 @@ struct PlayAudioIntent: AudioPlaybackIntent {
             }
         } catch let error as AudioIntentError {
             Logger.appIntents.error("[PlayAudioIntent] \(error.localizedDescription)")
+            SiriDiag.log("APP PlayAudioIntent failed: \(String(reflecting: error))")
             throw AppIntentError(wrapping: error)
         } catch {
             Logger.appIntents.error("[PlayAudioIntent] Playback failed: \(error.localizedDescription)")
+            SiriDiag.log("APP PlayAudioIntent failed: \(String(reflecting: error))")
             throw AppIntentError(wrapping: AudioIntentError.playbackFailed(underlying: error))
         }
 

@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Cosmos will stop playing in %lld minutes.</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Cosmos arrêtera la lecture dans %#@minutes@.</string>
+		<key>minutes</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>many</key>
+			<string>%lld minutes</string>
+			<key>one</key>
+			<string>%lld minute</string>
+			<key>other</key>
+			<string>%lld minutes</string>
+		</dict>
+	</dict>
+	<key>ai_playlist_created_message</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>« %1$@ » a été créée avec %2$#@songs@.</string>
+		<key>songs</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%2$ld titres</string>
+			<key>one</key>
+			<string>%2$ld titre</string>
+			<key>other</key>
+			<string>%2$ld titres</string>
+		</dict>
+	</dict>
+	<key>albums_count_plural</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@albums@</string>
+		<key>albums</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld albums</string>
+			<key>one</key>
+			<string>%ld album</string>
+			<key>other</key>
+			<string>%ld albums</string>
+		</dict>
+	</dict>
+	<key>delete_files_confirmation_message</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Êtes-vous sûr de vouloir supprimer %#@files@ ? Cette action ne peut pas être annulée.</string>
+		<key>files</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld fichiers</string>
+			<key>one</key>
+			<string>%ld fichier</string>
+			<key>other</key>
+			<string>%ld fichiers</string>
+		</dict>
+	</dict>
+	<key>found_tracks</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@tracks@</string>
+		<key>tracks</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld pistes trouvées</string>
+			<key>one</key>
+			<string>%ld piste trouvée</string>
+			<key>other</key>
+			<string>%ld pistes trouvées</string>
+		</dict>
+	</dict>
+	<key>imported_song_count_plural</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@songs@</string>
+		<key>songs</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld musiques importées</string>
+			<key>one</key>
+			<string>%ld musique importée</string>
+			<key>other</key>
+			<string>%ld musiques importées</string>
+		</dict>
+	</dict>
+	<key>playlist_import_repeats</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@songs@ : une playlist contient chaque musique une seule fois.</string>
+		<key>songs</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld musiques en double n’apparaissent qu’une fois</string>
+			<key>one</key>
+			<string>%ld musique en double n’apparaît qu’une fois</string>
+			<key>other</key>
+			<string>%ld musiques en double n’apparaissent qu’une fois</string>
+		</dict>
+	</dict>
+	<key>playlist_import_summary</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@songs@ sur %2$ld</string>
+		<key>songs</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%1$ld musiques importées</string>
+			<key>one</key>
+			<string>%1$ld musique importée</string>
+			<key>other</key>
+			<string>%1$ld musiques importées</string>
+		</dict>
+	</dict>
+	<key>selected_count_plural</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@items@</string>
+		<key>items</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld sélectionnés</string>
+			<key>one</key>
+			<string>%ld sélectionné</string>
+			<key>other</key>
+			<string>%ld sélectionnés</string>
+		</dict>
+	</dict>
+	<key>songs_count</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@songs@</string>
+		<key>songs</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld musiques</string>
+			<key>one</key>
+			<string>%ld musique</string>
+			<key>other</key>
+			<string>%ld musiques</string>
+		</dict>
+	</dict>
+	<key>why_faded_format</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@weeks@</string>
+		<key>weeks</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>Délaissé depuis %ld semaines</string>
+			<key>one</key>
+			<string>Délaissé depuis %ld semaine</string>
+			<key>other</key>
+			<string>Délaissé depuis %ld semaines</string>
+		</dict>
+	</dict>
+	<key>why_library_format</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@songs@</string>
+		<key>songs</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld titres dans votre bibliothèque</string>
+			<key>one</key>
+			<string>%ld titre dans votre bibliothèque</string>
+			<key>other</key>
+			<string>%ld titres dans votre bibliothèque</string>
+		</dict>
+	</dict>
+	<key>why_listens_format</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@listens@</string>
+		<key>listens</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>many</key>
+			<string>%ld écoutes</string>
+			<key>one</key>
+			<string>%ld écoute</string>
+			<key>other</key>
+			<string>%ld écoutes</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

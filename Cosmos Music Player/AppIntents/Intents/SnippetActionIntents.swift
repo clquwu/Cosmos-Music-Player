@@ -31,7 +31,13 @@ struct ToggleFavoriteIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        try playback.toggleFavorite(trackStableId: trackStableId)
+        IntentRuntime.begin("ToggleFavoriteIntent")
+        defer { IntentRuntime.end("ToggleFavoriteIntent") }
+        do {
+            try playback.toggleFavorite(trackStableId: trackStableId)
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "ToggleFavoriteIntent")
+        }
         return .result()
     }
 }
@@ -61,7 +67,15 @@ struct EnqueueTrackIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        guard let track = try playback.tracks(forStableIds: [trackStableId]).first else {
+        IntentRuntime.begin("EnqueueTrackIntent")
+        defer { IntentRuntime.end("EnqueueTrackIntent") }
+        let found: Track?
+        do {
+            found = try playback.tracks(forStableIds: [trackStableId]).first
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "EnqueueTrackIntent")
+        }
+        guard let track = found else {
             throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
         }
         if playNext {
@@ -94,10 +108,17 @@ struct PlayPlaylistIntent: AudioPlaybackIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        IntentRuntime.begin("PlayPlaylistIntent")
+        defer { IntentRuntime.end("PlayPlaylistIntent") }
         guard let id = Int64(playlistId) else {
             throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
         }
-        let tracks = try playback.tracks(inPlaylist: id)
+        let tracks: [Track]
+        do {
+            tracks = try playback.tracks(inPlaylist: id)
+        } catch {
+            throw IntentRuntime.userFacing(error, in: "PlayPlaylistIntent")
+        }
         guard !tracks.isEmpty else {
             throw AppIntentError(wrapping: AudioIntentError.noAudioEntity)
         }

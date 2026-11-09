@@ -67,18 +67,30 @@ struct ArtistQuery {
 @available(iOS 27.0, *)
 extension ArtistQuery: EntityQuery {
     func entities(for identifiers: [ArtistEntity.ID]) async throws -> [ArtistEntity] {
-        try await store.artistEntities(for: identifiers)
+        do {
+            return try await store.artistEntities(for: identifiers)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "ArtistQuery.entities")
+        }
     }
 
     func suggestedEntities() async throws -> [ArtistEntity] {
-        try await store.allArtistEntities(limit: 50)
+        do {
+            return try await store.topArtistEntities(limit: 100)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "ArtistQuery.suggestedEntities")
+        }
     }
 }
 
 @available(iOS 27.0, *)
 extension ArtistQuery: EntityStringQuery {
     func entities(matching string: String) async throws -> [ArtistEntity] {
-        try await store.artistEntities(matching: string)
+        do {
+            return try await store.artistEntities(matching: string)
+        } catch {
+            throw await IntentRuntime.userFacing(error, in: "ArtistQuery.entities")
+        }
     }
 }
 

@@ -24,6 +24,19 @@ final class IntentPlaybackService {
         playerEngine.play()
     }
 
+    /// Brings back the saved session when the intent cold-launched the app,
+    /// so "resume" continues where the user left off.
+    func restoreSavedSession() async {
+        await playerEngine.ensureSavedStateRestored()
+    }
+
+    /// Resumes a restored session from a background launch, which needs the
+    /// same audio-session preparation as starting new playback.
+    func resumeRestoredSession() async {
+        await coordinator.prepareSiriAudioSession()
+        playerEngine.play()
+    }
+
     func pause() {
         playerEngine.pause()
     }
@@ -120,12 +133,20 @@ final class IntentPlaybackService {
         try database.getTracksByAlbumId(albumId)
     }
 
+    /// An artist name that is already resolved (an entity Siri picked):
+    /// that artist exactly; the loose match only when no name is equal.
+    func tracks(forExactArtistName name: String) throws -> [Track] {
+        let wanted = ArtistMatcher.normalized(name)
+        let exact = try database.getAllArtists().filter { ArtistMatcher.normalized($0.name) == wanted }
+        guard !exact.isEmpty else { return try tracks(forArtistName: name) }
+        var seen = Set<String>()
+        return try exact.compactMap(\.id).flatMap { try database.getTracksByArtistId($0) }
+            .filter { seen.insert($0.stableId).inserted }
+    }
+
+    /// A spoken or typed name, matched loosely (misheard names, spellings).
     func tracks(forArtistName name: String) throws -> [Track] {
-        guard let artist = try database.getAllArtists().first(where: { $0.name == name }),
-              let artistId = artist.id else {
-            return []
-        }
-        return try database.getTracksByArtistId(artistId)
+        try database.tracksForSpokenArtist(name)
     }
 
     func searchPlaylists(query: String) throws -> [Playlist] {
@@ -186,13 +207,16 @@ final class IntentPlaybackService {
         if mix.savedPlaylistId != nil {
             return (mix.title, true)
         }
-        let playlist = try coordinator.createPlaylist(title: mix.title)
+        // A name already taken: the mix gets its own ("Title 2") rather
+        // than sitting beside, or merging into, the listener's.
+        let title = try DatabaseManager.shared.availablePlaylistTitle(mix.title)
+        let playlist = try coordinator.createPlaylist(title: title)
         guard let playlistId = playlist.id else { return nil }
         for track in mix.tracks {
             try coordinator.addToPlaylist(playlistId: playlistId, trackStableId: track.stableId)
         }
         mix.savedPlaylistId = playlistId
         pendingMix = mix
-        return (mix.title, false)
+        return (title, false)
     }
 }

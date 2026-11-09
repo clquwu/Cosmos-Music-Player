@@ -52,10 +52,14 @@ final class SpotlightLibraryIndexer {
 
     func reindexAll() async {
         do {
-            let songs = try store.allSongEntities()
-            let albums = try store.allAlbumEntities()
-            let artists = try store.allArtistEntities()
-            let playlists = try store.allPlaylistEntities()
+            // Built off the main actor: every song, album, artist and
+            // playlist in the library, which on a large one stalled the UI
+            // for hundreds of milliseconds after each launch and scan.
+            let store = self.store
+            let (songs, albums, artists, playlists) = try await Task.detached(priority: .utility) {
+                (try store.allSongEntities(), try store.allAlbumEntities(),
+                 try store.allArtistEntities(), try store.allPlaylistEntities())
+            }.value
 
             try await CSSearchableIndex(name: Self.indexName).deleteAllSearchableItems()
             try await indexBatched(songs)

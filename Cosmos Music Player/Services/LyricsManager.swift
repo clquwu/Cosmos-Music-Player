@@ -31,9 +31,16 @@ struct Lyrics: Codable {
     let syncedLyrics: [LyricsLine]
     let isInstrumental: Bool
     let source: LyricsSource
+    /// The user's own correction for this song, in seconds; positive shows the
+    /// lyrics earlier (the LRC `[offset:]` convention, in seconds). Optional so
+    /// cache files written before it existed still decode, and kept here rather
+    /// than anywhere else so it rides the existing per-song disk cache.
+    var userOffset: TimeInterval? = nil
 
     enum LyricsSource: String, Codable {
         case embedded
+        /// A `<song>.lrc` file beside the audio file.
+        case sidecar
         case lrclib
         case none
     }
@@ -43,6 +50,12 @@ actor LyricsManager {
     static let shared = LyricsManager()
 
     private var cache: [String: Lyrics] = [:]
+    /// Tracks whose folder had no sidecar `.lrc`, with that folder's
+    /// modification date when it was looked at. Lets a cache hit skip the
+    /// folder listing `sidecarLyricsURL` falls back to - adding, removing or
+    /// renaming a file changes the folder's date, so a newly dropped-in
+    /// `.lrc` is still noticed on the next open.
+    private var noSidecarFolderDates: [String: Date] = [:]
     private let baseURL = "https://lrclib.net/api"
     private let fileManager = FileManager.default
     private let encoder = JSONEncoder()
@@ -64,23 +77,25 @@ actor LyricsManager {
     /// does not have stops costing three network round trips every time its
     /// screen is opened.
     func getLyrics(for track: Track) async -> Lyrics? {
-        if let cached = cache[track.stableId] {
+        let signpost = Perf.begin("Lyrics load")
+        defer { Perf.end("Lyrics load", signpost) }
+        if let cached = cache[track.stableId], !isCachedDescription(cached) {
             print("📝 Using cached lyrics for: \(track.title)")
-            return cached
+            return await preferringNewerSidecar(over: cached, for: track)
         }
 
-        if let diskCached = await loadLyricsFromDisk(trackId: track.stableId) {
+        if let diskCached = await loadLyricsFromDisk(trackId: track.stableId), !isCachedDescription(diskCached) {
             print("📝 Loaded lyrics from disk for: \(track.title)")
             cache[track.stableId] = diskCached
-            return diskCached
+            return await preferringNewerSidecar(over: diskCached, for: track)
         }
 
-        // Embedded lyrics need no network and are the track's own copy, so they
-        // outrank anything lrclib could answer.
-        if let embedded = await getEmbeddedLyrics(for: track) {
-            print("📝 Found embedded lyrics for: \(track.title)")
-            await store(embedded, for: track.stableId)
-            return embedded
+        // Lyrics on the device need no network and are the user's own copy, so
+        // they outrank anything lrclib could answer.
+        if let local = await getLocalLyrics(for: track) {
+            print("📝 Found local (\(local.source.rawValue)) lyrics for: \(track.title)")
+            await store(local, for: track.stableId)
+            return local
         }
 
         if isMissRemembered(for: track.stableId) {
@@ -115,9 +130,9 @@ actor LyricsManager {
         cache.removeValue(forKey: track.stableId)
         forgetMiss(for: track.stableId)
 
-        if let embedded = await getEmbeddedLyrics(for: track) {
-            await store(embedded, for: track.stableId)
-            return embedded
+        if let local = await getLocalLyrics(for: track) {
+            await store(local, for: track.stableId)
+            return local
         }
 
         guard case .found(let lyrics) = await fetchFromLRCLib(for: track) else {
@@ -141,8 +156,37 @@ actor LyricsManager {
         await saveLyricsToDisk(lyrics: lyrics, trackId: stableId)
     }
 
+    // MARK: - User timing offset
+
+    /// The per-song correction last saved for this track, if any.
+    func userOffset(for stableId: String) async -> TimeInterval? {
+        if let cached = cache[stableId] { return cached.userOffset }
+        return await loadLyricsFromDisk(trackId: stableId)?.userOffset
+    }
+
+    /// Saves the user's timing correction alongside the song's cached lyrics,
+    /// so it survives relaunches and offline use without a store of its own.
+    /// Zero is stored as nil, which keeps an untouched song's file unchanged.
+    func setUserOffset(_ offset: TimeInterval, for stableId: String) async {
+        var lyrics: Lyrics
+        if let cached = cache[stableId] {
+            lyrics = cached
+        } else if let diskCached = await loadLyricsFromDisk(trackId: stableId) {
+            lyrics = diskCached
+        } else {
+            return
+        }
+
+        let normalized: TimeInterval? = abs(offset) < 0.001 ? nil : offset
+        guard lyrics.userOffset != normalized else { return }
+        lyrics.userOffset = normalized
+        cache[stableId] = lyrics
+        await saveLyricsToDisk(lyrics: lyrics, trackId: stableId)
+    }
+
     func clearCache() {
         cache.removeAll()
+        noSidecarFolderDates.removeAll()
 
         // Clear disk cache
         Task {
@@ -152,10 +196,154 @@ actor LyricsManager {
         print("🗑️ Lyrics cache cleared")
     }
 
+    // MARK: - Local Lyrics
+
+    /// Lyrics from the device, best first: embedded synced, a sidecar `.lrc`,
+    /// then embedded unsynced. A sidecar is something the user put there on
+    /// purpose, usually precisely because the file's own tag is plain text, so
+    /// it outranks that - but not a synced tag, which is the track's own copy.
+    private func getLocalLyrics(for track: Track) async -> Lyrics? {
+        let embedded = await getEmbeddedLyrics(for: track)
+        if let embedded, !embedded.syncedLyrics.isEmpty {
+            return embedded
+        }
+
+        let sidecar = await getSidecarLyrics(for: track)
+        if let sidecar, !sidecar.syncedLyrics.isEmpty {
+            return sidecar
+        }
+
+        return embedded ?? sidecar
+    }
+
+    /// Swaps a cached lrclib (or older sidecar) result for a sidecar `.lrc`
+    /// that appeared or changed after it was cached.
+    ///
+    /// Everything is cached forever per song, so without this an `.lrc` the
+    /// user drops in to fix a wrong lrclib match would never be read. The
+    /// modification-date test is what keeps a version the user explicitly
+    /// picked from the lrclib list winning over an older sidecar.
+    private func preferringNewerSidecar(over cached: Lyrics, for track: Track) async -> Lyrics {
+        guard cached.source == .lrclib || cached.source == .sidecar else { return cached }
+
+        let audioURL = DatabaseManager.localFileURL(forStoredPath: track.path)
+        // Cache hits stay cheap: one stat of the folder instead of listing it
+        // every time the lyrics are opened.
+        let folderDate = Self.modificationDate(of: audioURL.deletingLastPathComponent())
+        if let folderDate, noSidecarFolderDates[track.stableId] == folderDate {
+            return cached
+        }
+        guard let sidecarURL = Self.sidecarLyricsURL(for: audioURL) else {
+            if let folderDate {
+                noSidecarFolderDates[track.stableId] = folderDate
+            }
+            return cached
+        }
+        noSidecarFolderDates[track.stableId] = nil
+        guard let sidecarDate = Self.modificationDate(of: sidecarURL),
+              let cacheURL = getLyricsFileURL(trackId: track.stableId),
+              let cachedDate = Self.modificationDate(of: cacheURL),
+              sidecarDate > cachedDate,
+              let sidecar = await readSidecarLyrics(at: sidecarURL),
+              !sidecar.syncedLyrics.isEmpty || cached.syncedLyrics.isEmpty else {
+            return cached
+        }
+
+        print("📝 Using newer sidecar lyrics for: \(track.title)")
+        await store(sidecar, for: track.stableId)
+        return sidecar
+    }
+
+    // MARK: - Sidecar Lyrics
+
+    /// Larger than any real lyrics file; anything bigger is not one.
+    private static let maximumSidecarSize = 1_000_000
+
+    private func getSidecarLyrics(for track: Track) async -> Lyrics? {
+        // Same resolution as the embedded read: follows the app container if
+        // iOS moved it. A security-scoped external file's sibling is not
+        // covered by that file's own bookmark, so for those this finds nothing
+        // unless the folder itself was granted.
+        let audioURL = DatabaseManager.localFileURL(forStoredPath: track.path)
+        guard let sidecarURL = Self.sidecarLyricsURL(for: audioURL) else { return nil }
+        return await readSidecarLyrics(at: sidecarURL)
+    }
+
+    private func readSidecarLyrics(at url: URL) async -> Lyrics? {
+        guard let data = await readFileData(url),
+              !data.isEmpty, data.count <= Self.maximumSidecarSize,
+              let text = Self.decodeSidecarText(data) else {
+            return nil
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let lyrics = parseLyrics(trimmed, source: .sidecar)
+        guard !lyrics.syncedLyrics.isEmpty || !lyrics.plainLyrics.isEmpty else { return nil }
+        print("📝 Read sidecar lyrics: \(url.lastPathComponent)")
+        return lyrics
+    }
+
+    /// `<basename>.lrc` beside the audio file, matching the extension in any
+    /// case. Also recognises an iCloud placeholder (`.<name>.lrc.icloud`) for
+    /// one that has not been downloaded yet; the coordinated read fetches it.
+    private nonisolated static func sidecarLyricsURL(for audioURL: URL) -> URL? {
+        let directory = audioURL.deletingLastPathComponent()
+        let baseName = audioURL.deletingPathExtension().lastPathComponent
+        let fileManager = FileManager.default
+
+        // The usual spellings first, so the common case costs no listing.
+        for ext in ["lrc", "LRC"] {
+            let candidate = directory.appendingPathComponent(baseName).appendingPathExtension(ext)
+            if fileManager.fileExists(atPath: candidate.path) { return candidate }
+        }
+
+        guard let names = try? fileManager.contentsOfDirectory(atPath: directory.path) else { return nil }
+        let wantedBase = baseName.precomposedStringWithCanonicalMapping
+
+        for name in names {
+            var realName = name
+            if realName.hasPrefix("."), realName.lowercased().hasSuffix(".icloud") {
+                realName = String(realName.dropFirst().dropLast(".icloud".count))
+            }
+
+            let nameURL = URL(fileURLWithPath: realName)
+            guard nameURL.pathExtension.lowercased() == "lrc",
+                  nameURL.deletingPathExtension().lastPathComponent
+                    .precomposedStringWithCanonicalMapping == wantedBase else {
+                continue
+            }
+            return directory.appendingPathComponent(realName)
+        }
+
+        return nil
+    }
+
+    private nonisolated static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// LRC files in the wild are UTF-8 (with or without a BOM), UTF-16 from
+    /// Windows tools, or a legacy single-byte code page.
+    private nonisolated static func decodeSidecarText(_ data: Data) -> String? {
+        let text: String?
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            text = String(data: data, encoding: .utf16)
+        } else {
+            text = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .windowsCP1252)
+                ?? String(data: data, encoding: .isoLatin1)
+        }
+        guard var text else { return nil }
+        if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+        return text
+    }
+
     // MARK: - Embedded Lyrics
 
     private func getEmbeddedLyrics(for track: Track) async -> Lyrics? {
-        let url = URL(fileURLWithPath: track.path)
+        let url = DatabaseManager.localFileURL(forStoredPath: track.path)
         let ext = url.pathExtension.lowercased()
 
         switch ext {
@@ -479,7 +667,7 @@ actor LyricsManager {
         }
 
         offset = descriptorEnd + terminatorLength(for: encoding)
-        var lrcLines: [String] = []
+        var entries: [(timestampMs: UInt32, text: String)] = []
 
         while offset < data.count {
             guard let textEnd = findStringTerminator(in: data, from: offset, encoding: encoding) else {
@@ -494,18 +682,102 @@ actor LyricsManager {
             let timestampMs = readBigEndianUInt32(from: data, offset: offset)
             offset += 4
 
-            guard let text = decodeText(textData, encoding: encoding), !text.isEmpty else {
-                continue
-            }
-
-            let timestamp = Double(timestampMs) / 1000.0
-            let minutes = Int(timestamp / 60)
-            let seconds = Int(timestamp.truncatingRemainder(dividingBy: 60))
-            let centiseconds = Int((timestamp - floor(timestamp)) * 100)
-            lrcLines.append(String(format: "[%02d:%02d.%02d]%@", minutes, seconds, centiseconds, text))
+            // Untrimmed: in word-level frames the spaces and line breaks around
+            // each entry are the only record of where words and lines divide.
+            guard let text = decodeRawText(textData, encoding: encoding) else { continue }
+            entries.append((timestampMs, text))
         }
 
+        let isWordLevel = entries.contains { entry in
+            entry.text.first.map(\.isNewline) == true || entry.text.last.map(\.isNewline) == true
+        }
+
+        let lrcLines = isWordLevel
+            ? Self.mergeWordLevelSYLT(entries)
+            : entries.compactMap { entry -> String? in
+                let text = entry.text.trimmingCharacters(in: .controlCharacters.union(.whitespacesAndNewlines))
+                return text.isEmpty ? nil : "[\(Self.lrcStamp(milliseconds: entry.timestampMs))]\(text)"
+            }
+
         return lrcLines.isEmpty ? nil : lrcLines.joined(separator: "\n")
+    }
+
+    /// Rebuilds lines from a word-level SYLT frame.
+    ///
+    /// Karaoke taggers write one entry per word or syllable and mark a new line
+    /// with a leading (sometimes trailing) line break. Emitting each entry as a
+    /// line of its own turned a verse into a column of single words; this joins
+    /// them back into lines and keeps every word's time as Enhanced LRC, which
+    /// the line parser already turns into exact word timings.
+    private nonisolated static func mergeWordLevelSYLT(_ entries: [(timestampMs: UInt32, text: String)]) -> [String] {
+        var lines: [String] = []
+        var current: [(timestampMs: UInt32, text: String)] = []
+
+        func closeLine() {
+            defer { current.removeAll() }
+            guard let first = current.first else { return }
+            let body = current
+                .map { "<\(lrcStamp(milliseconds: $0.timestampMs))>\($0.text)" }
+                .joined()
+            lines.append("[\(lrcStamp(milliseconds: first.timestampMs))]\(body)")
+        }
+
+        for entry in entries {
+            var text = entry.text.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+
+            if text.first == "\n" {
+                closeLine()
+                text = String(text.drop(while: { $0 == "\n" }))
+            }
+
+            let endsLine = text.last == "\n"
+            // Any break left inside the entry is still a line break in it.
+            let segments = text.split(separator: "\n", omittingEmptySubsequences: false)
+
+            for (index, segment) in segments.enumerated() {
+                if index > 0 { closeLine() }
+                var word = String(segment)
+                // A line's first word does not carry the space that separated
+                // it from the previous line.
+                if current.isEmpty {
+                    word = String(word.drop(while: { $0.isWhitespace }))
+                }
+                guard !word.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+                current.append((entry.timestampMs, word))
+            }
+
+            if endsLine { closeLine() }
+        }
+
+        closeLine()
+        return lines
+    }
+
+    private nonisolated static func lrcStamp(milliseconds: UInt32) -> String {
+        let total = Int(milliseconds)
+        return String(format: "%02d:%02d.%03d", total / 60_000, (total / 1000) % 60, total % 1000)
+    }
+
+    /// `decodeText` without the trimming, for formats where surrounding
+    /// whitespace is meaningful.
+    private nonisolated func decodeRawText(_ data: Data, encoding: UInt8) -> String? {
+        let decoded: String?
+
+        switch encoding {
+        case 0:
+            decoded = String(data: data, encoding: .isoLatin1)
+        case 1:
+            decoded = String(data: data, encoding: .utf16)
+        case 2:
+            decoded = String(data: data, encoding: .utf16BigEndian)
+        case 3:
+            decoded = String(data: data, encoding: .utf8)
+        default:
+            decoded = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        }
+
+        return decoded?.replacingOccurrences(of: "\u{FEFF}", with: "")
     }
 
     private nonisolated func findStringTerminator(in data: Data, from start: Int, encoding: UInt8) -> Int? {
@@ -560,7 +832,20 @@ actor LyricsManager {
         guard !trimmed.isEmpty else { return false }
 
         // Avoid treating generic metadata descriptions as lyrics.
-        return trimmed.contains("\n") || trimmed.contains("[") || trimmed.count > 40
+        guard trimmed.contains("\n") || trimmed.contains("[") || trimmed.count > 40 else { return false }
+
+        // Liner notes and store descriptions end up in lyrics tags too, often
+        // as HTML. Lyrics are short lines; a description is markup or prose.
+        let lower = trimmed.lowercased()
+        if ["<p>", "</p>", "<br", "</div>", "<div", "&nbsp;"].contains(where: lower.contains) {
+            return false
+        }
+        if !trimmed.contains("[") {
+            let lines = trimmed.split(whereSeparator: \.isNewline).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            let averageLength = Double(trimmed.count) / Double(max(lines.count, 1))
+            if averageLength > 120 { return false }
+        }
+        return true
     }
 
     private nonisolated func readLittleEndianUInt64(from data: Data, offset: Int) -> UInt64 {
@@ -625,7 +910,7 @@ actor LyricsManager {
             return .noMatch
         }
         let albumName = (try? getAlbumName(for: track)) ?? nil
-        let duration = Double(track.durationMs ?? 0) / 1000.0
+        let duration = await knownDuration(of: track)
 
         var reachedServer = false
 
@@ -665,7 +950,7 @@ actor LyricsManager {
 
         var best: (candidate: LRCLibResponse, score: Double)?
 
-        for query in queries {
+        queryLoop: for query in queries {
             switch await search(query) {
             case .unreachable:
                 continue
@@ -674,7 +959,18 @@ actor LyricsManager {
                 continue
             case .found(let results):
                 reachedServer = true
-                for candidate in results {
+                for result in results {
+                    // Timestamps from a different cut of the song are wrong by
+                    // exactly the difference, so a synced record has to match
+                    // our running time far more closely than its words do. Its
+                    // plain text may still be the right lyrics, so it stays in
+                    // the running as a plain-only candidate.
+                    let candidate = Self.hasSynced(result) && !Self.isSyncCompatible(result.duration, duration)
+                        ? result.droppingSyncedLyrics()
+                        : result
+                    guard candidate.instrumental
+                            || Self.hasSynced(candidate)
+                            || !(candidate.plainLyrics?.isEmpty ?? true) else { continue }
                     let score = Self.matchScore(
                         candidate: candidate,
                         title: track.title,
@@ -684,15 +980,17 @@ actor LyricsManager {
                     )
                     guard score >= Self.minimumMatchScore else { continue }
                     // A synced copy is the whole reason to keep looking.
-                    let weighted = score + (Self.hasSynced(candidate) ? 0.15 : 0)
+                    let weighted = score + Self.syncedBonus(for: candidate, target: duration)
                     if best == nil || weighted > best!.score {
                         best = (candidate, weighted)
                     }
                 }
                 // A confident synced match ends the search; a weaker one still
-                // lets the free-text query have a turn.
+                // lets the free-text query have a turn. Labelled: a bare
+                // `break` here only left the switch, so the search never
+                // actually stopped early.
                 if let best, Self.hasSynced(best.candidate), best.score >= Self.confidentMatchScore {
-                    break
+                    break queryLoop
                 }
             }
         }
@@ -737,7 +1035,7 @@ actor LyricsManager {
             return []
         }
         let albumName = (try? getAlbumName(for: track)) ?? nil
-        let duration = Double(track.durationMs ?? 0) / 1000.0
+        let duration = await knownDuration(of: track)
 
         var queries: [[URLQueryItem]] = []
         if let albumName, !albumName.isEmpty {
@@ -756,7 +1054,7 @@ actor LyricsManager {
         queries.append([URLQueryItem(name: "q", value: "\(track.title) \(artistName)")])
 
         var seen: Set<Int> = []
-        var scored: [(candidate: LyricsCandidate, score: Double)] = []
+        var scored: [(candidate: LyricsCandidate, score: Double, bonus: Double)] = []
 
         for query in queries {
             guard case .found(let results) = await search(query) else { continue }
@@ -779,7 +1077,8 @@ actor LyricsManager {
                         artist: artistName,
                         album: albumName,
                         duration: duration
-                    )
+                    ),
+                    Self.syncedBonus(for: response, target: duration)
                 ))
             }
         }
@@ -789,8 +1088,7 @@ actor LyricsManager {
         // scorer rejected may be the one the user is looking for. Synced
         // records still sort above plain ones of equal quality.
         return scored
-            .sorted { ($0.score + ($0.candidate.hasSyncedLyrics ? 0.15 : 0))
-                    > ($1.score + ($1.candidate.hasSyncedLyrics ? 0.15 : 0)) }
+            .sorted { ($0.score + $0.bonus) > ($1.score + $1.bonus) }
             .prefix(25)
             .map(\.candidate)
     }
@@ -825,6 +1123,48 @@ actor LyricsManager {
 
     private static func hasSynced(_ response: LRCLibResponse) -> Bool {
         !(response.syncedLyrics?.isEmpty ?? true)
+    }
+
+    /// How far a synced record's running time may stray from ours before its
+    /// timestamps are unusable. lrclib's own /api/get tolerance is 2s; a little
+    /// more absorbs differing silence at the ends without admitting another
+    /// edit of the song.
+    private static let syncedDurationTolerance: TimeInterval = 4
+
+    private static func isSyncCompatible(_ candidate: Double, _ target: Double) -> Bool {
+        // Nothing to compare against: as before, take the record on trust.
+        guard target > 0, candidate > 0 else { return true }
+        return abs(candidate - target) <= syncedDurationTolerance
+    }
+
+    /// The preference for synced lyrics. It used to be a flat 0.15 - more than
+    /// the whole duration component can move a score - so a synced record of
+    /// a different recording beat a plain one of this one. Now it is earned
+    /// only by a record that is the same length to within lrclib's tolerance.
+    private static func syncedBonus(for response: LRCLibResponse, target: Double) -> Double {
+        guard hasSynced(response) else { return 0 }
+        guard target > 0, response.duration > 0 else { return 0.15 }
+        return abs(response.duration - target) <= 2 ? 0.15 : 0
+    }
+
+    /// The track's running time in seconds, or 0 when it cannot be had.
+    ///
+    /// `durationMs` is missing for rows the scanner could not time, and
+    /// without it neither the duration filter nor lrclib's exact-match query
+    /// can do anything - which is how wrong-length synced lyrics got through.
+    /// AVFoundation can usually tell from the header alone.
+    private func knownDuration(of track: Track) async -> Double {
+        if let durationMs = track.durationMs, durationMs > 0 {
+            return Double(durationMs) / 1000.0
+        }
+
+        let url = DatabaseManager.localFileURL(forStoredPath: track.path)
+        guard let time = try? await AVURLAsset(url: url).load(.duration),
+              time.isNumeric else {
+            return 0
+        }
+        let seconds = time.seconds
+        return seconds.isFinite && seconds > 0 ? seconds : 0
     }
 
     private static func matchScore(
@@ -1027,7 +1367,7 @@ actor LyricsManager {
 
     private func parseLyrics(_ text: String, source: Lyrics.LyricsSource) -> Lyrics {
         // Check if lyrics are synced (contain timestamps like [00:12.34] or [00:12.345])
-        let timestampPattern = #"\[(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?\]"#
+        let timestampPattern = #"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]"#
         let hasSyncedLyrics = text.range(of: timestampPattern, options: .regularExpression) != nil
 
         if hasSyncedLyrics {
@@ -1039,39 +1379,84 @@ actor LyricsManager {
         }
     }
 
+    private nonisolated static let leadingTimestampRegex = try? NSRegularExpression(
+        pattern: #"^\s*\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]"#
+    )
+
+    private nonisolated static let offsetTagRegex = try? NSRegularExpression(
+        pattern: #"^\s*\[offset:\s*([+-]?\d+)\s*\]"#,
+        options: [.caseInsensitive, .anchorsMatchLines]
+    )
+
+    /// Parses LRC into time-ordered lines.
+    ///
+    /// Two parts of the format used to be dropped. A line may carry several
+    /// leading timestamps - `[00:12.00][01:40.00]chorus` is how most files
+    /// avoid repeating a chorus - and only the first was kept, so every repeat
+    /// after it went missing and the previous line stayed lit through it. And
+    /// `[offset:N]`, which shifts the whole file by N ms (positive = lyrics
+    /// earlier), was ignored, so files that rely on it ran late or early by
+    /// exactly that much.
     private func parseSyncedLyrics(_ lrcText: String) -> [LyricsLine] {
-        var lines: [LyricsLine] = []
-        let pattern = #"\[(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?\]\s*(.*)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return lines
-        }
+        guard let timestampRegex = Self.leadingTimestampRegex else { return [] }
+
+        let offset = Self.fileOffset(in: lrcText)
+        var lines: [(order: Int, line: LyricsLine)] = []
 
         for line in lrcText.components(separatedBy: .newlines) {
-            let nsLine = line as NSString
-            let range = NSRange(location: 0, length: nsLine.length)
+            let ns = line as NSString
+            var cursor = 0
+            var timestamps: [TimeInterval] = []
 
-            // Match common [mm:ss], [mm:ss.xx], and [mm:ss.xxx] timestamp formats.
-            if let match = regex.firstMatch(in: line, range: range) {
-                let minutes = Double(nsLine.substring(with: match.range(at: 1))) ?? 0
-                let seconds = Double(nsLine.substring(with: match.range(at: 2))) ?? 0
-                let fractionRange = match.range(at: 3)
-                let fractionText = fractionRange.location == NSNotFound ? "0" : nsLine.substring(with: fractionRange)
-                let fractionDivisor = pow(10.0, Double(fractionText.count))
-                let fraction = (Double(fractionText) ?? 0) / fractionDivisor
-                let textRange = match.range(at: 4)
-                let body = textRange.location == NSNotFound ? "" : nsLine.substring(with: textRange)
+            // Consume every leading [mm:ss], [mm:ss.xx] or [mm:ss.xxx].
+            while let match = timestampRegex.firstMatch(
+                in: line,
+                range: NSRange(location: cursor, length: ns.length - cursor)
+            ), match.range.location == cursor {
+                timestamps.append(Self.seconds(of: match, in: ns))
+                cursor = match.range.upperBound
+            }
 
-                let timestamp = (minutes * 60) + seconds + fraction
-                let parsed = Self.parseEnhancedBody(body, lineStart: timestamp)
-                lines.append(LyricsLine(
-                    timestamp: timestamp,
+            guard let first = timestamps.first else { continue }
+
+            let body = ns.substring(from: cursor).trimmingCharacters(in: .whitespaces)
+            let parsed = Self.parseEnhancedBody(body, lineStart: first)
+
+            for timestamp in timestamps {
+                // Word times belong to the first occurrence; a repeat sings the
+                // same words shifted by however far apart the two lines are.
+                let shift = timestamp - first
+                let words = parsed.words?.map {
+                    LyricsWord(timestamp: max(0, $0.timestamp + shift - offset), text: $0.text)
+                }
+                lines.append((lines.count, LyricsLine(
+                    timestamp: max(0, timestamp - offset),
                     text: parsed.text,
-                    words: parsed.words
-                ))
+                    words: words
+                )))
             }
         }
 
-        return lines.sorted { ($0.timestamp ?? 0) < ($1.timestamp ?? 0) }
+        // Stable, so lines sharing a timestamp keep the order the file gave.
+        return lines
+            .sorted { lhs, rhs in
+                let l = lhs.line.timestamp ?? 0
+                let r = rhs.line.timestamp ?? 0
+                return l == r ? lhs.order < rhs.order : l < r
+            }
+            .map(\.line)
+    }
+
+    /// The `[offset:N]` tag, in seconds. Per the LRC spec N is milliseconds and
+    /// a positive value makes the lyrics appear sooner.
+    private nonisolated static func fileOffset(in lrcText: String) -> TimeInterval {
+        guard let regex = offsetTagRegex else { return 0 }
+        let ns = lrcText as NSString
+        guard let match = regex.firstMatch(in: lrcText, range: NSRange(location: 0, length: ns.length)),
+              let milliseconds = Double(ns.substring(with: match.range(at: 1))) else {
+            return 0
+        }
+        return milliseconds / 1000
     }
 
     private nonisolated static let wordTimestampRegex = try? NSRegularExpression(
@@ -1187,6 +1572,14 @@ actor LyricsManager {
         } catch {
             print("❌ Failed to save lyrics to disk: \(error)")
         }
+    }
+
+    /// Liner notes cached as lyrics before the stricter text check existed:
+    /// treated as not cached, so the song is looked up again and the new
+    /// result overwrites them.
+    private func isCachedDescription(_ lyrics: Lyrics) -> Bool {
+        lyrics.source == .embedded && lyrics.syncedLyrics.isEmpty
+            && !lyrics.plainLyrics.isEmpty && !isUsableLyricsText(lyrics.plainLyrics)
     }
 
     private func loadLyricsFromDisk(trackId: String) async -> Lyrics? {
@@ -1360,4 +1753,19 @@ private struct LRCLibResponse: Codable {
     let instrumental: Bool
     let plainLyrics: String?
     let syncedLyrics: String?
+
+    /// The same record with only its plain text, for one whose timestamps
+    /// belong to a different recording.
+    func droppingSyncedLyrics() -> LRCLibResponse {
+        LRCLibResponse(
+            id: id,
+            trackName: trackName,
+            artistName: artistName,
+            albumName: albumName,
+            duration: duration,
+            instrumental: instrumental,
+            plainLyrics: plainLyrics,
+            syncedLyrics: nil
+        )
+    }
 }
